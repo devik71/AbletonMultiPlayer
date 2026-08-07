@@ -23,7 +23,7 @@ except ImportError:  # старіші/інші збірки
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.6.2"
+SCRIPT_VERSION = "0.7.0"
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
