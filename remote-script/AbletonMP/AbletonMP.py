@@ -23,7 +23,7 @@ except ImportError:  # старіші/інші збірки
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.6.1"
+SCRIPT_VERSION = "0.6.2"
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -107,7 +107,8 @@ class AbletonMP(ControlSurface):
         """
         caps = {
             "song.set_data": hasattr(self._doc, "set_data"),
-            "obj.set_data": bool(self._doc.tracks) and hasattr(self._doc.tracks[0], "set_data"),
+            "track.set_data": bool(self._doc.tracks) and hasattr(self._doc.tracks[0], "set_data"),
+            "scene.set_data": bool(self._doc.scenes) and hasattr(self._doc.scenes[0], "set_data"),
         }
         try:
             caps["file_path"] = str(self._doc.file_path) or "(не збережено)"
@@ -318,59 +319,62 @@ class AbletonMP(ControlSurface):
         return v if isinstance(v, str) else ""
 
     def _restore_registry(self):
-        """Піднімає uuid, збережені в .als. Повертає кількість відновлених."""
-        restored = 0
-        per_object = True
+        """Піднімає uuid, збережені в .als. Повертає кількість відновлених.
 
+        Обидва механізми працюють разом, не замість одного: у Live 12 трек тримає
+        set_data, а сцена -- ні, тож частина об'єктів впізнає себе сама, а решту
+        доводиться діставати з мапи на Song. Ранній вихід після першого проходу
+        залишав би сцени без ідентичності назавжди.
+        """
+        by_object = 0
         for reg, objects in ((self._tracks_reg, self._doc.tracks),
                              (self._scenes_reg, self._doc.scenes)):
             for obj in objects:
                 uid = self._obj_stored_id(obj)
                 if uid:
                     reg.bind(uid, obj)
-                    restored += 1
-                else:
-                    per_object = False
+                    by_object += 1
 
-        if restored:
-            self._log("з .als відновлено %d uuid (на об'єктах)" % restored)
-            return restored
-
-        # фолбек: одна мапа на Song, прив'язана до позицій
         try:
             raw = self._doc_str(self._doc.get_data(DATA_KEY_MAP, ""))
             saved = json.loads(raw) if raw else None
         except Exception:
             saved = None
-        if not saved:
-            return 0
 
-        for key, reg, objects in (("tracks", self._tracks_reg, self._doc.tracks),
-                                  ("scenes", self._scenes_reg, self._doc.scenes)):
-            for rec in (saved.get(key) or []):
-                i = rec.get("idx")
-                if isinstance(i, int) and 0 <= i < len(objects):
-                    if not rec.get("name") or self._safe_name(objects[i]) == rec["name"]:
-                        reg.bind(rec.get("id"), objects[i])
-                        restored += 1
-        if restored:
-            self._log("з .als відновлено %d uuid (мапа на Song, %s)"
-                      % (restored, "об'єкти без set_data" if not per_object else "фолбек"))
-        return restored
+        by_map = 0
+        if saved:
+            for key, reg, objects in (("tracks", self._tracks_reg, self._doc.tracks),
+                                      ("scenes", self._scenes_reg, self._doc.scenes)):
+                for rec in (saved.get(key) or []):
+                    i = rec.get("idx")
+                    if not isinstance(i, int) or not (0 <= i < len(objects)):
+                        continue
+                    if reg.id_of(objects[i], create=False):
+                        continue  # об'єкт уже впізнав себе через set_data
+                    if rec.get("name") and self._safe_name(objects[i]) != rec["name"]:
+                        continue
+                    reg.bind(rec.get("id"), objects[i])
+                    by_map += 1
+
+        if by_object or by_map:
+            self._log("з .als відновлено %d uuid (%d на об'єктах, %d з мапи)"
+                      % (by_object + by_map, by_object, by_map))
+        return by_object + by_map
 
     def _persist_registry(self):
-        """Кладе поточні uuid у .als. Сет позначається зміненим -- це очікувано."""
-        ok = True
+        """Кладе поточні uuid у .als. Сет позначається зміненим -- це очікувано.
+
+        Мапа на Song пишеться завжди, а не лише коли пер-об'єктний запис упав:
+        Scene.set_data не кидає винятку, але й не доживає до наступного відкриття
+        файлу, тож детектувати проблему по exception не можна.
+        """
         for reg, objects in ((self._tracks_reg, self._doc.tracks),
                              (self._scenes_reg, self._doc.scenes)):
             for obj in objects:
                 uid = reg.id_of(obj, create=False)
-                if uid and not self._obj_store_id(obj, uid):
-                    ok = False
-        if ok:
-            return
+                if uid:
+                    self._obj_store_id(obj, uid)
 
-        # об'єкти не приймають set_data -- пишемо однією мапою на Song
         snap = {"tracks": [], "scenes": []}
         for key, reg, objects in (("tracks", self._tracks_reg, self._doc.tracks),
                                   ("scenes", self._scenes_reg, self._doc.scenes)):
