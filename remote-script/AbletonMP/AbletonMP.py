@@ -23,7 +23,17 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.9.1"
+SCRIPT_VERSION = "0.10.0"
+
+# Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
+# версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
+# "синхронізація не працює": подія доходить, але приймальний бік про неї не знає.
+APPLY_TYPES = [
+    "TransportSet", "TempoSet",
+    "ClipLaunch", "ClipStop", "SceneLaunch", "StopAllClips",
+    "TrackCreate", "TrackDelete", "SceneCreate", "SceneDelete",
+    "MixerSet", "TrackToggle",
+]
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -97,6 +107,7 @@ class AbletonMP(ControlSurface):
             "live": self._live_version(),
             "script": SCRIPT_VERSION,
             "pid": os.getpid(),
+            "events": APPLY_TYPES,
         })
         self._link.send({"m": "snapshot", "state": self._snapshot()})
         self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
@@ -794,6 +805,15 @@ class AbletonMP(ControlSurface):
             self._apply(msg.get("type"), msg.get("payload") or {}, msg.get("gseq"))
         elif m == "snapshot_request":
             self._link.send({"m": "snapshot", "state": self._snapshot()})
+        elif m == "hello_request":
+            # daemon стартував пізніше за Live і пропустив наш hello
+            self._link.send({
+                "m": "hello",
+                "live": self._live_version(),
+                "script": SCRIPT_VERSION,
+                "pid": os.getpid(),
+                "events": APPLY_TYPES,
+            })
         elif m == "registry_build":
             self._link.send({"m": "registry", "registry": self._build_registry()})
         elif m == "registry_adopt":

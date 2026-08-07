@@ -202,6 +202,23 @@ try {
     if (!hit.test(l2.out)) throw new Error('кліп поїхав не в той трек');
   });
 
+  await check('старіший учасник виявляється при конекті, а не за симптомами', async () => {
+    // bridge, що вдає версію 0.7.0: знає лише транспорт і темп
+    const lOld = launch('live-old', join(root, 'daemon/tools/fake-live.js'), [
+      '--udp-in', '19955', '--udp-out', '19956',
+      '--script', '0.7.0-fake', '--events', 'TransportSet,TempoSet',
+    ], { cwd: join(root, 'daemon') });
+    await waitFor(lOld, /слухаю :19956/);
+    const dOld = launch('daemon-p5', join(root, 'daemon/index.js'), [
+      '--author', 'p5', '--session', SESSION,
+      '--relay', `ws://127.0.0.1:${RELAY_PORT}`,
+      '--udp-in', '19955', '--udp-out', '19956',
+      '--state-dir', tmp, '--project', projectOf('p1'),
+    ], { cwd: join(root, 'daemon') });
+
+    await waitFor(dOld, /НЕСУМІСНІСТЬ.*не вміє застосовувати.*MixerSet/, 15000);
+  });
+
   await check('мікшер: гучність доїхала до партнера', async () => {
     const from = l2.out.length;
     l1.stdin.write('vol 1 0.62\n');

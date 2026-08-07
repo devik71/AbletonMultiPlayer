@@ -128,6 +128,8 @@ udp.on('message', (buf) => {
     case 'hello':
       bridgeAlive = true;
       log(`bridge підключився: Live ${msg.live}, script ${msg.script}, pid ${msg.pid}`);
+      bridgeInfo = { live: msg.live, script: msg.script, events: msg.events || [] };
+      announceCapabilities();
       registryAsked = false; // Live перезавантажився -- його реєстр треба відновити
       bootstrapRegistry();
       drainPending();
@@ -144,6 +146,9 @@ udp.on('message', (buf) => {
         // і без цього виклику сесія лишиться без реєстру назавжди
         bootstrapRegistry();
         drainPending();
+        // heartbeat не несе можливостей bridge, а hello ми пропустили --
+        // без цього запиту розсинхрон версій лишиться невидимим
+        if (!bridgeInfo) toBridge({ m: 'hello_request' });
       }
       break;
     case 'event':
@@ -213,6 +218,7 @@ function connect() {
         pingClock();
         bootstrapRegistry();
         filesync.announce(); // хай партнер одразу знає, що в нас є
+        announceCapabilities();
         break;
       case 'commit':
         onCommit(msg.event);
@@ -236,6 +242,9 @@ function connect() {
         break;
       case 'file_chunk':
         filesync.onChunk(msg);
+        break;
+      case 'compat':
+        log(`НЕСУМІСНІСТЬ: ${msg.text}`);
         break;
       case 'error':
         log(`relay error [${msg.code}]: ${msg.text}`);
@@ -262,6 +271,15 @@ function pingClock() {
 }
 
 // --------------------------------------------------------------------- flow
+
+let bridgeInfo = null;
+
+/** Relay звіряє це між учасниками: подія, якої приймальний бік не знає, доходить
+ *  і мовчки нічого не робить -- зовні це виглядає як "sync не працює". */
+function announceCapabilities() {
+  if (!connected || !bridgeInfo) return;
+  ws.send(JSON.stringify({ m: 'client_info', ...bridgeInfo }));
+}
 
 let samplesWarned = '';
 

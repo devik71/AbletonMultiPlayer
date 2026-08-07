@@ -43,6 +43,19 @@ const sceneRef = (s) => ({ id: s.id });
 const udp = createSocket('udp4');
 const send = (m) => udp.send(Buffer.from(JSON.stringify(m)), PORT_DAEMON, '127.0.0.1');
 
+// --script і --events дозволяють вдати старіший bridge і перевірити,
+// що розсинхрон версій виявляється при конекті
+const sendHello = () =>
+  send({
+    m: 'hello',
+    live: arg('live', 'fake-12.3.8'),
+    script: arg('script', '0.10.0-fake'),
+    pid: process.pid,
+    events: arg('events',
+      'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
+      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle').split(','),
+  });
+
 function emit(type, payload) {
   if (!registryReady && type !== 'TransportSet' && type !== 'TempoSet') {
     return console.log('реєстр ще не готовий — подію не відправлено');
@@ -175,7 +188,8 @@ udp.on('message', (buf) => {
   } catch {
     return;
   }
-  if (msg.m === 'apply') apply(msg.type, msg.payload, msg.gseq);
+  if (msg.m === 'hello_request') sendHello();
+  else if (msg.m === 'apply') apply(msg.type, msg.payload, msg.gseq);
   else if (msg.m === 'snapshot_request') send({ m: 'snapshot', state: snapshot() });
   else if (msg.m === 'registry_build') send({ m: 'registry', registry: buildRegistry() });
   else if (msg.m === 'registry_adopt') adoptRegistry(msg.registry || {});
@@ -184,7 +198,7 @@ udp.on('message', (buf) => {
 
 udp.bind(PORT_SELF, '127.0.0.1', () => {
   console.log(`fake-live: слухаю :${PORT_SELF}, шлю на :${PORT_DAEMON}`);
-  send({ m: 'hello', live: 'fake-12.3.8', script: '0.4.0-fake', pid: process.pid });
+  sendHello();
   send({ m: 'snapshot', state: snapshot() });
   setInterval(() => send({ m: 'heartbeat', t: Date.now() / 1000 }), 2000);
 });

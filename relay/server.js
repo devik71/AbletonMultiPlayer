@@ -227,6 +227,38 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // Розсинхрон версій (vision.md §8) виглядає як "sync не працює": подія
+      // доходить, а приймальний бік про такий тип не знає і мовчки її ковтає.
+      // Тут це стає видимим одразу при конекті, а не після звірки двох логів.
+      case 'client_info': {
+        if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
+        client.info = { live: msg.live, script: msg.script, events: msg.events || [] };
+        for (const other of client.session.clients) {
+          if (other === client || !other.info) continue;
+
+          if (other.info.script !== client.info.script) {
+            const t = `версії скрипта різні: ${client.author}=${client.info.script}, ${other.author}=${other.info.script}`;
+            log(`[${client.session.name}] ${t}`);
+            client.session.broadcast({ m: 'compat', text: t });
+          }
+          if (other.info.live !== client.info.live) {
+            log(`[${client.session.name}] версії Live різні: ${client.author}=${client.info.live}, ${other.author}=${other.info.live}`);
+          }
+
+          const mine = new Set(client.info.events);
+          const theirs = new Set(other.info.events);
+          const gapThem = client.info.events.filter((e) => !theirs.has(e));
+          const gapMe = other.info.events.filter((e) => !mine.has(e));
+          for (const [who, gap] of [[other.author, gapThem], [client.author, gapMe]]) {
+            if (!gap.length) continue;
+            const t = `${who} не вміє застосовувати: ${gap.join(', ')} — ці події в нього не спрацюють`;
+            log(`[${client.session.name}] ${t}`);
+            client.session.broadcast({ m: 'compat', text: t });
+          }
+        }
+        break;
+      }
+
       case 'ping':
         send({ m: 'pong', t0: msg.t0, t1, t2: Date.now() / 1000 });
         break;
