@@ -42,6 +42,36 @@ cd remote-script; .\install.ps1 -Symlink
 Перезапустити Live → Preferences → Link/Tempo/MIDI → Control Surface → **AbletonMP**.
 Лог bridge: `%APPDATA%\AbletonMP\bridge.log`.
 
+## Друга машина
+
+Relay слухає на всіх інтерфейсах, тож другій машині потрібна лише вихідна
+зв'язність до нього — вхідних портів на ній не треба. `--author` має бути різним:
+relay дедуплікує події по парі `(author, lseq)`.
+
+**Проєкт треба копіювати як файл.** uuid лежать усередині `.als`, тож обидві машини,
+відкривши копію того самого файлу, отримають однакову ідентичність ще до обміну.
+Новий сет із такою ж структурою не підійде — там будуть інші uuid.
+
+### Запуск daemon через SSH
+
+Windows OpenSSH тримає сесію в Job-об'єкті з `KILL_ON_JOB_CLOSE`, тому процес,
+запущений звичайним способом, помирає разом із SSH-сесією — `Start-Process` і
+`-WindowStyle Hidden` від цього не рятують. Робочий варіант — створити процес
+через WMI: він не стає нащадком викликача і job на нього не поширюється.
+
+```powershell
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = 'cmd.exe /c "C:\Users\<user>\run-daemon.cmd"'
+}
+```
+
+де `run-daemon.cmd` робить `cd` у теку daemon і запускає `node index.js …`
+з перенаправленням у лог (`schtasks` теж пробувався — завдання відпрацьовує
+з кодом 0, але процес не лишається).
+
+Логи daemon читати з явним кодуванням — `Get-Content -Encoding UTF8`, інакше
+кирилиця побита.
+
 ## Перевірка без Live
 
 `tools/fake-live.js` говорить тим самим UDP-протоколом, що й Remote Script.
