@@ -117,6 +117,9 @@ udp.on('message', (buf) => {
       if (!bridgeAlive) {
         bridgeAlive = true;
         log('bridge знову на звʼязку');
+        // Live міг працювати ще до старту daemon -- тоді hello вже не буде,
+        // і без цього виклику сесія лишиться без реєстру назавжди
+        bootstrapRegistry();
       }
       break;
     case 'event':

@@ -112,12 +112,25 @@ try {
   const l2 = mkLive(2, 19947, 19948);
   await Promise.all([waitFor(d1, /bridge підключився/), waitFor(d2, /bridge підключився/)]);
 
+  // Live, запущений ДО daemon: hello летить у порожнечу, лишається тільки heartbeat.
+  // Саме так виглядає перезапуск daemon при відкритому DAW.
+  const lEarly = mkLive(3, 19949, 19950);
+  await waitFor(lEarly, /слухаю :19950/);
+  const dLate = mkDaemon('p3', 19949, 19950);
+  await waitFor(dLate, /relay: head=/);
+
   console.log('ланцюг піднявся\n');
 
   await check('реєстр: один створює, другий приймає', async () => {
     await waitFor(l1, /реєстр створено/);
     await waitFor(l2, /реєстр прийнято$/m);
     if (/незіставлено/.test(l2.out)) throw new Error('реєстр прийнято з розбіжностями');
+  });
+
+  await check('daemon, стартований при живому Live, теж отримує реєстр', async () => {
+    // без бутстрапу з heartbeat-гілки ця сесія лишилась би без ідентичності
+    await waitFor(dLate, /віддаю bridge реєстр сесії/, 12000);
+    await waitFor(lEarly, /реєстр прийнято/, 12000);
   });
 
   await check('повторний RegistryInit відхиляється relay', async () => {
