@@ -23,7 +23,7 @@ except ImportError:  # старіші/інші збірки
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.6.0"
+SCRIPT_VERSION = "0.6.1"
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -255,13 +255,24 @@ class AbletonMP(ControlSurface):
         """
         self._tracks_reg.clear()
         self._scenes_reg.clear()
+        # uuid, збережені в .als, головніші за позицію: ім'я треку в Live
+        # змінюється саме собою від кинутого девайса, тож звірка за іменем
+        # відкидала б цілком легітимні збіги
+        self._restore_registry()
         problems = []
+        by_data = 0
+        by_position = 0
 
         for kind, records, objects, reg_obj in (
             ("трек", reg.get("tracks") or [], self._doc.tracks, self._tracks_reg),
             ("сцена", reg.get("scenes") or [], self._doc.scenes, self._scenes_reg),
         ):
             for rec in records:
+                uid = rec.get("id")
+                if uid and reg_obj.obj_of(uid) is not None:
+                    by_data += 1
+                    continue  # цей об'єкт уже впізнав себе сам
+
                 i = rec.get("idx")
                 if not isinstance(i, int) or i < 0 or i >= len(objects):
                     problems.append("%s %r: позиції %r тут немає" % (kind, rec.get("name"), i))
@@ -271,18 +282,22 @@ class AbletonMP(ControlSurface):
                     problems.append("%s %d: тут %r, у партнера %r"
                                     % (kind, i, self._safe_name(objects[i]), want))
                     continue
-                reg_obj.bind(rec.get("id"), objects[i])
+                reg_obj.bind(uid, objects[i])
+                by_position += 1
 
         self._registry_ready = True
         # канонічні uuid із журналу лягають у .als, щоб наступного разу проєкт
         # відкрився вже з ними і бутстрап за позиціями не знадобився
         self._persist_registry()
-        self._log("реєстр прийнято: %d треків, %d сцен"
-                  % (len(self._tracks_reg), len(self._scenes_reg)))
+        self._log("реєстр прийнято: %d треків, %d сцен (%d з .als, %d за позицією)"
+                  % (len(self._tracks_reg), len(self._scenes_reg), by_data, by_position))
         if problems:
             # проєкти розійшлись; події на незіставлені об'єкти просто не застосуються
             self._warn("бутстрап реєстру, незіставлено %d: %s"
                        % (len(problems), "; ".join(problems[:5])))
+        if by_data == 0 and by_position == 0 and (reg.get("tracks") or reg.get("scenes")):
+            self._warn("жоден об'єкт не зіставився -- сесія relay належить іншому "
+                       "проєкту; потрібна нова сесія (--session)")
 
     # ----------------------------------------------------- persistence (.als)
 
