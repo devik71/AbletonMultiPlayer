@@ -154,6 +154,7 @@ udp.on('message', (buf) => {
       log(`snapshot: tempo=${msg.state?.tempo} playing=${msg.state?.playing} ` +
           `tracks=${msg.state?.tracks?.length} scenes=${msg.state?.scenes?.length}`);
       if (!PROJECT) filesync.setProjectFile(msg.state?.file_path);
+      reportSamples(msg.state?.samples);
       break;
     case 'registry':
       // bridge згенерував uuid для своїх об'єктів -- кладемо їх у журнал
@@ -261,6 +262,35 @@ function pingClock() {
 }
 
 // --------------------------------------------------------------------- flow
+
+let samplesWarned = '';
+
+/** Проєкт із зовнішніми семплами непереносимий: у партнера цих шляхів немає.
+ *  Виправити це можна лише в Live (Collect All and Save), тож завдання daemon --
+ *  сказати про це виразно й один раз, поки картина не змінилась. */
+function reportSamples(s) {
+  if (!s || !s.total) return;
+  const key = `${s.external?.length}/${s.missing?.length}/${s.total}`;
+  if (key === samplesWarned) return;
+  samplesWarned = key;
+
+  const ext = s.external || [];
+  const miss = s.missing || [];
+  if (!ext.length && !miss.length) {
+    log(`семпли: ${s.total} — усі всередині проєкту, синхронізуються`);
+    return;
+  }
+  if (ext.length) {
+    log(`УВАГА: ${ext.length} з ${s.total} семплів лежать ПОЗА текою проєкту.`);
+    log('  Партнер їх не отримає, і посилання в .als у нього не резолвиться.');
+    log('  Лікується в Live: File > Collect All and Save.');
+    for (const p of ext.slice(0, 5)) log(`  поза проєктом: ${p}`);
+  }
+  if (miss.length) {
+    log(`УВАГА: ${miss.length} семплів взагалі немає на диску (missing media):`);
+    for (const p of miss.slice(0, 5)) log(`  бракує: ${p}`);
+  }
+}
 
 /** Або віддаємо bridge готовий реєстр сесії, або просимо створити новий. */
 function bootstrapRegistry() {

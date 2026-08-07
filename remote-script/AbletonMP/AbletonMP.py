@@ -23,7 +23,7 @@ except ImportError:  # старіші/інші збірки
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.7.0"
+SCRIPT_VERSION = "0.9.0"
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -62,8 +62,8 @@ class AbletonMP(ControlSurface):
         self._link = None
         self._lseq = 0
         self._last_beat = 0.0
-        self._mirror = {"playing": None, "tempo": None, "psi": {}}
-        self._track_cbs = []
+        self._mirror = {"playing": None, "tempo": None, "psi": {}, "mix": {}}
+        self._obj_cbs = []  # (об'єкт, назва властивості, callback)
         self._pending = {}   # key -> відкладена подія, схлопується за ключем
         self._clip_buf = {}  # track_idx -> psi, накопичується між тіками
         self._tracks_reg = Registry(self._log)
@@ -86,6 +86,9 @@ class AbletonMP(ControlSurface):
         self._doc.add_tempo_listener(self._cb_tempo)
         self._doc.add_tracks_listener(self._cb_tracks)
         self._doc.add_scenes_listener(self._cb_scenes)
+        # поява/зникнення return-треку змінює кількість send-ів на кожному треку,
+        # а це окремі listener'и -- без цього нові send-и лишились би німими
+        self._doc.add_return_tracks_listener(self._cb_tracks)
         self._rewire_tracks()
         self._prime_mirror()
 
@@ -130,7 +133,8 @@ class AbletonMP(ControlSurface):
             for name, cb in (("is_playing", self._cb_is_playing),
                              ("tempo", self._cb_tempo),
                              ("tracks", self._cb_tracks),
-                             ("scenes", self._cb_scenes)):
+                             ("scenes", self._cb_scenes),
+                             ("return_tracks", self._cb_tracks)):
                 try:
                     if getattr(self._doc, "%s_has_listener" % name)(cb):
                         getattr(self._doc, "remove_%s_listener" % name)(cb)
@@ -143,28 +147,60 @@ class AbletonMP(ControlSurface):
 
     # ------------------------------------------------------------- listeners
 
+    def _listen(self, obj, prop, cb):
+        """Узагальнена підписка: LOM тримає єдину схему add_/remove_/_has_listener,
+        тож перелічувати кожен параметр окремо не треба."""
+        try:
+            getattr(obj, "add_%s_listener" % prop)(cb)
+            self._obj_cbs.append((obj, prop, cb))
+        except Exception:
+            pass  # параметра тут немає (напр. arm на треку, який не озброюється)
+
     def _rewire_tracks(self):
         self._unwire_tracks()
         for track in self._doc.tracks:
-            try:
-                cb = self._make_slot_cb(track)
-                track.add_playing_slot_index_listener(cb)
-                self._track_cbs.append((track, cb))
-            except Exception:
-                pass  # трек без слотів -- не наша проблема
+            self._listen(track, "playing_slot_index", self._make_slot_cb(track))
+            self._wire_mixer(track)
+
+    def _wire_mixer(self, track):
+        md = None
+        try:
+            md = track.mixer_device
+        except Exception:
+            return
+        self._listen(md.volume, "value", self._make_mix_cb(track, "volume", None))
+        self._listen(md.panning, "value", self._make_mix_cb(track, "panning", None))
+        try:
+            sends = list(md.sends)
+        except Exception:
+            sends = []
+        for i, send in enumerate(sends):
+            self._listen(send, "value", self._make_mix_cb(track, "send", i))
+        for prop in ("mute", "solo", "arm"):
+            self._listen(track, prop, self._make_toggle_cb(track, prop))
 
     def _unwire_tracks(self):
-        for track, cb in self._track_cbs:
+        for obj, prop, cb in self._obj_cbs:
             try:
-                if track.playing_slot_index_has_listener(cb):
-                    track.remove_playing_slot_index_listener(cb)
+                if getattr(obj, "%s_has_listener" % prop)(cb):
+                    getattr(obj, "remove_%s_listener" % prop)(cb)
             except Exception:
-                pass  # трек уже видалений -- звертання до нього кидає RuntimeError
-        self._track_cbs = []
+                pass  # об'єкт уже видалений -- звертання кидає RuntimeError
+        self._obj_cbs = []
 
     def _make_slot_cb(self, track):
         def cb():
             self._safe(self._on_playing_slot, track)
+        return cb
+
+    def _make_mix_cb(self, track, param, idx):
+        def cb():
+            self._safe(self._on_mix, track, param, idx)
+        return cb
+
+    def _make_toggle_cb(self, track, prop):
+        def cb():
+            self._safe(self._on_toggle, track, prop)
         return cb
 
     def _cb_is_playing(self):
@@ -202,6 +238,7 @@ class AbletonMP(ControlSurface):
         self._prime_mirror(transport=False)
         if self._registry_ready:
             self._diff_tracks(emit=not self._suppress_struct)
+            self._prime_mixer()  # listener'и мікшера перевішані на нові об'єкти
 
     def _on_scenes(self):
         if self._registry_ready:
@@ -243,6 +280,7 @@ class AbletonMP(ControlSurface):
         for i, s in enumerate(self._doc.scenes):
             reg["scenes"].append({"id": self._scenes_reg.id_of(s), "idx": i, "name": self._safe_name(s)})
         self._registry_ready = True
+        self._prime_mixer()
         self._persist_registry()
         self._log("реєстр створено: %d треків, %d сцен (%d піднято з .als)"
                   % (len(reg["tracks"]), len(reg["scenes"]), restored))
@@ -287,6 +325,7 @@ class AbletonMP(ControlSurface):
                 by_position += 1
 
         self._registry_ready = True
+        self._prime_mixer()
         # канонічні uuid із журналу лягають у .als, щоб наступного разу проєкт
         # відкрився вже з ними і бутстрап за позиціями не знадобився
         self._persist_registry()
@@ -427,6 +466,60 @@ class AbletonMP(ControlSurface):
             self._emit("SceneCreate", {"scene": ref, "idx": idx})
         for uid in removed:
             self._emit("SceneDelete", {"scene": {"id": uid}})
+
+    # ----------------------------------------------------------------- mixer
+
+    def _mix_param(self, track, param, idx):
+        try:
+            md = track.mixer_device
+            if param == "volume":
+                return md.volume
+            if param == "panning":
+                return md.panning
+            if param == "send":
+                sends = list(md.sends)
+                return sends[idx] if isinstance(idx, int) and idx < len(sends) else None
+        except Exception:
+            pass
+        return None
+
+    def _mix_key(self, tid, param, idx):
+        return "%s:%s:%s" % (tid, param, idx)
+
+    def _on_mix(self, track, param, idx):
+        if not self._registry_ready:
+            return
+        tid = self._tracks_reg.id_of(track, create=False)
+        p = self._mix_param(track, param, idx)
+        if not tid or p is None:
+            return
+        value = round(float(p.value), 6)
+        key = self._mix_key(tid, param, idx)
+        if self._mirror["mix"].get(key) == value:
+            return
+        self._mirror["mix"][key] = value
+        payload = {"track": {"id": tid}, "param": param, "value": value}
+        if idx is not None:
+            payload["index"] = idx
+        # неперервна величина -- дебаунсимо, як tempo: рух фейдера це один жест
+        self._defer("mix:" + key, "MixerSet", payload)
+
+    def _on_toggle(self, track, prop):
+        if not self._registry_ready:
+            return
+        tid = self._tracks_reg.id_of(track, create=False)
+        if not tid:
+            return
+        try:
+            value = bool(getattr(track, prop))
+        except Exception:
+            return
+        key = "%s:%s" % (tid, prop)
+        if self._mirror["mix"].get(key) == value:
+            return
+        self._mirror["mix"][key] = value
+        # дискретне перемикання -- дебаунс тут лише додав би затримки
+        self._emit("TrackToggle", {"track": {"id": tid}, "param": prop, "value": value})
 
     # ------------------------------------------------------------ coalescing
 
@@ -610,6 +703,43 @@ class AbletonMP(ControlSurface):
                 self._suppress_struct = False
                 self._diff_scenes(emit=False)
 
+        elif etype == "MixerSet":
+            track, _idx = self._resolve_track(payload.get("track"))
+            if track is None:
+                return
+            param = payload.get("param")
+            idx = payload.get("index")
+            p = self._mix_param(track, param, idx)
+            if p is None:
+                self._warn("gseq %s: параметр %r/%r відсутній" % (gseq, param, idx))
+                return
+            tid = self._tracks_reg.id_of(track, create=False)
+            try:
+                value = float(payload.get("value"))
+            except Exception:
+                return
+            # DeviceParameter кидає при виході за межі, а межі send-ів
+            # відрізняються від volume -- беремо їх з самого параметра
+            value = max(p.min, min(p.max, value))
+            self._mirror["mix"][self._mix_key(tid, param, idx)] = round(value, 6)
+            p.value = value
+
+        elif etype == "TrackToggle":
+            track, _idx = self._resolve_track(payload.get("track"))
+            if track is None:
+                return
+            prop = payload.get("param")
+            if prop not in ("mute", "solo", "arm"):
+                self._warn("gseq %s: невідомий перемикач %r" % (gseq, prop))
+                return
+            tid = self._tracks_reg.id_of(track, create=False)
+            value = bool(payload.get("value"))
+            self._mirror["mix"]["%s:%s" % (tid, prop)] = value
+            try:
+                setattr(track, prop, value)
+            except Exception as e:
+                self._warn("gseq %s: %s не встановлюється: %r" % (gseq, prop, e))
+
         elif etype == "StopAllClips":
             for i in range(len(self._doc.tracks)):
                 self._mirror["psi"][i] = -1
@@ -722,6 +852,68 @@ class AbletonMP(ControlSurface):
         except Exception:
             return ""
 
+    # --------------------------------------------------------------- samples
+
+    def _iter_audio_clips(self):
+        for track in self._doc.tracks:
+            try:
+                slots = list(track.clip_slots)
+            except Exception:
+                slots = []
+            for slot in slots:
+                try:
+                    if slot.has_clip and not slot.clip.is_midi_clip:
+                        yield slot.clip
+                except Exception:
+                    pass
+            try:
+                for clip in track.arrangement_clips:
+                    if not clip.is_midi_clip:
+                        yield clip
+            except Exception:
+                pass
+
+    def _scan_samples(self):
+        """Які семпли лежать поза текою проєкту і яких бракує локально.
+
+        Live за замовчуванням не копіює семпл у проєкт -- .als тримає посилання
+        на оригінал. Такий проєкт непереносимий: у партнера абсолютний шлях
+        не існує, і Live покаже missing media. Collect All and Save через LOM
+        не викликається, а clip.file_path доступний лише на читання, тож
+        виправити це кодом не можна -- лише вчасно сказати.
+        """
+        try:
+            root = os.path.dirname(str(self._doc.file_path))
+        except Exception:
+            root = ""
+        root_l = os.path.normcase(os.path.abspath(root)) if root else ""
+
+        total = 0
+        external = []
+        missing = []
+        for clip in self._iter_audio_clips():
+            try:
+                path = str(clip.file_path)
+            except Exception:
+                continue
+            if not path:
+                continue
+            total += 1
+            if not os.path.exists(path):
+                if len(missing) < 20:
+                    missing.append(path)
+                continue
+            if root_l and not os.path.normcase(os.path.abspath(path)).startswith(root_l):
+                if len(external) < 20:
+                    external.append(path)
+
+        return {
+            "total": total,
+            "project_root": root,
+            "external": external,
+            "missing": missing,
+        }
+
     # ------------------------------------------------------------- snapshots
 
     def _prime_mirror(self, transport=True):
@@ -734,6 +926,39 @@ class AbletonMP(ControlSurface):
                 self._mirror["psi"][i] = self._norm_psi(track.playing_slot_index)
             except Exception:
                 pass
+
+    def _prime_mixer(self):
+        """Заповнює дзеркало мікшера після бутстрапу реєстру.
+
+        Без цього перший же рух будь-якого фейдера виглядав би як зміна відносно
+        None і породжував подію -- а на старті таких «змін» одразу десятки.
+        """
+        self._mirror["mix"] = {}
+        for track in self._doc.tracks:
+            tid = self._tracks_reg.id_of(track, create=False)
+            if not tid:
+                continue
+            for param, idx in self._mix_slots(track):
+                p = self._mix_param(track, param, idx)
+                if p is not None:
+                    try:
+                        self._mirror["mix"][self._mix_key(tid, param, idx)] = round(float(p.value), 6)
+                    except Exception:
+                        pass
+            for prop in ("mute", "solo", "arm"):
+                try:
+                    self._mirror["mix"]["%s:%s" % (tid, prop)] = bool(getattr(track, prop))
+                except Exception:
+                    pass
+
+    def _mix_slots(self, track):
+        slots = [("volume", None), ("panning", None)]
+        try:
+            for i in range(len(track.mixer_device.sends)):
+                slots.append(("send", i))
+        except Exception:
+            pass
+        return slots
 
     def _snapshot(self):
         tracks = []
@@ -758,6 +983,7 @@ class AbletonMP(ControlSurface):
             "playing": bool(self._doc.is_playing),
             "tempo": round(float(self._doc.tempo), 6),
             "file_path": file_path,  # daemon виводить із нього теку проєкту
+            "samples": self._safe(self._scan_samples) or {},
             "tracks": tracks,
             "scenes": scenes,
         }

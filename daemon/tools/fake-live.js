@@ -25,9 +25,9 @@ const song = {
   playing: false,
   tempo: 120,
   tracks: [
-    { id: null, name: '1-MIDI', playing_slot_index: -1, slots: 8 },
-    { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8 },
-    { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8 },
+    { id: null, name: '1-MIDI', playing_slot_index: -1, slots: 8, mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8, mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, mix: {}, mute: false, solo: false, arm: false },
   ],
   scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}` })),
 };
@@ -121,6 +121,18 @@ function apply(type, payload, gseq) {
     case 'StopAllClips':
       for (const t of song.tracks) t.playing_slot_index = -1;
       break;
+    case 'MixerSet': {
+      const t = trackById(payload.track?.id);
+      if (!t) return reject('невідомий трек');
+      t.mix[`${payload.param}:${payload.index ?? '-'}`] = payload.value;
+      break;
+    }
+    case 'TrackToggle': {
+      const t = trackById(payload.track?.id);
+      if (!t) return reject('невідомий трек');
+      t[payload.param] = !!payload.value;
+      break;
+    }
     case 'TrackCreate': {
       if (trackById(payload.track?.id)) return reject('такий трек уже є');
       const idx = Number.isInteger(payload.idx) ? payload.idx : song.tracks.length;
@@ -246,6 +258,29 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (!s) return console.log('немає такої сцени');
       song.scenes.splice(song.scenes.indexOf(s), 1);
       emit('SceneDelete', { scene: { id: s.id } });
+      break;
+    }
+    case 'vol':
+    case 'pan':
+    case 'send': {
+      const t = track();
+      if (!t) return console.log('немає такого треку');
+      const param = cmd === 'vol' ? 'volume' : cmd === 'pan' ? 'panning' : 'send';
+      const idx = param === 'send' ? Number(rest[1]) : null;
+      const value = Number(param === 'send' ? rest[2] : rest[1]);
+      t.mix[`${param}:${idx ?? '-'}`] = value;
+      const payload = { track: { id: t.id }, param, value };
+      if (idx !== null) payload.index = idx;
+      emit('MixerSet', payload);
+      break;
+    }
+    case 'mute':
+    case 'solo':
+    case 'arm': {
+      const t = track();
+      if (!t) return console.log('немає такого треку');
+      t[cmd] = !t[cmd];
+      emit('TrackToggle', { track: { id: t.id }, param: cmd, value: t[cmd] });
       break;
     }
     case 'rename': {

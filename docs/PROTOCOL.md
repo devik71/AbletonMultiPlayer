@@ -158,6 +158,18 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `TrackDelete` | `{track: {id}}` | `song.delete_track(i)` |
 | `SceneCreate` | `{scene: {id, name?}, idx}` | `song.create_scene(i)` |
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
+| `MixerSet` | `{track: {id}, param: "volume"\|"panning"\|"send", index?, value}` | `mixer_device.<param>.value = v` |
+| `TrackToggle` | `{track: {id}, param: "mute"\|"solo"\|"arm", value: bool}` | `track.<param> = v` |
+
+`MixerSet` дебаунситься як `tempo` — рух фейдера це один жест, а не сотня кроків.
+`TrackToggle` йде одразу: дебаунс дискретного перемикача лише додав би затримки.
+Значення клампиться межами самого `DeviceParameter` (`p.min`/`p.max`) — вони різні
+для гучності й send-ів, а вихід за межі кидає виняток.
+
+Send адресується індексом, не uuid: у LOM це позиція в списку, прив'язана до
+порядку return-треків. Поява чи зникнення return-треку змінює кількість send-ів
+на кожному треку, тому `return_tracks` теж слухається — інакше нові send-и
+лишились би німими.
 
 `name` у посиланні на сцену необовʼязкове: у сцен Live за замовчуванням імені немає
 (цифри в UI — це індекси). Немає імені — немає контрольної суми, і це видно з payload.

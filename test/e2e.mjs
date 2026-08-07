@@ -202,6 +202,24 @@ try {
     if (!hit.test(l2.out)) throw new Error('кліп поїхав не в той трек');
   });
 
+  await check('мікшер: гучність доїхала до партнера', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('vol 1 0.62\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"param":"volume","value":0\.62/, 8000, from);
+  });
+
+  await check('мікшер: send адресується індексом', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('send 1 0 0.25\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"param":"send","value":0\.25,"index":0/, 8000, from);
+  });
+
+  await check('mute доїхав окремим типом події', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('mute 2\n');
+    await waitFor(l2, /<- #\d+ TrackToggle .*"param":"mute","value":true/, 8000, from);
+  });
+
   let newTrackId = null;
 
   await check('створення треку доїхало до партнера', async () => {
@@ -251,10 +269,10 @@ try {
     }
   });
 
-  await check('журнал: 10 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 13 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 10) throw new Error(`очікував 10 подій, у журналі ${lines.length}`);
+    if (lines.length !== 13) throw new Error(`очікував 13 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);
