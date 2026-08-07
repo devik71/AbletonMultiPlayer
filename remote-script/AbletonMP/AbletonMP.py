@@ -8,6 +8,7 @@
 Фаза 1: transport (play/stop), tempo, clip launch/stop.
 """
 
+import json
 import os
 import time
 import traceback
@@ -22,7 +23,7 @@ except ImportError:  # старіші/інші збірки
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.5.0"
+SCRIPT_VERSION = "0.6.0"
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -33,6 +34,13 @@ LOG_MAX_BYTES = 512 * 1024
 # (той самий checkpoint, що й у vision.md §5.5).
 DEBOUNCE_SEC = 0.2
 DEBOUNCE_MAX_HOLD = 1.0
+
+# Ключі для set_data/get_data -- зберігання всередині самого .als.
+# Пріоритет за DATA_KEY_OBJ: uuid лежить на самому об'єкті, тож переживає
+# переставляння треків між сесіями. DATA_KEY_MAP -- фолбек однією мапою на Song,
+# якщо об'єкти не підтримують set_data; він прив'язаний до позицій і слабший.
+DATA_KEY_OBJ = "abletonmp_id"
+DATA_KEY_MAP = "abletonmp_registry"
 
 
 def _log_path():
@@ -89,6 +97,24 @@ class AbletonMP(ControlSurface):
         })
         self._link.send({"m": "snapshot", "state": self._snapshot()})
         self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
+        self._safe(self._probe_persistence)
+
+    def _probe_persistence(self):
+        """Що доступно для зберігання реєстру в цій збірці Live.
+
+        Нічого не пише -- лише дивиться. Друга машина може мати іншу версію Live,
+        і тоді цей рядок у лозі одразу пояснює, чому реєстр не пережив сесію.
+        """
+        caps = {
+            "song.set_data": hasattr(self._doc, "set_data"),
+            "obj.set_data": bool(self._doc.tracks) and hasattr(self._doc.tracks[0], "set_data"),
+        }
+        try:
+            caps["file_path"] = str(self._doc.file_path) or "(не збережено)"
+        except Exception:
+            caps["file_path"] = "(недоступно)"
+        self._log("persistence: %r" % (caps,))
+        self._link.send({"m": "log", "level": "info", "text": "persistence: %r" % (caps,)})
 
     def disconnect(self):
         self._safe(self._teardown)
@@ -207,13 +233,18 @@ class AbletonMP(ControlSurface):
         """Видає uuid усім об'єктам. Результат стає подією RegistryInit у журналі."""
         self._tracks_reg.clear()
         self._scenes_reg.clear()
+        # спершу піднімаємо uuid із самого .als: якщо обидві машини відкрили той
+        # самий файл, вони отримають однакові uuid ще до будь-якого обміну
+        restored = self._restore_registry()
         reg = {"tracks": [], "scenes": []}
         for i, t in enumerate(self._doc.tracks):
             reg["tracks"].append({"id": self._tracks_reg.id_of(t), "idx": i, "name": self._safe_name(t)})
         for i, s in enumerate(self._doc.scenes):
             reg["scenes"].append({"id": self._scenes_reg.id_of(s), "idx": i, "name": self._safe_name(s)})
         self._registry_ready = True
-        self._log("реєстр створено: %d треків, %d сцен" % (len(reg["tracks"]), len(reg["scenes"])))
+        self._persist_registry()
+        self._log("реєстр створено: %d треків, %d сцен (%d піднято з .als)"
+                  % (len(reg["tracks"]), len(reg["scenes"]), restored))
         return reg
 
     def _adopt_registry(self, reg):
@@ -243,12 +274,99 @@ class AbletonMP(ControlSurface):
                 reg_obj.bind(rec.get("id"), objects[i])
 
         self._registry_ready = True
+        # канонічні uuid із журналу лягають у .als, щоб наступного разу проєкт
+        # відкрився вже з ними і бутстрап за позиціями не знадобився
+        self._persist_registry()
         self._log("реєстр прийнято: %d треків, %d сцен"
                   % (len(self._tracks_reg), len(self._scenes_reg)))
         if problems:
             # проєкти розійшлись; події на незіставлені об'єкти просто не застосуються
             self._warn("бутстрап реєстру, незіставлено %d: %s"
                        % (len(problems), "; ".join(problems[:5])))
+
+    # ----------------------------------------------------- persistence (.als)
+
+    def _obj_stored_id(self, obj):
+        try:
+            return self._doc_str(obj.get_data(DATA_KEY_OBJ, "")) or None
+        except Exception:
+            return None
+
+    def _obj_store_id(self, obj, uid):
+        try:
+            obj.set_data(DATA_KEY_OBJ, uid)
+            return True
+        except Exception:
+            return False
+
+    def _doc_str(self, v):
+        return v if isinstance(v, str) else ""
+
+    def _restore_registry(self):
+        """Піднімає uuid, збережені в .als. Повертає кількість відновлених."""
+        restored = 0
+        per_object = True
+
+        for reg, objects in ((self._tracks_reg, self._doc.tracks),
+                             (self._scenes_reg, self._doc.scenes)):
+            for obj in objects:
+                uid = self._obj_stored_id(obj)
+                if uid:
+                    reg.bind(uid, obj)
+                    restored += 1
+                else:
+                    per_object = False
+
+        if restored:
+            self._log("з .als відновлено %d uuid (на об'єктах)" % restored)
+            return restored
+
+        # фолбек: одна мапа на Song, прив'язана до позицій
+        try:
+            raw = self._doc_str(self._doc.get_data(DATA_KEY_MAP, ""))
+            saved = json.loads(raw) if raw else None
+        except Exception:
+            saved = None
+        if not saved:
+            return 0
+
+        for key, reg, objects in (("tracks", self._tracks_reg, self._doc.tracks),
+                                  ("scenes", self._scenes_reg, self._doc.scenes)):
+            for rec in (saved.get(key) or []):
+                i = rec.get("idx")
+                if isinstance(i, int) and 0 <= i < len(objects):
+                    if not rec.get("name") or self._safe_name(objects[i]) == rec["name"]:
+                        reg.bind(rec.get("id"), objects[i])
+                        restored += 1
+        if restored:
+            self._log("з .als відновлено %d uuid (мапа на Song, %s)"
+                      % (restored, "об'єкти без set_data" if not per_object else "фолбек"))
+        return restored
+
+    def _persist_registry(self):
+        """Кладе поточні uuid у .als. Сет позначається зміненим -- це очікувано."""
+        ok = True
+        for reg, objects in ((self._tracks_reg, self._doc.tracks),
+                             (self._scenes_reg, self._doc.scenes)):
+            for obj in objects:
+                uid = reg.id_of(obj, create=False)
+                if uid and not self._obj_store_id(obj, uid):
+                    ok = False
+        if ok:
+            return
+
+        # об'єкти не приймають set_data -- пишемо однією мапою на Song
+        snap = {"tracks": [], "scenes": []}
+        for key, reg, objects in (("tracks", self._tracks_reg, self._doc.tracks),
+                                  ("scenes", self._scenes_reg, self._doc.scenes)):
+            for i, obj in enumerate(objects):
+                uid = reg.id_of(obj, create=False)
+                if uid:
+                    snap[key].append({"id": uid, "idx": i, "name": self._safe_name(obj)})
+        try:
+            self._doc.set_data(DATA_KEY_MAP, json.dumps(snap))
+        except Exception as e:
+            self._warn("реєстр не збережено в .als: %r" % (e,))
 
     def _track_kind(self, track):
         try:
@@ -261,6 +379,8 @@ class AbletonMP(ControlSurface):
         created, removed = self._tracks_reg.diff(self._doc.tracks)
         for uid in removed:
             self._tracks_reg.forget(uid)
+        if created or removed:
+            self._persist_registry()
         if not emit:
             return
         for uid, idx, track in created:
@@ -276,6 +396,8 @@ class AbletonMP(ControlSurface):
         created, removed = self._scenes_reg.diff(self._doc.scenes)
         for uid in removed:
             self._scenes_reg.forget(uid)
+        if created or removed:
+            self._persist_registry()
         if not emit:
             return
         for uid, idx, scene in created:
