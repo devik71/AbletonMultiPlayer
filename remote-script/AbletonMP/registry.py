@@ -86,3 +86,24 @@ class Registry(object):
 
     def known_ids(self):
         return [u for u, _ in self._entries]
+
+    def forget(self, uid):
+        self._entries = [(u, o) for (u, o) in self._entries if u != uid]
+
+    def diff(self, objects):
+        """Звіряє реєстр із поточним станом Live.
+
+        Повертає (нові, зниклі): нові одразу отримують uuid, зниклі -- ті, чиї
+        uuid більше не належать жодному об'єкту зі списку. Зниклі НЕ забуваються
+        тут -- це вирішує викликач, бо для tombstone їх іноді треба лишити.
+        """
+        created = []
+        seen = set()
+        for i, obj in enumerate(objects):
+            uid = self.id_of(obj, create=False)
+            if uid is None:
+                uid = self.id_of(obj)
+                created.append((uid, i, obj))
+            seen.add(uid)
+        removed = [u for u in self.known_ids() if u not in seen]
+        return created, removed

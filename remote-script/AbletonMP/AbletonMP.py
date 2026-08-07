@@ -22,7 +22,7 @@ except ImportError:  # старіші/інші збірки
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.4.0"
+SCRIPT_VERSION = "0.5.0"
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -63,6 +63,9 @@ class AbletonMP(ControlSurface):
         # до бутстрапу uuid ще не спільні з партнером, тож події з посиланнями
         # на об'єкти нікуди не відправляємо -- вони б у нього не зарезолвились
         self._registry_ready = False
+        # поки застосовуємо чужу структурну подію, свій listener має мовчати:
+        # інакше створений трек одразу поїхав би назад як власний TrackCreate
+        self._suppress_struct = False
         self._safe(self._setup)
 
     # ------------------------------------------------------------------ setup
@@ -74,6 +77,7 @@ class AbletonMP(ControlSurface):
         self._doc.add_is_playing_listener(self._cb_is_playing)
         self._doc.add_tempo_listener(self._cb_tempo)
         self._doc.add_tracks_listener(self._cb_tracks)
+        self._doc.add_scenes_listener(self._cb_scenes)
         self._rewire_tracks()
         self._prime_mirror()
 
@@ -98,7 +102,8 @@ class AbletonMP(ControlSurface):
         if self._doc is not None:
             for name, cb in (("is_playing", self._cb_is_playing),
                              ("tempo", self._cb_tempo),
-                             ("tracks", self._cb_tracks)):
+                             ("tracks", self._cb_tracks),
+                             ("scenes", self._cb_scenes)):
                 try:
                     if getattr(self._doc, "%s_has_listener" % name)(cb):
                         getattr(self._doc, "remove_%s_listener" % name)(cb)
@@ -144,6 +149,9 @@ class AbletonMP(ControlSurface):
     def _cb_tracks(self):
         self._safe(self._on_tracks)
 
+    def _cb_scenes(self):
+        self._safe(self._on_scenes)
+
     def _on_is_playing(self):
         playing = bool(self._doc.is_playing)
         if self._mirror["playing"] == playing:
@@ -165,10 +173,12 @@ class AbletonMP(ControlSurface):
         self._mirror["psi"] = {}
         self._clip_buf = {}  # накопичене посилається на старі індекси
         self._prime_mirror(transport=False)
-        # Нові треки отримають uuid ліниво, але партнер про них не знає:
-        # подій TrackCreate/TrackDelete ще немає, це наступний крок.
-        self._warn("структура треків змінилась -- реєстр партнера застарів")
-        self._link.send({"m": "snapshot", "state": self._snapshot()})
+        if self._registry_ready:
+            self._diff_tracks(emit=not self._suppress_struct)
+
+    def _on_scenes(self):
+        if self._registry_ready:
+            self._diff_scenes(emit=not self._suppress_struct)
 
     @staticmethod
     def _norm_psi(value):
@@ -239,6 +249,43 @@ class AbletonMP(ControlSurface):
             # проєкти розійшлись; події на незіставлені об'єкти просто не застосуються
             self._warn("бутстрап реєстру, незіставлено %d: %s"
                        % (len(problems), "; ".join(problems[:5])))
+
+    def _track_kind(self, track):
+        try:
+            return "midi" if track.has_midi_input else "audio"
+        except Exception:
+            return "audio"
+
+    def _diff_tracks(self, emit=True):
+        """Звіряє реєстр із деревом треків після зміни структури."""
+        created, removed = self._tracks_reg.diff(self._doc.tracks)
+        for uid in removed:
+            self._tracks_reg.forget(uid)
+        if not emit:
+            return
+        for uid, idx, track in created:
+            self._emit("TrackCreate", {
+                "track": {"id": uid, "name": self._safe_name(track)},
+                "idx": idx,
+                "kind": self._track_kind(track),
+            })
+        for uid in removed:
+            self._emit("TrackDelete", {"track": {"id": uid}})
+
+    def _diff_scenes(self, emit=True):
+        created, removed = self._scenes_reg.diff(self._doc.scenes)
+        for uid in removed:
+            self._scenes_reg.forget(uid)
+        if not emit:
+            return
+        for uid, idx, scene in created:
+            ref = {"id": uid}
+            name = self._safe_name(scene)
+            if name:
+                ref["name"] = name
+            self._emit("SceneCreate", {"scene": ref, "idx": idx})
+        for uid in removed:
+            self._emit("SceneDelete", {"scene": {"id": uid}})
 
     # ------------------------------------------------------------ coalescing
 
@@ -343,6 +390,84 @@ class AbletonMP(ControlSurface):
                     has_clip = False
                 self._mirror["psi"][i] = sidx if has_clip else -1
             self._doc.scenes[sidx].fire()
+
+        elif etype == "TrackCreate":
+            ref = payload.get("track") or {}
+            uid = ref.get("id")
+            if not uid or self._tracks_reg.obj_of(uid) is not None:
+                return  # такий трек уже є -- повторне застосування не створює дубль
+            idx = payload.get("idx")
+            if not isinstance(idx, int) or idx < 0 or idx > len(self._doc.tracks):
+                idx = len(self._doc.tracks)
+            self._suppress_struct = True
+            try:
+                if payload.get("kind") == "midi":
+                    self._doc.create_midi_track(idx)
+                else:
+                    self._doc.create_audio_track(idx)
+                new = self._doc.tracks[idx]
+                if ref.get("name"):
+                    new.name = ref["name"]
+                self._tracks_reg.bind(uid, new)
+            finally:
+                self._suppress_struct = False
+                self._diff_tracks(emit=False)
+
+        elif etype == "TrackDelete":
+            uid = (payload.get("track") or {}).get("id")
+            track = self._tracks_reg.obj_of(uid) if uid else None
+            if track is None:
+                return  # tombstone: об'єкта вже немає, дія в порожнечу не йде
+            idx = self._track_index(track)
+            if idx is None:
+                return
+            self._suppress_struct = True
+            try:
+                self._doc.delete_track(idx)
+                self._tracks_reg.forget(uid)
+            finally:
+                self._suppress_struct = False
+                self._diff_tracks(emit=False)
+
+        elif etype == "SceneCreate":
+            ref = payload.get("scene") or {}
+            uid = ref.get("id")
+            if not uid or self._scenes_reg.obj_of(uid) is not None:
+                return
+            idx = payload.get("idx")
+            if not isinstance(idx, int) or idx < 0 or idx > len(self._doc.scenes):
+                idx = len(self._doc.scenes)
+            self._suppress_struct = True
+            try:
+                self._doc.create_scene(idx)
+                new = self._doc.scenes[idx]
+                if ref.get("name"):
+                    new.name = ref["name"]
+                self._scenes_reg.bind(uid, new)
+            finally:
+                self._suppress_struct = False
+                self._diff_scenes(emit=False)
+
+        elif etype == "SceneDelete":
+            uid = (payload.get("scene") or {}).get("id")
+            scene = self._scenes_reg.obj_of(uid) if uid else None
+            if scene is None:
+                return
+            scenes = self._doc.scenes
+            idx = None
+            for i in range(len(scenes)):
+                if scenes[i] == scene:
+                    idx = i
+                    break
+            if idx is None:
+                return
+            self._suppress_struct = True
+            try:
+                self._doc.delete_scene(idx)
+                self._scenes_reg.forget(uid)
+            finally:
+                self._suppress_struct = False
+                self._diff_scenes(emit=False)
 
         elif etype == "StopAllClips":
             for i in range(len(self._doc.tracks)):

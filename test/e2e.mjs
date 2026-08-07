@@ -185,10 +185,41 @@ try {
     if (!hit.test(l2.out)) throw new Error('кліп поїхав не в той трек');
   });
 
-  await check('журнал: 7 подій, монотонний gseq, цілий hash-chain', async () => {
+  let newTrackId = null;
+
+  await check('створення треку доїхало до партнера', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('addtrack midi\n');
+    await waitFor(l2, /<- #\d+ TrackCreate/, 8000, from);
+    newTrackId = l2.out.slice(from).match(/TrackCreate \{"track":\{"id":"([0-9a-f]{12})"/)?.[1];
+    if (!newTrackId) throw new Error('не вдалось витягти uuid нового треку');
+  });
+
+  await check('на новостворений трек одразу можна запустити кліп', async () => {
+    // реєстр лишається живим після бутстрапу, а не застигає на ньому
+    const from = l2.out.length;
+    l1.stdin.write('launch 3 1\n');
+    await waitFor(l2, new RegExp(`<- #\\d+ ClipLaunch .*"id":"${newTrackId}"`), 8000, from);
+    if (/ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('подію на новий трек відхилено');
+  });
+
+  await check('видалення треку доїхало, повторне застосування безпечне', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('deltrack 3\n');
+    await waitFor(l2, /<- #\d+ TrackDelete/, 8000, from);
+    // зріз беремо ПІСЛЯ рядка TrackDelete -- він сам містить цей uuid
+    const afterDelete = l2.out.length;
+    l2.stdin.write('state\n');
+    await new Promise((r) => setTimeout(r, 300));
+    if (l2.out.slice(afterDelete).includes(newTrackId)) {
+      throw new Error('трек лишився у партнера після видалення');
+    }
+  });
+
+  await check('журнал: 10 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 7) throw new Error(`очікував 7 подій, у журналі ${lines.length}`);
+    if (lines.length !== 10) throw new Error(`очікував 10 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

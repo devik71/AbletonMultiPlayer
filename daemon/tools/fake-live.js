@@ -121,6 +121,35 @@ function apply(type, payload, gseq) {
     case 'StopAllClips':
       for (const t of song.tracks) t.playing_slot_index = -1;
       break;
+    case 'TrackCreate': {
+      if (trackById(payload.track?.id)) return reject('такий трек уже є');
+      const idx = Number.isInteger(payload.idx) ? payload.idx : song.tracks.length;
+      song.tracks.splice(idx, 0, {
+        id: payload.track.id,
+        name: payload.track.name,
+        playing_slot_index: -1,
+        slots: song.scenes.length,
+      });
+      break;
+    }
+    case 'TrackDelete': {
+      const i = song.tracks.findIndex((t) => t.id === payload.track?.id);
+      if (i < 0) return reject('трек уже видалений');
+      song.tracks.splice(i, 1);
+      break;
+    }
+    case 'SceneCreate': {
+      if (sceneIdx(payload.scene?.id) >= 0) return reject('така сцена вже є');
+      const idx = Number.isInteger(payload.idx) ? payload.idx : song.scenes.length;
+      song.scenes.splice(idx, 0, { id: payload.scene.id, name: payload.scene.name || '' });
+      break;
+    }
+    case 'SceneDelete': {
+      const i = sceneIdx(payload.scene?.id);
+      if (i < 0) return reject('сцена вже видалена');
+      song.scenes.splice(i, 1);
+      break;
+    }
     default:
       return console.log(`<- #${gseq} невідомий тип ${type}`);
   }
@@ -190,6 +219,35 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       for (const t of song.tracks) t.playing_slot_index = -1;
       emit('StopAllClips', {});
       break;
+    case 'addtrack': {
+      const kind = rest[0] === 'audio' ? 'audio' : 'midi';
+      const idx = Number.isInteger(Number(rest[1])) && rest[1] !== undefined ? Number(rest[1]) : song.tracks.length;
+      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, playing_slot_index: -1, slots: song.scenes.length };
+      song.tracks.splice(idx, 0, t);
+      emit('TrackCreate', { track: { id: t.id, name: t.name }, idx, kind });
+      break;
+    }
+    case 'deltrack': {
+      const t = track();
+      if (!t) return console.log('немає такого треку');
+      song.tracks.splice(song.tracks.indexOf(t), 1);
+      emit('TrackDelete', { track: { id: t.id } });
+      break;
+    }
+    case 'addscene': {
+      const idx = rest[0] !== undefined ? Number(rest[0]) : song.scenes.length;
+      const s = { id: newId(), name: '' };
+      song.scenes.splice(idx, 0, s);
+      emit('SceneCreate', { scene: { id: s.id }, idx });
+      break;
+    }
+    case 'delscene': {
+      const s = song.scenes[Number(rest[0]) || 0];
+      if (!s) return console.log('немає такої сцени');
+      song.scenes.splice(song.scenes.indexOf(s), 1);
+      emit('SceneDelete', { scene: { id: s.id } });
+      break;
+    }
     case 'rename': {
       // перевірка, що uuid переживає те, від чого ламалась адресація за індексом
       const t = track();
@@ -214,6 +272,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case '':
       break;
     default:
-      console.log('play | stop | tempo <bpm> | launch <t> <s> | scene <n> | stopclip <t> | stopall | rename <t> <name> | move <from> <to> | state');
+      console.log([
+        'play | stop | tempo <bpm>',
+        'launch <t> <s> | scene <n> | stopclip <t> | stopall',
+        'addtrack [midi|audio] [idx] | deltrack <t> | addscene [idx] | delscene <n>',
+        'rename <t> <name> | move <from> <to> | state',
+      ].join('\n'));
   }
 });
