@@ -33,9 +33,14 @@ const RECONNECT_MAX = 10_000;
 const CLOCK_PING_SEC = 15;
 
 mkdirSync(STATE_DIR, { recursive: true });
-const statePath = join(STATE_DIR, `${AUTHOR}.json`);
-const outboxPath = join(STATE_DIR, `${AUTHOR}.outbox.jsonl`);
-const localJournalPath = join(STATE_DIR, `${AUTHOR}.applied.jsonl`);
+
+// Стан ОБОВʼЯЗКОВО прив'язаний до сесії, а не лише до автора: gseq нумерується
+// всередині сесії, тож lastGseq зі старої сесії зробив би daemon глухим до нової
+// (усі її події виглядали б як «вже бачені»).
+const SLUG = `${AUTHOR}.${SESSION}`.replace(/[^\w.-]+/g, '_');
+const statePath = join(STATE_DIR, `${SLUG}.json`);
+const outboxPath = join(STATE_DIR, `${SLUG}.outbox.jsonl`);
+const localJournalPath = join(STATE_DIR, `${SLUG}.applied.jsonl`);
 
 function log(...a) {
   // локальний час, щоб збігалося з bridge.log при звірянні логів
@@ -81,6 +86,10 @@ let clock = { offset: 0, rtt: null };
 let registry = null;
 let registryAsked = false;
 
+/** Події, що прийшли поки bridge мовчав. Застосуються, щойно він озветься. */
+let pendingApply = [];
+const MAX_PENDING = 500;
+
 const filesync = new FileSync({
   send: (msg) => {
     if (connected) ws.send(JSON.stringify(msg));
@@ -121,6 +130,7 @@ udp.on('message', (buf) => {
       log(`bridge підключився: Live ${msg.live}, script ${msg.script}, pid ${msg.pid}`);
       registryAsked = false; // Live перезавантажився -- його реєстр треба відновити
       bootstrapRegistry();
+      drainPending();
       break;
     case 'bye':
       bridgeAlive = false;
@@ -133,6 +143,7 @@ udp.on('message', (buf) => {
         // Live міг працювати ще до старту daemon -- тоді hello вже не буде,
         // і без цього виклику сесія лишиться без реєстру назавжди
         bootstrapRegistry();
+        drainPending();
       }
       break;
     case 'event':
@@ -264,6 +275,16 @@ function bootstrapRegistry() {
   }
 }
 
+/** Викликати ЛИШЕ після bootstrapRegistry: події адресуються uuid, тож bridge
+ *  має спершу отримати реєстр, інакше жодна з них не зарезолвиться. */
+function drainPending() {
+  if (!bridgeAlive || !pendingApply.length) return;
+  const q = pendingApply;
+  pendingApply = [];
+  log(`застосовую ${q.length} відкладених подій`);
+  for (const ev of q) toBridge({ m: 'apply', type: ev.type, payload: ev.payload, gseq: ev.gseq });
+}
+
 function submit(type, payload) {
   state.lseq += 1;
   saveState();
@@ -309,7 +330,14 @@ function onCommit(ev) {
 
   log(`#${ev.gseq} ${ev.type} ${JSON.stringify(ev.payload)} <- ${ev.author}`);
   if (!bridgeAlive) {
-    log('  ...bridge офлайн, подія в Live не застосована');
+    // lastGseq уже просунувся, тож просто пропустити -- значить втратити подію
+    // назавжди. Найчастіший випадок: daemon щойно стартував і забрав хвіст
+    // журналу, а bridge ще не встиг озватись (heartbeat раз на 2 с).
+    pendingApply.push(ev);
+    if (pendingApply.length > MAX_PENDING) {
+      pendingApply.shift();
+      log(`  ...буфер переповнено (>${MAX_PENDING}), найстаріші події втрачено`);
+    }
     return;
   }
   toBridge({ m: 'apply', type: ev.type, payload: ev.payload, gseq: ev.gseq });

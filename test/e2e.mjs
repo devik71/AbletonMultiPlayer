@@ -266,6 +266,38 @@ try {
     });
   });
 
+  await check('той самий автор в іншій сесії не глухий до неї', async () => {
+    // gseq нумерується в межах сесії. Якщо стан daemon зберігати лише за автором,
+    // lastGseq зі старої сесії відкине всі події нової як «вже бачені».
+    const lOther = mkLive(4, 19951, 19952);
+    await waitFor(lOther, /слухаю :19952/);
+    const dOther = launch('daemon-p1-other', join(root, 'daemon/index.js'), [
+      '--author', 'p1', '--session', 'other',
+      '--relay', `ws://127.0.0.1:${RELAY_PORT}`,
+      '--udp-in', '19951', '--udp-out', '19952',
+      '--state-dir', tmp, '--project', projectOf('p1'),
+    ], { cwd: join(root, 'daemon') });
+
+    await waitFor(dOther, /#1 RegistryInit/, 15000);
+    await waitFor(lOther, /реєстр прийнято/, 15000);
+  });
+
+  await check('хвіст журналу не втрачається, поки bridge мовчить', async () => {
+    // daemon стартує в сесію з готовим журналом, а fake-live підіймається пізніше:
+    // події мають дочекатись його, а не зникнути разом із просунутим lastGseq
+    const dLater = launch('daemon-p4', join(root, 'daemon/index.js'), [
+      '--author', 'p4', '--session', SESSION,
+      '--relay', `ws://127.0.0.1:${RELAY_PORT}`,
+      '--udp-in', '19953', '--udp-out', '19954',
+      '--state-dir', tmp, '--project', projectOf('p1'),
+    ], { cwd: join(root, 'daemon') });
+    await waitFor(dLater, /relay: head=/, 10000);
+
+    const lLater = mkLive(5, 19953, 19954);
+    await waitFor(dLater, /застосовую \d+ відкладених подій/, 15000);
+    await waitFor(lLater, /<- #\d+ TempoSet/, 10000);
+  });
+
   await check('подія на невідомий uuid відхиляється, а не застосовується не туди', async () => {
     const before = l2.out.length;
     await new Promise((resolve, reject) => {
