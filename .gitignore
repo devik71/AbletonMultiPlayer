@@ -6,3 +6,6 @@ __pycache__/
 relay/journals/
 daemon/state/
 *.log
+
+# лог робочої сесії, не частина проєкту
+conversations/
