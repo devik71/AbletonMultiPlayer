@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+*.pyc
+
+# рантайм-стан, не артефакти коду
+relay/journals/
+daemon/state/
+*.log

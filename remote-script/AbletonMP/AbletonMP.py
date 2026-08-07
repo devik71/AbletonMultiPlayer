@@ -1,0 +1,477 @@
+# -*- coding: utf-8 -*-
+"""AbletonMP -- тонкий bridge між Live Object Model і локальним daemon.
+
+Інваріант цього файлу: **звідси ніколи не вилітає виняток у Live**. Кожен callback
+з боку Live і кожен tick загорнуті в _safe(). Вся логіка, яку можна винести назовні,
+винесена в daemon.
+
+Фаза 1: transport (play/stop), tempo, clip launch/stop.
+"""
+
+import os
+import time
+import traceback
+
+import Live
+
+try:
+    from ableton.v2.control_surface import ControlSurface
+except ImportError:  # старіші/інші збірки
+    from _Framework.ControlSurface import ControlSurface
+
+from .link import UdpLink
+
+SCRIPT_VERSION = "0.3.0"
+HEARTBEAT_SEC = 2.0
+LOG_MAX_BYTES = 512 * 1024
+
+# Дебаунс неперервних параметрів: журнал має нести дії користувача, а не кожен
+# крок ручки. DEBOUNCE_SEC -- тиша після останньої зміни, після якої жест
+# вважається завершеним. DEBOUNCE_MAX_HOLD -- стеля: під час довгого безперервного
+# жесту подія все одно йде раз на секунду, щоб хвилинний рух не пропав при розриві
+# (той самий checkpoint, що й у vision.md §5.5).
+DEBOUNCE_SEC = 0.2
+DEBOUNCE_MAX_HOLD = 1.0
+
+
+def _log_path():
+    base = os.environ.get("APPDATA") or os.environ.get("TMPDIR") or "."
+    d = os.path.join(base, "AbletonMP")
+    try:
+        if not os.path.isdir(d):
+            os.makedirs(d)
+    except Exception:
+        return None
+    return os.path.join(d, "bridge.log")
+
+
+class AbletonMP(ControlSurface):
+    def __init__(self, c_instance):
+        ControlSurface.__init__(self, c_instance)
+        self._log_file = _log_path()
+        self._doc = None
+        self._link = None
+        self._lseq = 0
+        self._last_beat = 0.0
+        self._mirror = {"playing": None, "tempo": None, "psi": {}}
+        self._track_cbs = []
+        self._pending = {}   # key -> відкладена подія, схлопується за ключем
+        self._clip_buf = {}  # track_idx -> psi, накопичується між тіками
+        self._safe(self._setup)
+
+    # ------------------------------------------------------------------ setup
+
+    def _setup(self):
+        self._doc = Live.Application.get_application().get_document()
+        self._link = UdpLink(self._log)
+
+        self._doc.add_is_playing_listener(self._cb_is_playing)
+        self._doc.add_tempo_listener(self._cb_tempo)
+        self._doc.add_tracks_listener(self._cb_tracks)
+        self._rewire_tracks()
+        self._prime_mirror()
+
+        self._link.send({
+            "m": "hello",
+            "live": self._live_version(),
+            "script": SCRIPT_VERSION,
+            "pid": os.getpid(),
+        })
+        self._link.send({"m": "snapshot", "state": self._snapshot()})
+        self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
+
+    def disconnect(self):
+        self._safe(self._teardown)
+        ControlSurface.disconnect(self)
+
+    def _teardown(self):
+        # незавершений жест не має пропасти разом із закриттям Live
+        self._safe(self._flush_clips)
+        self._safe(self._flush_pending, True)
+        self._unwire_tracks()
+        if self._doc is not None:
+            for name, cb in (("is_playing", self._cb_is_playing),
+                             ("tempo", self._cb_tempo),
+                             ("tracks", self._cb_tracks)):
+                try:
+                    if getattr(self._doc, "%s_has_listener" % name)(cb):
+                        getattr(self._doc, "remove_%s_listener" % name)(cb)
+                except Exception:
+                    pass
+        if self._link is not None:
+            self._link.send({"m": "bye"})
+            self._link.close()
+        self._log("AbletonMP disconnected")
+
+    # ------------------------------------------------------------- listeners
+
+    def _rewire_tracks(self):
+        self._unwire_tracks()
+        for track in self._doc.tracks:
+            try:
+                cb = self._make_slot_cb(track)
+                track.add_playing_slot_index_listener(cb)
+                self._track_cbs.append((track, cb))
+            except Exception:
+                pass  # трек без слотів -- не наша проблема
+
+    def _unwire_tracks(self):
+        for track, cb in self._track_cbs:
+            try:
+                if track.playing_slot_index_has_listener(cb):
+                    track.remove_playing_slot_index_listener(cb)
+            except Exception:
+                pass  # трек уже видалений -- звертання до нього кидає RuntimeError
+        self._track_cbs = []
+
+    def _make_slot_cb(self, track):
+        def cb():
+            self._safe(self._on_playing_slot, track)
+        return cb
+
+    def _cb_is_playing(self):
+        self._safe(self._on_is_playing)
+
+    def _cb_tempo(self):
+        self._safe(self._on_tempo)
+
+    def _cb_tracks(self):
+        self._safe(self._on_tracks)
+
+    def _on_is_playing(self):
+        playing = bool(self._doc.is_playing)
+        if self._mirror["playing"] == playing:
+            return  # це відлуння нашого власного apply
+        self._mirror["playing"] = playing
+        self._emit("TransportSet", {"playing": playing})
+
+    def _on_tempo(self):
+        bpm = round(float(self._doc.tempo), 6)
+        if self._mirror["tempo"] == bpm:
+            return
+        self._mirror["tempo"] = bpm
+        self._defer("tempo", "TempoSet", {"bpm": bpm})
+
+    def _on_tracks(self):
+        # структура треків змінилась: перепідписуємось і скидаємо дзеркало слотів,
+        # інакше зсув індексів породить фантомні ClipLaunch
+        self._rewire_tracks()
+        self._mirror["psi"] = {}
+        self._clip_buf = {}  # накопичене посилається на старі індекси
+        self._prime_mirror(transport=False)
+        self._link.send({"m": "snapshot", "state": self._snapshot()})
+
+    @staticmethod
+    def _norm_psi(value):
+        """Live має кілька відʼємних значень для «не грає» (-1 нічого, -2 є fired slot).
+        Для журналу це один стан; без нормалізації перехід -1 -> -2 виглядає як
+        зупинка кліпу і породжує фантомний ClipStop."""
+        if value is None or value < 0:
+            return -1
+        return value
+
+    def _on_playing_slot(self, track):
+        idx = self._track_index(track)
+        if idx is None:
+            return
+        psi = self._norm_psi(track.playing_slot_index)
+        if self._mirror["psi"].get(idx) == psi:
+            return
+        self._mirror["psi"][idx] = psi
+        # Не відправляємо одразу: запуск сцени смикає listener на кожному треку
+        # окремо. Накопичуємо до наступного тіку і там вирішуємо, що це було.
+        self._clip_buf[idx] = psi
+
+    # ------------------------------------------------------------ coalescing
+
+    def _defer(self, key, etype, payload):
+        """Відкладає подію; повторний виклик з тим самим ключем затирає попередню."""
+        now = time.time()
+        prev = self._pending.get(key)
+        self._pending[key] = {
+            "type": etype,
+            "payload": payload,
+            "due": now + DEBOUNCE_SEC,
+            "first": prev["first"] if prev else now,
+        }
+
+    def _flush_pending(self, force=False):
+        now = time.time()
+        for key in list(self._pending.keys()):
+            e = self._pending[key]
+            if force or now >= e["due"] or now - e["first"] >= DEBOUNCE_MAX_HOLD:
+                del self._pending[key]
+                self._emit(e["type"], e["payload"])
+
+    def _flush_clips(self):
+        """Розбирає накопичені зміни слотів у семантичні події.
+
+        Запуск сцени видно як «кілька треків одночасно поїхали на той самий індекс»:
+        згортаємо в одну SceneLaunch. Супутні зупинки треків без кліпу в цій сцені
+        не відправляємо -- scene.fire() на тому боці відтворить їх сам.
+        """
+        if not self._clip_buf:
+            return
+        buf, self._clip_buf = self._clip_buf, {}
+
+        launched = [i for i, psi in buf.items() if psi >= 0]
+        targets = set(buf[i] for i in launched)
+        if len(targets) == 1 and len(launched) >= 2:
+            self._emit("SceneLaunch", {"scene": self._scene_ref(targets.pop())})
+            return
+
+        # Stop All Clips: усе, що змінилось, зупинилось, і ніде більше нічого не грає.
+        # Друга умова обовʼязкова -- без неї дві зупинки поспіль в одному тіку
+        # виглядали б як глобальний стоп і заглушили б партнеру решту треків.
+        if len(launched) == 0 and len(buf) >= 2:
+            if not [v for v in self._mirror["psi"].values() if v >= 0]:
+                self._emit("StopAllClips", {})
+                return
+
+        tracks = self._doc.tracks
+        for idx in sorted(buf):
+            if idx >= len(tracks):
+                continue  # трек зник між тіком і флашем
+            ref = self._track_ref(tracks[idx], idx)
+            if buf[idx] < 0:
+                self._emit("ClipStop", {"track": ref})
+            else:
+                self._emit("ClipLaunch", {"track": ref, "scene": self._scene_ref(buf[idx])})
+
+    # ----------------------------------------------------------------- apply
+
+    def _apply(self, etype, payload, gseq):
+        self._log("<- #%s %s %r" % (gseq, etype, payload))
+
+        if etype == "TransportSet":
+            want = bool(payload.get("playing"))
+            self._mirror["playing"] = want  # ДО запису в LOM -- глушимо ехо
+            if want:
+                self._doc.start_playing()
+            else:
+                self._doc.stop_playing()
+
+        elif etype == "TempoSet":
+            bpm = float(payload.get("bpm"))
+            self._mirror["tempo"] = round(bpm, 6)
+            self._doc.tempo = bpm
+
+        elif etype == "ClipLaunch":
+            track, idx = self._resolve_track(payload.get("track"))
+            if track is None:
+                return
+            sidx = self._resolve_scene(payload.get("scene"))
+            if sidx is None or sidx >= len(track.clip_slots):
+                self._warn("gseq %s: сцена %r поза межами" % (gseq, payload.get("scene")))
+                return
+            self._mirror["psi"][idx] = sidx
+            track.clip_slots[sidx].fire()
+
+        elif etype == "SceneLaunch":
+            sidx = self._resolve_scene(payload.get("scene"))
+            if sidx is None:
+                self._warn("gseq %s: сцена %r не резолвиться" % (gseq, payload.get("scene")))
+                return
+            # дзеркало треба звести до того, що станеться ПІСЛЯ fire(): треки з кліпом
+            # у цій сцені заграють її, решта зупиняться -- інакше піде ехо
+            for i, t in enumerate(self._doc.tracks):
+                try:
+                    has_clip = sidx < len(t.clip_slots) and t.clip_slots[sidx].has_clip
+                except Exception:
+                    has_clip = False
+                self._mirror["psi"][i] = sidx if has_clip else -1
+            self._doc.scenes[sidx].fire()
+
+        elif etype == "StopAllClips":
+            for i in range(len(self._doc.tracks)):
+                self._mirror["psi"][i] = -1
+            self._doc.stop_all_clips()
+
+        elif etype == "ClipStop":
+            track, idx = self._resolve_track(payload.get("track"))
+            if track is None:
+                return
+            self._mirror["psi"][idx] = -1
+            track.stop_all_clips()
+
+        else:
+            self._warn("невідомий тип події %r (gseq %s)" % (etype, gseq))
+
+    # --------------------------------------------------------------- pumping
+
+    def update_display(self):
+        """Live кличе це ~10 разів на секунду -- наш єдиний надійний tick."""
+        try:
+            ControlSurface.update_display(self)
+        except Exception:
+            self._log_exc("base update_display")
+        self._safe(self._pump)
+
+    def _pump(self):
+        if self._link is None or not self._link.alive:
+            return
+        for msg in self._link.poll():
+            self._safe(self._dispatch, msg)
+        self._safe(self._flush_clips)
+        self._safe(self._flush_pending)
+        now = time.time()
+        if now - self._last_beat >= HEARTBEAT_SEC:
+            self._last_beat = now
+            self._link.send({"m": "heartbeat", "t": now})
+
+    def _dispatch(self, msg):
+        m = msg.get("m")
+        if m == "apply":
+            self._apply(msg.get("type"), msg.get("payload") or {}, msg.get("gseq"))
+        elif m == "snapshot_request":
+            self._link.send({"m": "snapshot", "state": self._snapshot()})
+        elif m == "ping":
+            self._link.send({"m": "heartbeat", "t": time.time()})
+
+    # ------------------------------------------------------------ addressing
+
+    def _track_index(self, track):
+        try:
+            tracks = self._doc.tracks
+            for i in range(len(tracks)):
+                if tracks[i] == track:
+                    return i
+        except Exception:
+            pass
+        return None
+
+    def _track_ref(self, track, idx):
+        return {"idx": idx, "name": self._safe_name(track)}
+
+    def _scene_ref(self, idx):
+        # У сцен Live за замовчуванням імені немає (цифри в UI -- це індекси, не назви),
+        # тож контрольної суми тут здебільшого не буде. Порожнє імʼя не кладемо взагалі,
+        # щоб на приймальному боці було видно різницю між "не збіглось" і "нічим звіряти".
+        ref = {"idx": idx}
+        try:
+            scenes = self._doc.scenes
+            name = self._safe_name(scenes[idx]) if idx < len(scenes) else ""
+            if name:
+                ref["name"] = name
+        except Exception:
+            pass
+        return ref
+
+    def _resolve_track(self, ref):
+        """Фаза 1: індекс -- адреса, ім'я -- контрольна сума."""
+        if not isinstance(ref, dict):
+            return None, None
+        idx = ref.get("idx")
+        tracks = self._doc.tracks
+        if not isinstance(idx, int) or idx < 0 or idx >= len(tracks):
+            self._warn("трек idx=%r поза межами (%d треків)" % (idx, len(tracks)))
+            return None, None
+        track = tracks[idx]
+        want = ref.get("name")
+        if want and self._safe_name(track) != want:
+            self._warn("розсинхрон: трек %d тут %r, у автора %r -- подію пропущено"
+                       % (idx, self._safe_name(track), want))
+            return None, None
+        return track, idx
+
+    def _resolve_scene(self, ref):
+        if not isinstance(ref, dict):
+            return None
+        idx = ref.get("idx")
+        scenes = self._doc.scenes
+        if not isinstance(idx, int) or idx < 0 or idx >= len(scenes):
+            return None
+        want = ref.get("name")
+        if want and self._safe_name(scenes[idx]) != want:
+            self._warn("розсинхрон: сцена %d тут %r, у автора %r"
+                       % (idx, self._safe_name(scenes[idx]), want))
+            return None
+        return idx
+
+    def _safe_name(self, obj):
+        try:
+            return str(obj.name)
+        except Exception:
+            return ""
+
+    # ------------------------------------------------------------- snapshots
+
+    def _prime_mirror(self, transport=True):
+        """Заповнює дзеркало поточним станом, щоб на старті не вистрелити пачкою подій."""
+        if transport:
+            self._mirror["playing"] = bool(self._doc.is_playing)
+            self._mirror["tempo"] = round(float(self._doc.tempo), 6)
+        for i, track in enumerate(self._doc.tracks):
+            try:
+                self._mirror["psi"][i] = self._norm_psi(track.playing_slot_index)
+            except Exception:
+                pass
+
+    def _snapshot(self):
+        tracks = []
+        for i, t in enumerate(self._doc.tracks):
+            try:
+                tracks.append({
+                    "idx": i,
+                    "name": self._safe_name(t),
+                    "playing_slot_index": self._norm_psi(t.playing_slot_index),
+                    "slots": len(t.clip_slots),
+                })
+            except Exception:
+                pass
+        scenes = []
+        for i, s in enumerate(self._doc.scenes):
+            scenes.append({"idx": i, "name": self._safe_name(s)})
+        return {
+            "playing": bool(self._doc.is_playing),
+            "tempo": round(float(self._doc.tempo), 6),
+            "tracks": tracks,
+            "scenes": scenes,
+        }
+
+    # -------------------------------------------------------------- plumbing
+
+    def _emit(self, etype, payload):
+        self._lseq += 1
+        self._link.send({"m": "event", "type": etype, "payload": payload, "lseq": self._lseq})
+        self._log("-> %s %r" % (etype, payload))
+
+    def _live_version(self):
+        try:
+            app = Live.Application.get_application()
+            return "%d.%d.%d" % (app.get_major_version(),
+                                 app.get_minor_version(),
+                                 app.get_bugfix_version())
+        except Exception:
+            return "unknown"
+
+    def _safe(self, fn, *args):
+        try:
+            return fn(*args)
+        except Exception:
+            self._log_exc(getattr(fn, "__name__", "?"))
+        return None
+
+    def _warn(self, text):
+        self._log("WARN " + text)
+        if self._link is not None:
+            self._link.send({"m": "log", "level": "warn", "text": text})
+
+    def _log_exc(self, where):
+        self._log("EXC in %s:\n%s" % (where, traceback.format_exc()))
+
+    def _log(self, text):
+        line = "[%s] %s" % (time.strftime("%H:%M:%S"), text)
+        try:
+            self.log_message("AbletonMP: " + text)
+        except Exception:
+            pass
+        if not self._log_file:
+            return
+        try:
+            if os.path.exists(self._log_file) and os.path.getsize(self._log_file) > LOG_MAX_BYTES:
+                os.remove(self._log_file)
+            with open(self._log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass

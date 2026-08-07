@@ -1,0 +1,15 @@
+{
+  "name": "abletonmp-daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Локальний міст: UDP (bridge у Live) <-> WebSocket (relay)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "fake-live": "node tools/fake-live.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
