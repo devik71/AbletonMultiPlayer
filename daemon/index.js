@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } fr
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+import { FileSync } from './filesync.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -80,6 +81,18 @@ let clock = { offset: 0, rtt: null };
 let registry = null;
 let registryAsked = false;
 
+const filesync = new FileSync({
+  send: (msg) => {
+    if (connected) ws.send(JSON.stringify(msg));
+  },
+  log,
+});
+// За замовчуванням теку беремо зі snapshot bridge; --project перекриває вручну
+// (потрібно, якщо сет ще не збережено -- тоді file_path порожній).
+// Сам виклик -- унизу, після оголошення `connected`: сканування одразу анонсує
+// маніфест, а це чіпає стан з'єднання.
+const PROJECT = arg('project', null);
+
 // ---------------------------------------------------------------------- UDP
 
 const udp = createSocket('udp4');
@@ -129,6 +142,7 @@ udp.on('message', (buf) => {
       // фаза 1: снапшот лише для діагностики, не для реконструкції стану
       log(`snapshot: tempo=${msg.state?.tempo} playing=${msg.state?.playing} ` +
           `tracks=${msg.state?.tracks?.length} scenes=${msg.state?.scenes?.length}`);
+      if (!PROJECT) filesync.setProjectFile(msg.state?.file_path);
       break;
     case 'registry':
       // bridge згенерував uuid для своїх об'єктів -- кладемо їх у журнал
@@ -186,6 +200,7 @@ function connect() {
         flushOutbox();
         pingClock();
         bootstrapRegistry();
+        filesync.announce(); // хай партнер одразу знає, що в нас є
         break;
       case 'commit':
         onCommit(msg.event);
@@ -201,6 +216,15 @@ function connect() {
         log(`clock: offset=${(clock.offset * 1000).toFixed(1)}ms rtt=${(clock.rtt * 1000).toFixed(1)}ms`);
         break;
       }
+      case 'files_manifest':
+        filesync.onManifest(msg.files);
+        break;
+      case 'file_request':
+        filesync.onRequest(msg.path);
+        break;
+      case 'file_chunk':
+        filesync.onChunk(msg);
+        break;
       case 'error':
         log(`relay error [${msg.code}]: ${msg.text}`);
         break;
@@ -293,6 +317,10 @@ function onCommit(ev) {
 
 // -------------------------------------------------------------------- watch
 
+// Періодичне сканування замість fs.watch: тека проєкту може лежати в OneDrive,
+// де події файлової системи приходять із затримкою або не приходять зовсім.
+setInterval(() => filesync.rescan(), 10_000);
+
 setInterval(() => {
   if (bridgeAlive && Date.now() - bridgeLastSeen > 6000) {
     bridgeAlive = false;
@@ -310,4 +338,5 @@ process.on('SIGINT', () => {
 });
 
 log(`daemon ${AUTHOR} стартував`);
+if (PROJECT) filesync.setProjectRoot(PROJECT);
 connect();

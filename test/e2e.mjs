@@ -6,7 +6,7 @@
 // і що журнал зшитий у коректний hash-chain.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -92,12 +92,16 @@ try {
   });
   await waitFor(relay, /relay слухає/);
 
+  // окрема "тека проєкту" на кожного гравця -- саме між ними ходитимуть файли
+  const projectOf = (author) => join(tmp, `project-${author}`);
+  for (const a of ['p1', 'p2', 'p3']) mkdirSync(join(projectOf(a), 'Samples'), { recursive: true });
+
   const mkDaemon = (author, inPort, outPort) =>
     launch(`daemon-${author}`, join(root, 'daemon/index.js'), [
       '--author', author, '--session', SESSION,
       '--relay', `ws://127.0.0.1:${RELAY_PORT}`,
       '--udp-in', String(inPort), '--udp-out', String(outPort),
-      '--state-dir', tmp,
+      '--state-dir', tmp, '--project', projectOf(author),
     ], { cwd: join(root, 'daemon') });
 
   const d1 = mkDaemon('p1', 19945, 19946);
@@ -226,6 +230,24 @@ try {
     await new Promise((r) => setTimeout(r, 300));
     if (l2.out.slice(afterDelete).includes(newTrackId)) {
       throw new Error('трек лишився у партнера після видалення');
+    }
+  });
+
+  await check('семпл, покладений у p1, доїхав до p2 байт у байт', async () => {
+    // 400 КБ -- більше за CHUNK, тож збірка з кількох частин теж перевіряється
+    const blob = Buffer.alloc(400 * 1024);
+    for (let i = 0; i < blob.length; i++) blob[i] = (i * 7 + 13) & 0xff;
+    writeFileSync(join(tmp, 'project-p1', 'Samples', 'kick.wav'), blob);
+
+    await waitFor(d2, /filesync: отримав Samples\/kick\.wav/, 25000);
+    const got = readFileSync(join(tmp, 'project-p2', 'Samples', 'kick.wav'));
+    if (!got.equals(blob)) throw new Error(`файл побився: ${got.length} Б замість ${blob.length}`);
+  });
+
+  await check('передача файлів не потрапляє в журнал', async () => {
+    const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8');
+    if (/file_chunk|files_manifest|kick\.wav/.test(lines)) {
+      throw new Error('File Sync Layer протік у event log');
     }
   });
 

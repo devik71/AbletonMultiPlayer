@@ -217,6 +217,16 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // File Sync Layer: незалежний від журналу (vision.md §4). Relay тут --
+      // тупа труба між учасниками, нічого не комітить і нічого не пам'ятає.
+      case 'files_manifest':
+      case 'file_request':
+      case 'file_chunk': {
+        if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
+        client.session.broadcast({ ...msg, from: client.author }, client);
+        break;
+      }
+
       case 'ping':
         send({ m: 'pong', t0: msg.t0, t1, t2: Date.now() / 1000 });
         break;

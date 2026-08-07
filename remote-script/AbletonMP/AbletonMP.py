@@ -750,9 +750,14 @@ class AbletonMP(ControlSurface):
         scenes = []
         for i, s in enumerate(self._doc.scenes):
             scenes.append({"idx": i, "name": self._safe_name(s)})
+        try:
+            file_path = str(self._doc.file_path)
+        except Exception:
+            file_path = ""
         return {
             "playing": bool(self._doc.is_playing),
             "tempo": round(float(self._doc.tempo), 6),
+            "file_path": file_path,  # daemon виводить із нього теку проєкту
             "tracks": tracks,
             "scenes": scenes,
         }
