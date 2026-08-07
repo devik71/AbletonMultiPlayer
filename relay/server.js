@@ -35,6 +35,7 @@ class Session {
   constructor(name) {
     this.name = name;
     this.journal = [];
+    this.registry = null;  // payload першого RegistryInit; далі він незмінний
     this.seen = new Set(); // "author:lseq" -- дедуплікація ре-сабмітів
     this.clients = new Set();
     this.path = join(JOURNAL_DIR, `${name}.jsonl`);
@@ -65,6 +66,7 @@ class Session {
       }
       this.journal.push(ev);
       this.seen.add(`${ev.author}:${ev.lseq}`);
+      if (ev.type === 'RegistryInit' && !this.registry) this.registry = ev.payload;
       prevHash = hash;
     }
     log(`[${this.name}] журнал відновлено: ${this.journal.length} подій, head=${this.head.gseq}`);
@@ -74,6 +76,15 @@ class Session {
   commit({ type, payload, author, lseq, ts }) {
     const dedupeKey = `${author}:${lseq}`;
     if (this.seen.has(dedupeKey)) return null;
+
+    // Реєстр ідентичності створюється один раз за сесію. Так вирішується гонка
+    // одночасного конекту двох гравців: обидва бачать порожній журнал, обидва
+    // сабмітять RegistryInit, у журнал лягає перший -- і другий приймає його
+    // як звичайний commit. Власника сесії тримати не треба.
+    if (type === 'RegistryInit' && this.registry) {
+      log(`[${this.name}] повторний RegistryInit від ${author} відхилено`);
+      return null;
+    }
 
     const prev = this.head;
     const body = {
@@ -89,6 +100,7 @@ class Session {
 
     this.journal.push(ev);
     this.seen.add(dedupeKey);
+    if (type === 'RegistryInit') this.registry = ev.payload;
     try {
       appendFileSync(this.path, JSON.stringify(ev) + '\n');
     } catch (e) {
@@ -176,7 +188,16 @@ wss.on('connection', (ws) => {
         client.session = session;
         session.clients.add(client);
 
-        send({ m: 'welcome', author: client.author, session: session.name, head: session.head, peers: session.peers() });
+        // registry віддаємо окремо від хвоста журналу: клієнт після рестарту
+        // приходить з високим since і хвіст RegistryInit уже не містить
+        send({
+          m: 'welcome',
+          author: client.author,
+          session: session.name,
+          head: session.head,
+          peers: session.peers(),
+          registry: session.registry,
+        });
         for (const ev of session.tailSince(Number(msg.since) || 0)) send({ m: 'commit', event: ev });
         session.broadcast({ m: 'peers', peers: session.peers() });
         log(`[${session.name}] + ${client.author} (${session.clients.size} онлайн, since=${msg.since || 0})`);

@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import WebSocket from '../daemon/node_modules/ws/index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'abletonmp-e2e-'));
@@ -34,8 +35,10 @@ function launch(name, file, args, opts = {}) {
   return p;
 }
 
-function waitFor(p, pattern, ms = 8000) {
-  const start = p.out.length ? 0 : 0;
+/** `from` -- зсув у буфері, з якого шукати. Без нього перевірка може збігтися
+ *  зі старим рядком і пройти фіктивно. */
+function waitFor(p, pattern, ms = 8000, from = 0) {
+  const start = from;
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + ms;
     const tick = setInterval(() => {
@@ -111,6 +114,18 @@ try {
 
   console.log('ланцюг піднявся\n');
 
+  await check('реєстр: один створює, другий приймає', async () => {
+    await waitFor(l1, /реєстр створено/);
+    await waitFor(l2, /реєстр прийнято$/m);
+    if (/незіставлено/.test(l2.out)) throw new Error('реєстр прийнято з розбіжностями');
+  });
+
+  await check('повторний RegistryInit відхиляється relay', async () => {
+    if (!/RegistryInit/.test(relay.out)) throw new Error('RegistryInit не потрапив у журнал');
+    const commits = (relay.out.match(/#\d+ RegistryInit/g) || []).length;
+    if (commits !== 1) throw new Error(`RegistryInit закомічено ${commits} разів, очікував 1`);
+  });
+
   await check('tempo від p1 доїхав до p2', async () => {
     l1.stdin.write('tempo 128\n');
     await waitFor(l2, /<- #\d+ TempoSet \{"bpm":128\}/);
@@ -118,7 +133,7 @@ try {
 
   await check('clip launch від p1 доїхав до p2', async () => {
     l1.stdin.write('launch 1 2\n');
-    await waitFor(l2, /<- #\d+ ClipLaunch .*"idx":1.*"name":"2-MIDI"/);
+    await waitFor(l2, /<- #\d+ ClipLaunch .*"track":\{"id":"[0-9a-f]{12}"/);
   });
 
   await check('transport від p2 доїхав до p1', async () => {
@@ -132,9 +147,10 @@ try {
   });
 
   await check('scene launch доїхав як одна подія, а не пачка ClipLaunch', async () => {
+    const from = l2.out.length;
     l1.stdin.write('scene 3\n');
-    await waitFor(l2, /<- #\d+ SceneLaunch .*"idx":3/);
-    if (/<- #\d+ ClipLaunch .*"scene":\{"idx":3/.test(l2.out)) {
+    await waitFor(l2, /<- #\d+ SceneLaunch \{"scene":\{"id":"[0-9a-f]{12}"\}\}/, 8000, from);
+    if (/<- #\d+ ClipLaunch/.test(l2.out.slice(from))) {
       throw new Error('сцена розсипалась на окремі ClipLaunch');
     }
   });
@@ -145,10 +161,34 @@ try {
     if (l2.out.match(/<- #\d+ ClipStop/g)) throw new Error('стоп розсипався на окремі ClipStop');
   });
 
-  await check('журнал: 5 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('uuid переживає переставляння треків у партнера', async () => {
+    // p2 тасує свої треки: індекси поїхали, uuid лишились. Подія від p1,
+    // адресована за uuid, має потрапити в той самий трек, а не в позицію.
+    const fromL2 = l2.out.length;
+    l2.stdin.write('move 0 2\n');
+    await waitFor(l2, /id незмінний/, 8000, fromL2);
+
+    // зсуви знімаємо ДО відправки, інакше подія може прилетіти раніше заміру
+    const fromL1 = l1.out.length;
+    const beforeApply = l2.out.length;
+    l1.stdin.write('launch 0 5\n');
+    await waitFor(l1, /-> ClipLaunch/, 8000, fromL1);
+    const id = l1.out.slice(fromL1).match(/-> ClipLaunch \{"track":\{"id":"([0-9a-f]{12})"/)?.[1];
+    if (!id) throw new Error('не вдалось витягти uuid треку з події p1');
+
+    await waitFor(l2, new RegExp(`<- #\\d+ ClipLaunch .*"id":"${id}"`), 8000, beforeApply);
+    if (/ВІДХИЛЕНО/.test(l2.out.slice(beforeApply))) throw new Error('подію відхилено після переставляння');
+
+    l2.stdin.write('state\n');
+    await new Promise((r) => setTimeout(r, 300));
+    const hit = new RegExp(`"id": "${id}",\\s*"name": "[^"]*",\\s*"playing_slot_index": 5`);
+    if (!hit.test(l2.out)) throw new Error('кліп поїхав не в той трек');
+  });
+
+  await check('журнал: 7 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 5) throw new Error(`очікував 5 подій, у журналі ${lines.length}`);
+    if (lines.length !== 7) throw new Error(`очікував 7 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);
@@ -160,9 +200,27 @@ try {
     });
   });
 
-  await check('розсинхрон адреси відхиляється, а не застосовується не туди', async () => {
-    l1.stdin.write('launch 9 0\n');
-    await waitFor(l1, /немає такого треку/, 2000);
+  await check('подія на невідомий uuid відхиляється, а не застосовується не туди', async () => {
+    const before = l2.out.length;
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${RELAY_PORT}`);
+      ws.on('open', () => ws.send(JSON.stringify({ m: 'join', session: SESSION, author: 'ghost', since: 1e9, proto: 1 })));
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(raw);
+        if (msg.m === 'welcome') {
+          ws.send(JSON.stringify({
+            m: 'submit',
+            event: { type: 'ClipStop', payload: { track: { id: 'deadbeefcafe' } }, lseq: Date.now() },
+          }));
+        } else if (msg.m === 'commit' && msg.event.author === 'ghost') {
+          ws.close();
+          resolve();
+        }
+      });
+      ws.on('error', reject);
+    });
+    await waitFor(l2, /ВІДХИЛЕНО \(невідомий трек\)/, 4000);
+    if (!/ВІДХИЛЕНО/.test(l2.out.slice(before))) throw new Error('подію не відхилено');
   });
 } catch (e) {
   failed += 1;

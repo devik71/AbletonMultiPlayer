@@ -20,8 +20,9 @@ except ImportError:  # старіші/інші збірки
     from _Framework.ControlSurface import ControlSurface
 
 from .link import UdpLink
+from .registry import Registry
 
-SCRIPT_VERSION = "0.3.0"
+SCRIPT_VERSION = "0.4.0"
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -57,6 +58,11 @@ class AbletonMP(ControlSurface):
         self._track_cbs = []
         self._pending = {}   # key -> відкладена подія, схлопується за ключем
         self._clip_buf = {}  # track_idx -> psi, накопичується між тіками
+        self._tracks_reg = Registry(self._log)
+        self._scenes_reg = Registry(self._log)
+        # до бутстрапу uuid ще не спільні з партнером, тож події з посиланнями
+        # на об'єкти нікуди не відправляємо -- вони б у нього не зарезолвились
+        self._registry_ready = False
         self._safe(self._setup)
 
     # ------------------------------------------------------------------ setup
@@ -159,6 +165,9 @@ class AbletonMP(ControlSurface):
         self._mirror["psi"] = {}
         self._clip_buf = {}  # накопичене посилається на старі індекси
         self._prime_mirror(transport=False)
+        # Нові треки отримають uuid ліниво, але партнер про них не знає:
+        # подій TrackCreate/TrackDelete ще немає, це наступний крок.
+        self._warn("структура треків змінилась -- реєстр партнера застарів")
         self._link.send({"m": "snapshot", "state": self._snapshot()})
 
     @staticmethod
@@ -181,6 +190,55 @@ class AbletonMP(ControlSurface):
         # Не відправляємо одразу: запуск сцени смикає listener на кожному треку
         # окремо. Накопичуємо до наступного тіку і там вирішуємо, що це було.
         self._clip_buf[idx] = psi
+
+    # -------------------------------------------------------------- registry
+
+    def _build_registry(self):
+        """Видає uuid усім об'єктам. Результат стає подією RegistryInit у журналі."""
+        self._tracks_reg.clear()
+        self._scenes_reg.clear()
+        reg = {"tracks": [], "scenes": []}
+        for i, t in enumerate(self._doc.tracks):
+            reg["tracks"].append({"id": self._tracks_reg.id_of(t), "idx": i, "name": self._safe_name(t)})
+        for i, s in enumerate(self._doc.scenes):
+            reg["scenes"].append({"id": self._scenes_reg.id_of(s), "idx": i, "name": self._safe_name(s)})
+        self._registry_ready = True
+        self._log("реєстр створено: %d треків, %d сцен" % (len(reg["tracks"]), len(reg["scenes"])))
+        return reg
+
+    def _adopt_registry(self, reg):
+        """Накладає чужі uuid на свої об'єкти за позицією, звіряючи імена.
+
+        Це єдине місце, де індекс ще є адресою -- одноразово, на бутстрапі.
+        Далі індекси в протоколі не фігурують взагалі.
+        """
+        self._tracks_reg.clear()
+        self._scenes_reg.clear()
+        problems = []
+
+        for kind, records, objects, reg_obj in (
+            ("трек", reg.get("tracks") or [], self._doc.tracks, self._tracks_reg),
+            ("сцена", reg.get("scenes") or [], self._doc.scenes, self._scenes_reg),
+        ):
+            for rec in records:
+                i = rec.get("idx")
+                if not isinstance(i, int) or i < 0 or i >= len(objects):
+                    problems.append("%s %r: позиції %r тут немає" % (kind, rec.get("name"), i))
+                    continue
+                want = rec.get("name")
+                if want and self._safe_name(objects[i]) != want:
+                    problems.append("%s %d: тут %r, у партнера %r"
+                                    % (kind, i, self._safe_name(objects[i]), want))
+                    continue
+                reg_obj.bind(rec.get("id"), objects[i])
+
+        self._registry_ready = True
+        self._log("реєстр прийнято: %d треків, %d сцен"
+                  % (len(self._tracks_reg), len(self._scenes_reg)))
+        if problems:
+            # проєкти розійшлись; події на незіставлені об'єкти просто не застосуються
+            self._warn("бутстрап реєстру, незіставлено %d: %s"
+                       % (len(problems), "; ".join(problems[:5])))
 
     # ------------------------------------------------------------ coalescing
 
@@ -211,6 +269,10 @@ class AbletonMP(ControlSurface):
         не відправляємо -- scene.fire() на тому боці відтворить їх сам.
         """
         if not self._clip_buf:
+            return
+        if not self._registry_ready:
+            self._clip_buf = {}
+            self._warn("реєстр ще не готовий -- зміни кліпів не відправлено")
             return
         buf, self._clip_buf = self._clip_buf, {}
 
@@ -258,7 +320,7 @@ class AbletonMP(ControlSurface):
 
         elif etype == "ClipLaunch":
             track, idx = self._resolve_track(payload.get("track"))
-            if track is None:
+            if track is None or idx is None:
                 return
             sidx = self._resolve_scene(payload.get("scene"))
             if sidx is None or sidx >= len(track.clip_slots):
@@ -289,7 +351,7 @@ class AbletonMP(ControlSurface):
 
         elif etype == "ClipStop":
             track, idx = self._resolve_track(payload.get("track"))
-            if track is None:
+            if track is None or idx is None:
                 return
             self._mirror["psi"][idx] = -1
             track.stop_all_clips()
@@ -325,6 +387,10 @@ class AbletonMP(ControlSurface):
             self._apply(msg.get("type"), msg.get("payload") or {}, msg.get("gseq"))
         elif m == "snapshot_request":
             self._link.send({"m": "snapshot", "state": self._snapshot()})
+        elif m == "registry_build":
+            self._link.send({"m": "registry", "registry": self._build_registry()})
+        elif m == "registry_adopt":
+            self._adopt_registry(msg.get("registry") or {})
         elif m == "ping":
             self._link.send({"m": "heartbeat", "t": time.time()})
 
@@ -340,53 +406,49 @@ class AbletonMP(ControlSurface):
             pass
         return None
 
-    def _track_ref(self, track, idx):
-        return {"idx": idx, "name": self._safe_name(track)}
+    def _track_ref(self, track, idx=None):
+        """Адреса -- uuid. idx і name лишаються тільки для читабельності логів."""
+        return {"id": self._tracks_reg.id_of(track), "name": self._safe_name(track)}
 
     def _scene_ref(self, idx):
-        # У сцен Live за замовчуванням імені немає (цифри в UI -- це індекси, не назви),
-        # тож контрольної суми тут здебільшого не буде. Порожнє імʼя не кладемо взагалі,
-        # щоб на приймальному боці було видно різницю між "не збіглось" і "нічим звіряти".
-        ref = {"idx": idx}
-        try:
-            scenes = self._doc.scenes
-            name = self._safe_name(scenes[idx]) if idx < len(scenes) else ""
-            if name:
-                ref["name"] = name
-        except Exception:
-            pass
+        scenes = self._doc.scenes
+        if idx < 0 or idx >= len(scenes):
+            return {"id": None}
+        scene = scenes[idx]
+        ref = {"id": self._scenes_reg.id_of(scene)}
+        # У сцен Live за замовчуванням імені немає (цифри в UI -- це індекси,
+        # не назви), тож порожнє поле не кладемо взагалі.
+        name = self._safe_name(scene)
+        if name:
+            ref["name"] = name
         return ref
 
     def _resolve_track(self, ref):
-        """Фаза 1: індекс -- адреса, ім'я -- контрольна сума."""
+        """Повертає (об'єкт, поточний індекс) або (None, None)."""
         if not isinstance(ref, dict):
             return None, None
-        idx = ref.get("idx")
-        tracks = self._doc.tracks
-        if not isinstance(idx, int) or idx < 0 or idx >= len(tracks):
-            self._warn("трек idx=%r поза межами (%d треків)" % (idx, len(tracks)))
+        uid = ref.get("id")
+        track = self._tracks_reg.obj_of(uid) if uid else None
+        if track is None:
+            # невідомий uuid = об'єкта тут немає або він видалений (tombstone)
+            self._warn("трек %r невідомий, подію пропущено" % (uid,))
             return None, None
-        track = tracks[idx]
-        want = ref.get("name")
-        if want and self._safe_name(track) != want:
-            self._warn("розсинхрон: трек %d тут %r, у автора %r -- подію пропущено"
-                       % (idx, self._safe_name(track), want))
-            return None, None
-        return track, idx
+        return track, self._track_index(track)
 
     def _resolve_scene(self, ref):
+        """Сцену адресуємо uuid, але LOM працює індексами -- вертаємо індекс."""
         if not isinstance(ref, dict):
             return None
-        idx = ref.get("idx")
+        uid = ref.get("id")
+        scene = self._scenes_reg.obj_of(uid) if uid else None
+        if scene is None:
+            self._warn("сцена %r невідома, подію пропущено" % (uid,))
+            return None
         scenes = self._doc.scenes
-        if not isinstance(idx, int) or idx < 0 or idx >= len(scenes):
-            return None
-        want = ref.get("name")
-        if want and self._safe_name(scenes[idx]) != want:
-            self._warn("розсинхрон: сцена %d тут %r, у автора %r"
-                       % (idx, self._safe_name(scenes[idx]), want))
-            return None
-        return idx
+        for i in range(len(scenes)):
+            if scenes[i] == scene:
+                return i
+        return None
 
     def _safe_name(self, obj):
         try:

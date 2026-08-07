@@ -76,6 +76,10 @@ const saveOutbox = () =>
 
 let clock = { offset: 0, rtt: null };
 
+/** Реєстр ідентичності: або приймаємо чужий, або створюємо, якщо сесія порожня. */
+let registry = null;
+let registryAsked = false;
+
 // ---------------------------------------------------------------------- UDP
 
 const udp = createSocket('udp4');
@@ -102,6 +106,8 @@ udp.on('message', (buf) => {
     case 'hello':
       bridgeAlive = true;
       log(`bridge підключився: Live ${msg.live}, script ${msg.script}, pid ${msg.pid}`);
+      registryAsked = false; // Live перезавантажився -- його реєстр треба відновити
+      bootstrapRegistry();
       break;
     case 'bye':
       bridgeAlive = false;
@@ -120,6 +126,12 @@ udp.on('message', (buf) => {
       // фаза 1: снапшот лише для діагностики, не для реконструкції стану
       log(`snapshot: tempo=${msg.state?.tempo} playing=${msg.state?.playing} ` +
           `tracks=${msg.state?.tracks?.length} scenes=${msg.state?.scenes?.length}`);
+      break;
+    case 'registry':
+      // bridge згенерував uuid для своїх об'єктів -- кладемо їх у журнал
+      log(`bridge створив реєстр: ${msg.registry?.tracks?.length} треків, ` +
+          `${msg.registry?.scenes?.length} сцен`);
+      submit('RegistryInit', msg.registry);
       break;
     case 'log':
       log(`[bridge/${msg.level}] ${msg.text}`);
@@ -167,8 +179,10 @@ function connect() {
     switch (msg.m) {
       case 'welcome':
         log(`relay: head=${msg.head.gseq}, у сесії ${msg.peers.join(', ') || '—'}`);
+        registry = msg.registry || null;
         flushOutbox();
         pingClock();
+        bootstrapRegistry();
         break;
       case 'commit':
         onCommit(msg.event);
@@ -210,6 +224,19 @@ function pingClock() {
 
 // --------------------------------------------------------------------- flow
 
+/** Або віддаємо bridge готовий реєстр сесії, або просимо створити новий. */
+function bootstrapRegistry() {
+  if (!bridgeAlive || !connected || registryAsked) return;
+  registryAsked = true;
+  if (registry) {
+    log('віддаю bridge реєстр сесії');
+    toBridge({ m: 'registry_adopt', registry });
+  } else {
+    log('сесія без реєстру — прошу bridge створити');
+    toBridge({ m: 'registry_build' });
+  }
+}
+
 function submit(type, payload) {
   state.lseq += 1;
   saveState();
@@ -231,6 +258,17 @@ function onCommit(ev) {
   state.lastGseq = ev.gseq;
   saveState();
   appendFileSync(localJournalPath, JSON.stringify(ev) + '\n');
+
+  if (ev.type === 'RegistryInit') {
+    // Однаковий шлях для автора і для партнера: реєстр канонічний той,
+    // що ліг у журнал, а не той, що згенерував локальний bridge.
+    registry = ev.payload;
+    outbox = outbox.filter((e) => e.type !== 'RegistryInit');
+    saveOutbox();
+    log(`#${ev.gseq} RegistryInit від ${ev.author} — віддаю bridge`);
+    if (bridgeAlive) toBridge({ m: 'registry_adopt', registry });
+    return;
+  }
 
   const mine = ev.author === AUTHOR;
   if (mine) {
