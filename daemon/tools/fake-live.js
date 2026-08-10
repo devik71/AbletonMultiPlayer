@@ -6,7 +6,8 @@
 //
 // Команди зі stdin: play | stop | tempo <bpm> | launch <t> <s> | scene <n>
 //                   stopclip <t> | stopall | note <t> <s> <pitch> <start> <duration> <velocity>
-//                   delnote <t> <s> <pitch> <start> | delclip <t> <s> | state
+//                   delnote <t> <s> <pitch> <start> | delclip <t> <s>
+//                   device <track> <device> <parameter> <value> | state
 
 import { createSocket } from 'node:dgram';
 import { randomBytes } from 'node:crypto';
@@ -23,6 +24,26 @@ const NOTE_TIME_SPAN = 4;
 const NOTE_PITCH_SPAN = 16;
 
 const emptyClips = (count) => Array.from({ length: count }, () => null);
+const fakeDevices = () => [
+  {
+    class_name: 'Operator',
+    class_display_name: 'Operator',
+    parameters: [
+      { name: 'Device On', value: 1, min: 0, max: 1, is_quantized: true },
+      { name: 'Filter Freq', value: 0.5, min: 0, max: 1, is_quantized: false },
+    ],
+  },
+  {
+    class_name: 'AutoFilter',
+    class_display_name: 'Auto Filter',
+    parameters: [{ name: 'Frequency', value: 0.4, min: 0, max: 1, is_quantized: false }],
+  },
+  {
+    class_name: 'AutoFilter',
+    class_display_name: 'Auto Filter',
+    parameters: [{ name: 'Frequency', value: 0.6, min: 0, max: 1, is_quantized: false }],
+  },
+];
 
 // Фейковий стан "проєкту" -- дзеркало того, що тримає справжній bridge.
 // id заповнюються на бутстрапі: або генеруємо, або приймаємо чужі.
@@ -30,9 +51,9 @@ const song = {
   playing: false,
   tempo: 120,
   tracks: [
-    { id: null, name: '1-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, clips: emptyClips(8), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '1-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
   ],
   scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}` })),
 };
@@ -44,6 +65,25 @@ const trackById = (id) => song.tracks.find((t) => t.id === id);
 const sceneIdx = (id) => song.scenes.findIndex((s) => s.id === id);
 const trackRef = (t) => ({ id: t.id, name: t.name });
 const sceneRef = (s) => ({ id: s.id });
+const deviceSignature = (d) => `${d.class_name}\u0000${d.class_display_name}`;
+const deviceRef = (track, device) => ({
+  class_name: device.class_name,
+  class_display_name: device.class_display_name,
+  ordinal: track.devices.slice(0, track.devices.indexOf(device))
+    .filter((candidate) => deviceSignature(candidate) === deviceSignature(device)).length,
+});
+const parameterRef = (device, parameter) => ({
+  name: parameter.name,
+  ordinal: device.parameters.slice(0, device.parameters.indexOf(parameter))
+    .filter((candidate) => candidate.name === parameter.name).length,
+});
+const resolveDeviceParameter = (track, dref, pref) => {
+  const devices = track.devices.filter((device) =>
+    device.class_name === dref?.class_name && device.class_display_name === dref?.class_display_name);
+  const device = devices[dref?.ordinal];
+  const parameters = device?.parameters.filter((parameter) => parameter.name === pref?.name) || [];
+  return { device, parameter: parameters[pref?.ordinal] };
+};
 const noteRegion = (note) => {
   const fromPitch = Math.floor(note.pitch / NOTE_PITCH_SPAN) * NOTE_PITCH_SPAN;
   const fromTime = Math.floor(note.start_time / NOTE_TIME_SPAN) * NOTE_TIME_SPAN;
@@ -72,12 +112,12 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.12.0-fake'),
+    script: arg('script', '0.13.0-fake'),
     pid: process.pid,
     features: ['apply_ack'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
-      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,' +
+      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet').split(','),
   });
 
@@ -165,6 +205,17 @@ function apply(type, payload, gseq) {
       t.mix[`${payload.param}:${payload.index ?? '-'}`] = payload.value;
       break;
     }
+    case 'DeviceParamSet': {
+      const t = trackById(payload.track?.id);
+      if (!t) return reject('невідомий трек');
+      const { device, parameter } = resolveDeviceParameter(t, payload.device, payload.parameter);
+      if (!device) return reject('невідомий device');
+      if (!parameter) return reject('невідомий параметр device');
+      const value = Number(payload.value);
+      if (!Number.isFinite(value)) return reject('некоректне значення');
+      parameter.value = Math.max(parameter.min, Math.min(parameter.max, value));
+      break;
+    }
     case 'TrackToggle': {
       const t = trackById(payload.track?.id);
       if (!t) return reject('невідомий трек');
@@ -180,6 +231,7 @@ function apply(type, payload, gseq) {
         playing_slot_index: -1,
         slots: song.scenes.length,
         clips: emptyClips(song.scenes.length),
+        devices: [],
         mix: {},
         mute: false,
         solo: false,
@@ -334,7 +386,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'addtrack': {
       const kind = rest[0] === 'audio' ? 'audio' : 'midi';
       const idx = Number.isInteger(Number(rest[1])) && rest[1] !== undefined ? Number(rest[1]) : song.tracks.length;
-      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), mix: {}, mute: false, solo: false, arm: false };
+      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), devices: [], mix: {}, mute: false, solo: false, arm: false };
       song.tracks.splice(idx, 0, t);
       emit('TrackCreate', { track: { id: t.id, name: t.name }, idx, kind });
       break;
@@ -434,6 +486,23 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       emit('ClipDelete', { track: trackRef(t), scene: sceneRef(s) });
       break;
     }
+    case 'device': {
+      const t = track();
+      const device = t?.devices[Number(rest[1])];
+      const parameter = device?.parameters[Number(rest[2])];
+      const value = Number(rest[3]);
+      if (!t || !device || !parameter || !Number.isFinite(value)) {
+        return console.log('немає такого device/parameter або значення некоректне');
+      }
+      parameter.value = Math.max(parameter.min, Math.min(parameter.max, value));
+      emit('DeviceParamSet', {
+        track: { id: t.id },
+        device: deviceRef(t, device),
+        parameter: parameterRef(device, parameter),
+        value: parameter.value,
+      });
+      break;
+    }
     case 'vol':
     case 'pan':
     case 'send': {
@@ -485,6 +554,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         'play | stop | tempo <bpm>',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
+        'device <track> <device> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',
         'addtrack [midi|audio] [idx] | deltrack <t> | addscene [idx] | delscene <n>',
         'rename <t> <name> | move <from> <to> | state',
       ].join('\n'));

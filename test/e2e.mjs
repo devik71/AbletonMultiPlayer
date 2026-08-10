@@ -284,6 +284,23 @@ try {
     await waitFor(l2, /<- #\d+ TrackToggle .*"param":"mute","value":true/, 8000, from);
   });
 
+  await check('device parameter адресується сигнатурою та ordinal дубліката', async () => {
+    const from = l2.out.length;
+    // device 2 is the second of two identical Auto Filters: ordinal must be 1.
+    l1.stdin.write('device 0 2 0 0.83\n');
+    await waitFor(l2, /<- #\d+ DeviceParamSet .*"class_name":"AutoFilter".*"ordinal":1.*"name":"Frequency".*"value":0\.83/, 8000, from);
+
+    const stateFrom = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"value": 0\.83/, 8000, stateFrom);
+  });
+
+  await check('quantized device parameter синхронізується у зворотний бік', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('device 1 0 0 0\n');
+    await waitFor(l1, /<- #\d+ DeviceParamSet .*"class_name":"Operator".*"name":"Device On".*"value":0/, 8000, from);
+  });
+
   let newTrackId = null;
 
   await check('створення треку доїхало до партнера', async () => {
@@ -333,10 +350,10 @@ try {
     }
   });
 
-  await check('журнал: 18 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 20 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 18) throw new Error(`очікував 18 подій, у журналі ${lines.length}`);
+    if (lines.length !== 20) throw new Error(`очікував 20 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

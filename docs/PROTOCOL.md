@@ -23,7 +23,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.12.0","pid":1234,"features":["apply_ack"],"events":[...]}
+{"m":"hello","live":"12.3.8","script":"0.13.0","pid":1234,"features":["apply_ack"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
@@ -185,6 +185,7 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
 | `MixerSet` | `{track: {id}, param: "volume"\|"panning"\|"send", index?, value}` | `mixer_device.<param>.value = v` |
 | `TrackToggle` | `{track: {id}, param: "mute"\|"solo"\|"arm", value: bool}` | `track.<param> = v` |
+| `DeviceParamSet` | `{track, device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
 | `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name}}` | `clip_slot.create_clip(length)` |
 | `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
 | `ClipNotesSet` | `{track, scene, clip, region, notes: [...]}` | заміна всіх MIDI-нот у регіоні |
@@ -193,6 +194,29 @@ Relay пише `journal.jsonl` — один закомічений івент н
 `TrackToggle` йде одразу: дебаунс дискретного перемикача лише додав би затримки.
 Значення клампиться межами самого `DeviceParameter` (`p.min`/`p.max`) — вони різні
 для гучності й send-ів, а вихід за межі кидає виняток.
+
+### Параметри девайсів
+
+`DeviceParamSet` покриває automatable-параметри верхньорівневих девайсів звичайних
+треків. Неперервні значення дебаунсяться на 200 мс, quantized-перемикачі та enum-и
+йдуть одразу. Кожне значення клампиться локальними `min`/`max`; disabled-параметр
+не змінюється.
+
+LOM не дає девайсу стабільного uuid, тому адреса складається з незмінної сигнатури
+`class_name + class_display_name` та `ordinal` серед девайсів із тією самою
+сигнатурою на треку. Параметр так само адресується оригінальним ім'ям (із fallback
+на `name`) та ordinal серед тезок. Exact match обов'язковий: якщо на партнерській
+машині немає відповідного плагіна або параметра, bridge пише warning і нічого не
+змінює. Вставка однакового девайсу перед іншим однаковим девайсом може змінити
+ordinal — це відома межа до появи синхронізації структури девайсів.
+
+Активна playback-automation (`automation_state == 1`) не породжує мережевих подій:
+інакше кожен automation tick потрапляв би в журнал. Ручний override
+(`automation_state == 2`) вважається дією користувача й синхронізується.
+
+У milestone 0.13 свідомо не входять return/master devices, вкладені девайси Rack
+chains, а також створення, видалення й переставляння девайсів. Для nested chains
+спочатку потрібна стабільна ідентичність самих Chain.
 
 Send адресується індексом, не uuid: у LOM це позиція в списку, прив'язана до
 порядку return-треків. Поява чи зникнення return-треку змінює кількість send-ів

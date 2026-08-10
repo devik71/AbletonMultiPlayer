@@ -13,8 +13,9 @@
 **Статус.** Працює на парі машин у локальній мережі, перевірено на Live 12.3.8
 і 12.3.5 одночасно. Синхронізуються транспорт, темп, запуск кліпів і сцен,
 структура треків, мікшер, а від версії bridge 0.12 — створення/видалення Session
-MIDI-кліпів та їхні ноти. Параметри девайсів і Arrangement — ще ні, тож два
-`.als` після спільної сесії поки не збігаються повністю.
+MIDI-кліпів та їхні ноти. Від bridge 0.13 синхронізуються параметри верхньорівневих
+девайсів на звичайних треках. Вкладені Rack chains, структура девайсів і Arrangement
+— ще ні, тож два `.als` після спільної сесії поки не збігаються повністю.
 
 ## Як це влаштовано
 
@@ -43,6 +44,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python, у процесі Live)
 | `ClipLaunch`, `ClipStop`, `SceneLaunch`, `StopAllClips` | запуск і зупинка |
 | `TrackCreate`, `TrackDelete`, `SceneCreate`, `SceneDelete` | структура |
 | `MixerSet`, `TrackToggle` | гучність, панорама, send-и, mute/solo/arm |
+| `DeviceParamSet` | automatable-параметри верхньорівневих девайсів |
 | `ClipCreate`, `ClipDelete`, `ClipNotesSet` | Session MIDI-кліпи та ноти |
 | `RegistryInit` | ідентичність об'єктів на старті сесії |
 
@@ -116,14 +118,14 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 5 hardening/recovery + 26 E2E-перевірок
+npm test                   # 5 hardening/recovery + 28 E2E-перевірок
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
 Ручний прогін: підняти relay, потім по парі daemon + fake-live на різних портах.
 Команди fake-live: `play`, `tempo 128`, `launch 1 2`, `scene 3`, `vol 1 0.5`,
 `mute 0`, `addtrack`, `move 0 2`, `note 0 0 60 0 1 100`, `delnote 0 0 60 0`,
-`delclip 0 0`, `state`.
+`delclip 0 0`, `device 0 0 1 0.75`, `state`.
 
 `test/inject.mjs` кидає одну подію в relay від імені окремого учасника — зручно
 перевіряти застосування в справжньому Live без другої машини.
