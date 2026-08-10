@@ -49,8 +49,9 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.10.0-fake'),
+    script: arg('script', '0.11.0-fake'),
     pid: process.pid,
+    features: ['apply_ack'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle').split(','),
@@ -189,7 +190,14 @@ udp.on('message', (buf) => {
     return;
   }
   if (msg.m === 'hello_request') sendHello();
-  else if (msg.m === 'apply') apply(msg.type, msg.payload, msg.gseq);
+  else if (msg.m === 'apply') {
+    try {
+      apply(msg.type, msg.payload, msg.gseq);
+      send({ m: 'apply_ack', gseq: msg.gseq, ok: true });
+    } catch (error) {
+      send({ m: 'apply_ack', gseq: msg.gseq, ok: false, error: error.message });
+    }
+  }
   else if (msg.m === 'snapshot_request') send({ m: 'snapshot', state: snapshot() });
   else if (msg.m === 'registry_build') send({ m: 'registry', registry: buildRegistry() });
   else if (msg.m === 'registry_adopt') adoptRegistry(msg.registry || {});
