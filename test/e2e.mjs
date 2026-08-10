@@ -301,6 +301,20 @@ try {
     await waitFor(l1, /<- #\d+ DeviceParamSet .*"class_name":"Operator".*"name":"Device On".*"value":0/, 8000, from);
   });
 
+  await check('параметр device проходить через два вкладені Rack chains', async () => {
+    const from = l2.out.length;
+    // device path: outer Rack / duplicate chain #1 / inner Rack / chain #0 / Auto Filter.
+    l1.stdin.write('device 0 3/1/0/0/0 0 0.91\n');
+    await waitFor(l2, /<- #\d+ DeviceParamSet .*"class_name":"AutoFilter".*"value":0\.91,"chain_path":\[\{"id":"[0-9a-f]{12}"\},\{"id":"[0-9a-f]{12}"\}\]/, 8000, from);
+  });
+
+  await check('UUID Rack chain працює у зворотний бік для chain-тезок', async () => {
+    const from = l1.out.length;
+    // Outer chain #0 has the same name as #1, but a distinct UUID.
+    l2.stdin.write('device 2 3/0/0 0 0.12\n');
+    await waitFor(l1, /<- #\d+ DeviceParamSet .*"class_name":"AutoFilter".*"value":0\.12,"chain_path":\[\{"id":"[0-9a-f]{12}"\}\]/, 8000, from);
+  });
+
   let newTrackId = null;
 
   await check('створення треку доїхало до партнера', async () => {
@@ -350,10 +364,10 @@ try {
     }
   });
 
-  await check('журнал: 20 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 22 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 20) throw new Error(`очікував 20 подій, у журналі ${lines.length}`);
+    if (lines.length !== 22) throw new Error(`очікував 22 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

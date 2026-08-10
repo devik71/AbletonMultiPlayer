@@ -7,10 +7,10 @@
 // Команди зі stdin: play | stop | tempo <bpm> | launch <t> <s> | scene <n>
 //                   stopclip <t> | stopall | note <t> <s> <pitch> <start> <duration> <velocity>
 //                   delnote <t> <s> <pitch> <start> | delclip <t> <s>
-//                   device <track> <device> <parameter> <value> | state
+//                   device <track> <device[/chain/device...]> <parameter> <value> | state
 
 import { createSocket } from 'node:dgram';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
 function arg(name, fallback) {
@@ -24,6 +24,31 @@ const NOTE_TIME_SPAN = 4;
 const NOTE_PITCH_SPAN = 16;
 
 const emptyClips = (count) => Array.from({ length: count }, () => null);
+const fakeParam = (name, value = 0.5, isQuantized = false) =>
+  ({ name, value, min: 0, max: 1, is_quantized: isQuantized });
+const fakeFilter = (value = 0.5) => ({
+  class_name: 'AutoFilter',
+  class_display_name: 'Auto Filter',
+  parameters: [fakeParam('Frequency', value)],
+});
+const fakeNestedRack = () => ({
+  class_name: 'AudioEffectGroupDevice',
+  class_display_name: 'Audio Effect Rack',
+  parameters: [fakeParam('Macro 1', 0.5)],
+  chains: [{ id: null, name: 'Inner Chain', devices: [fakeFilter(0.35)] }],
+  return_chains: [],
+});
+const fakeRack = () => ({
+  class_name: 'AudioEffectGroupDevice',
+  class_display_name: 'Audio Effect Rack',
+  parameters: [fakeParam('Macro 1', 0.5)],
+  // Duplicate names are intentional: identity must not depend on name alone.
+  chains: [
+    { id: null, name: 'Chain', devices: [fakeFilter(0.25)] },
+    { id: null, name: 'Chain', devices: [fakeNestedRack()] },
+  ],
+  return_chains: [],
+});
 const fakeDevices = () => [
   {
     class_name: 'Operator',
@@ -43,6 +68,7 @@ const fakeDevices = () => [
     class_display_name: 'Auto Filter',
     parameters: [{ name: 'Frequency', value: 0.6, min: 0, max: 1, is_quantized: false }],
   },
+  fakeRack(),
 ];
 
 // Фейковий стан "проєкту" -- дзеркало того, що тримає справжній bridge.
@@ -66,10 +92,10 @@ const sceneIdx = (id) => song.scenes.findIndex((s) => s.id === id);
 const trackRef = (t) => ({ id: t.id, name: t.name });
 const sceneRef = (s) => ({ id: s.id });
 const deviceSignature = (d) => `${d.class_name}\u0000${d.class_display_name}`;
-const deviceRef = (track, device) => ({
+const deviceRef = (container, device) => ({
   class_name: device.class_name,
   class_display_name: device.class_display_name,
-  ordinal: track.devices.slice(0, track.devices.indexOf(device))
+  ordinal: container.devices.slice(0, container.devices.indexOf(device))
     .filter((candidate) => deviceSignature(candidate) === deviceSignature(device)).length,
 });
 const parameterRef = (device, parameter) => ({
@@ -77,12 +103,75 @@ const parameterRef = (device, parameter) => ({
   ordinal: device.parameters.slice(0, device.parameters.indexOf(parameter))
     .filter((candidate) => candidate.name === parameter.name).length,
 });
-const resolveDeviceParameter = (track, dref, pref) => {
-  const devices = track.devices.filter((device) =>
+const chainGroups = (rack) => [
+  ['chains', rack.chains || []],
+  ['return_chains', rack.return_chains || []],
+];
+const chainLocator = (track, parentId, container, rack, kind, idx, chain) => ({
+  track: track.id,
+  parent_chain: parentId,
+  rack: deviceRef(container, rack),
+  kind,
+  idx,
+  name: chain.name,
+});
+let chainRecords = [];
+function refreshChainIds(preferredRecords = []) {
+  const preferred = new Map(preferredRecords.map((rec) => {
+    const { id: _id, ...locator } = rec;
+    return [JSON.stringify(locator), rec.id];
+  }));
+  chainRecords = [];
+  const walk = (track, container, parentId, depth) => {
+    if (depth > 16) return;
+    for (const rack of container.devices || []) {
+      for (const [kind, chains] of chainGroups(rack)) {
+        chains.forEach((chain, idx) => {
+          const locator = chainLocator(track, parentId, container, rack, kind, idx, chain);
+          const key = JSON.stringify(locator);
+          chain.id = preferred.get(key) || chain.id || createHash('sha256').update(key).digest('hex').slice(0, 12);
+          chainRecords.push({ ...locator, id: chain.id });
+          walk(track, chain, chain.id, depth + 1);
+        });
+      }
+    }
+  };
+  for (const track of song.tracks) walk(track, track, null, 0);
+}
+const chainInContainer = (container, id) => {
+  for (const rack of container.devices || []) {
+    for (const [_kind, chains] of chainGroups(rack)) {
+      const chain = chains.find((candidate) => candidate.id === id);
+      if (chain) return chain;
+    }
+  }
+  return null;
+};
+const resolveDeviceParameter = (track, chainPath, dref, pref) => {
+  let container = track;
+  for (const cref of chainPath || []) {
+    container = chainInContainer(container, cref?.id);
+    if (!container) return {};
+  }
+  const devices = container.devices.filter((device) =>
     device.class_name === dref?.class_name && device.class_display_name === dref?.class_display_name);
   const device = devices[dref?.ordinal];
   const parameters = device?.parameters.filter((parameter) => parameter.name === pref?.name) || [];
   return { device, parameter: parameters[pref?.ordinal] };
+};
+const locateDevice = (track, path) => {
+  let container = track;
+  const chainPath = [];
+  for (let i = 0; i < path.length; i += 2) {
+    const device = container?.devices[path[i]];
+    if (!device) return {};
+    if (i === path.length - 1) return { container, device, chainPath };
+    const chain = device.chains?.[path[i + 1]];
+    if (!chain) return {};
+    chainPath.push({ id: chain.id });
+    container = chain;
+  }
+  return {};
 };
 const noteRegion = (note) => {
   const fromPitch = Math.floor(note.pitch / NOTE_PITCH_SPAN) * NOTE_PITCH_SPAN;
@@ -112,7 +201,7 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.13.0-fake'),
+    script: arg('script', '0.14.0-fake'),
     pid: process.pid,
     features: ['apply_ack'],
     events: arg('events',
@@ -140,11 +229,13 @@ const snapshot = () => ({
 function buildRegistry() {
   song.tracks.forEach((t) => (t.id = newId()));
   song.scenes.forEach((s) => (s.id = newId()));
+  refreshChainIds();
   registryReady = true;
   console.log('реєстр створено');
   return {
     tracks: song.tracks.map((t, idx) => ({ id: t.id, idx, name: t.name })),
     scenes: song.scenes.map((s, idx) => ({ id: s.id, idx, name: s.name })),
+    chains: chainRecords,
   };
 }
 
@@ -160,6 +251,11 @@ function adoptRegistry(reg) {
       else if (rec.name && o.name !== rec.name) problems.push(`${kind} ${rec.idx}: ${o.name} != ${rec.name}`);
       else o.id = rec.id;
     }
+  }
+  refreshChainIds(reg.chains || []);
+  const knownChains = new Set(chainRecords.map((rec) => rec.id));
+  for (const rec of reg.chains || []) {
+    if (!knownChains.has(rec.id)) problems.push(`Rack chain ${rec.name}: не зіставився`);
   }
   registryReady = true;
   console.log(`реєстр прийнято${problems.length ? `, незіставлено: ${problems.join('; ')}` : ''}`);
@@ -208,7 +304,8 @@ function apply(type, payload, gseq) {
     case 'DeviceParamSet': {
       const t = trackById(payload.track?.id);
       if (!t) return reject('невідомий трек');
-      const { device, parameter } = resolveDeviceParameter(t, payload.device, payload.parameter);
+      const { device, parameter } = resolveDeviceParameter(
+        t, payload.chain_path || [], payload.device, payload.parameter);
       if (!device) return reject('невідомий device');
       if (!parameter) return reject('невідомий параметр device');
       const value = Number(payload.value);
@@ -488,19 +585,22 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }
     case 'device': {
       const t = track();
-      const device = t?.devices[Number(rest[1])];
+      const path = String(rest[1] || '').split('/').map(Number);
+      const { container, device, chainPath } = locateDevice(t, path);
       const parameter = device?.parameters[Number(rest[2])];
       const value = Number(rest[3]);
-      if (!t || !device || !parameter || !Number.isFinite(value)) {
+      if (!t || !container || !device || !parameter || !Number.isFinite(value)) {
         return console.log('немає такого device/parameter або значення некоректне');
       }
       parameter.value = Math.max(parameter.min, Math.min(parameter.max, value));
-      emit('DeviceParamSet', {
+      const payload = {
         track: { id: t.id },
-        device: deviceRef(t, device),
+        device: deviceRef(container, device),
         parameter: parameterRef(device, parameter),
         value: parameter.value,
-      });
+      };
+      if (chainPath.length) payload.chain_path = chainPath;
+      emit('DeviceParamSet', payload);
       break;
     }
     case 'vol':
@@ -554,7 +654,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         'play | stop | tempo <bpm>',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
-        'device <track> <device> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',
+        'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',
         'addtrack [midi|audio] [idx] | deltrack <t> | addscene [idx] | delscene <n>',
         'rename <t> <name> | move <from> <to> | state',
       ].join('\n'));

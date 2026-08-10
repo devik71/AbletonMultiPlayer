@@ -23,7 +23,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.13.0","pid":1234,"features":["apply_ack"],"events":[...]}
+{"m":"hello","live":"12.3.8","script":"0.14.0","pid":1234,"features":["apply_ack"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
@@ -38,7 +38,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 {"m":"apply","type":"TransportSet","payload":{"playing":true},"gseq":42}
 {"m":"snapshot_request"}
 {"m":"registry_build"}
-{"m":"registry_adopt","registry":{"tracks":[...],"scenes":[...]}}
+{"m":"registry_adopt","registry":{"tracks":[...],"scenes":[...],"chains":[...]}}
 {"m":"ping","t":1723000000.0}
 ```
 
@@ -172,7 +172,7 @@ Relay пише `journal.jsonl` — один закомічений івент н
 
 | Type | Payload | Apply у LOM |
 |---|---|---|
-| `RegistryInit` | `{tracks: [{id, idx, name}], scenes: [...]}` | — (бутстрап, див. нижче) |
+| `RegistryInit` | `{tracks: [{id, idx, name}], scenes: [...], chains: [{id, track, parent_chain, rack, kind, idx, name}]}` | — (бутстрап, див. нижче) |
 | `TransportSet` | `{playing: bool}` | `song.start_playing()` / `stop_playing()` |
 | `TempoSet` | `{bpm: float}` | `song.tempo = bpm` |
 | `ClipLaunch` | `{track: {id, name}, scene: {id, name?}}` | `clip_slots[j].fire()` |
@@ -185,7 +185,7 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
 | `MixerSet` | `{track: {id}, param: "volume"\|"panning"\|"send", index?, value}` | `mixer_device.<param>.value = v` |
 | `TrackToggle` | `{track: {id}, param: "mute"\|"solo"\|"arm", value: bool}` | `track.<param> = v` |
-| `DeviceParamSet` | `{track, device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
+| `DeviceParamSet` | `{track, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
 | `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name}}` | `clip_slot.create_clip(length)` |
 | `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
 | `ClipNotesSet` | `{track, scene, clip, region, notes: [...]}` | заміна всіх MIDI-нот у регіоні |
@@ -197,14 +197,14 @@ Relay пише `journal.jsonl` — один закомічений івент н
 
 ### Параметри девайсів
 
-`DeviceParamSet` покриває automatable-параметри верхньорівневих девайсів звичайних
-треків. Неперервні значення дебаунсяться на 200 мс, quantized-перемикачі та enum-и
-йдуть одразу. Кожне значення клампиться локальними `min`/`max`; disabled-параметр
-не змінюється.
+`DeviceParamSet` покриває automatable-параметри девайсів звичайних треків, рекурсивно
+включно з Rack `chains` і `return_chains`. Неперервні значення дебаунсяться на
+200 мс, quantized-перемикачі та enum-и йдуть одразу. Кожне значення клампиться
+локальними `min`/`max`; disabled-параметр не змінюється.
 
 LOM не дає девайсу стабільного uuid, тому адреса складається з незмінної сигнатури
 `class_name + class_display_name` та `ordinal` серед девайсів із тією самою
-сигнатурою на треку. Параметр так само адресується оригінальним ім'ям (із fallback
+сигнатурою в поточному Track/Chain-контейнері. Параметр так само адресується оригінальним ім'ям (із fallback
 на `name`) та ordinal серед тезок. Exact match обов'язковий: якщо на партнерській
 машині немає відповідного плагіна або параметра, bridge пише warning і нічого не
 змінює. Вставка однакового девайсу перед іншим однаковим девайсом може змінити
@@ -214,9 +214,24 @@ ordinal — це відома межа до появи синхронізаці�
 інакше кожен automation tick потрапляв би в журнал. Ручний override
 (`automation_state == 2`) вважається дією користувача й синхронізується.
 
-У milestone 0.13 свідомо не входять return/master devices, вкладені девайси Rack
-chains, а також створення, видалення й переставляння девайсів. Для nested chains
-спочатку потрібна стабільна ідентичність самих Chain.
+Для вкладеного девайса `chain_path` несе UUID кожного Chain від зовнішнього до
+внутрішнього. Bridge на кожному кроці перевіряє, що chain справді лежить у Rack
+поточного parent-контейнера; невідомий чи розірваний nested path відхиляється, а
+не застосовується в інший Chain. Сам цільовий device далі адресується сигнатурою
+всередині останнього Chain.
+
+Нові `RegistryInit` містять записи Rack chains із parent-chain UUID та точним
+bootstrap locator. Bridge пробує записати UUID на сам Chain через `set_data`, а
+повну fallback-мапу завжди пише на Song. Для журналів, створених bridge до 0.14
+і тому без `chains` у RegistryInit,
+UUID детерміновано виводиться з track UUID + parent-chain + Rack signature +
+chain kind/index/name. Однакові копії `.als` отримують однаковий migration ID.
+Якщо конкретна версія Live персистить `Chain.set_data`, подальша позиція вже не
+впливає на нього; інакше лишається слабший Song-map fallback.
+
+У milestone 0.14 свідомо не входять return/master devices, а також створення,
+видалення, перейменування й переставляння Rack/Chain/device структури. Структурні
+зміни треба виконати однаково на обох машинах; mismatch дає warning/no-op.
 
 Send адресується індексом, не uuid: у LOM це позиція в списку, прив'язана до
 порядку return-треків. Поява чи зникнення return-треку змінює кількість send-ів
