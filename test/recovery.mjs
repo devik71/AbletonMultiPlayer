@@ -50,6 +50,20 @@ function waitFor(proc, pattern, ms = 10000, from = 0) {
   });
 }
 
+async function waitForFile(path, pattern, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() <= deadline) {
+    try {
+      const content = readFileSync(path, 'utf8');
+      if (pattern.test(content)) return content;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  throw new Error(`файл ${path} не дочекався ${pattern}`);
+}
+
 async function stop(proc) {
   if (!proc || proc.exitCode !== null) return;
   await new Promise((resolve, reject) => {
@@ -253,7 +267,7 @@ test('незастосована подія переживає рестарт da
     daemon = startDaemon('pending-daemon-1');
     await waitFor(daemon, /#2 TempoSet/);
     const pendingPath = join(tmp, `${author}.${session}.pending.jsonl`);
-    assert.match(readFileSync(pendingPath, 'utf8'), /"gseq":2/);
+    assert.match(await waitForFile(pendingPath, /"gseq":2/), /"gseq":2/);
 
     await stop(daemon);
     processes.delete(daemon);

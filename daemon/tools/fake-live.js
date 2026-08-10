@@ -79,16 +79,16 @@ const song = {
   playing: false,
   tempo: 120,
   tracks: [
-    { id: null, name: '1-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '1-MIDI', color: 0xff8c00, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '2-MIDI', color: 0x33aa55, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '3-Audio', color: 0x3388dd, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
   ],
   return_tracks: [
-    { id: null, kind: 'return', name: 'A-Return', devices: [fakeFilter(0.2), fakeRack()], mix: {}, mute: false, solo: false },
-    { id: null, kind: 'return', name: 'B-Return', devices: [fakeFilter(0.3)], mix: {}, mute: false, solo: false },
+    { id: null, kind: 'return', name: 'A-Return', color: 0xaa55dd, devices: [fakeFilter(0.2), fakeRack()], mix: {}, mute: false, solo: false },
+    { id: null, kind: 'return', name: 'B-Return', color: 0xdd5577, devices: [fakeFilter(0.3)], mix: {}, mute: false, solo: false },
   ],
-  master_track: { id: null, kind: 'master', name: 'Master', devices: [fakeFilter(0.7), fakeRack()], mix: {} },
-  scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}` })),
+  master_track: { id: null, kind: 'master', name: 'Master', color: 0x777777, devices: [fakeFilter(0.7), fakeRack()], mix: {} },
+  scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}`, color: 0x444444 + i })),
 };
 let lseq = 0;
 let registryReady = false;
@@ -109,6 +109,37 @@ const deviceTrackFromArg = (value) => {
   const match = /^return:(\d+)$/.exec(value || '');
   if (match) return song.return_tracks[Number(match[1])];
   return song.tracks[Number(value) || 0];
+};
+const metadataTarget = (payload) => {
+  if (payload.object === 'track') return deviceTrackByRef(payload.track);
+  if (payload.object === 'scene') return song.scenes.find((s) => s.id === payload.scene?.id);
+  if (payload.object === 'clip') {
+    const t = trackById(payload.track?.id);
+    const sidx = sceneIdx(payload.scene?.id);
+    return t && sidx >= 0 ? t.clips[sidx] : null;
+  }
+  return null;
+};
+const metadataFromArg = (value) => {
+  if (value === 'master') return { object: 'track', target: song.master_track };
+  let match = /^return:(\d+)$/.exec(value || '');
+  if (match) return { object: 'track', target: song.return_tracks[Number(match[1])] };
+  match = /^scene:(\d+)$/.exec(value || '');
+  if (match) return { object: 'scene', target: song.scenes[Number(match[1])] };
+  match = /^clip:(\d+):(\d+)$/.exec(value || '');
+  if (match) {
+    const track = song.tracks[Number(match[1])];
+    const scene = song.scenes[Number(match[2])];
+    return { object: 'clip', target: track?.clips[Number(match[2])], track, scene };
+  }
+  match = /^(?:track:)?(\d+)$/.exec(value || '');
+  return match ? { object: 'track', target: song.tracks[Number(match[1])] } : null;
+};
+const metadataAddress = ({ object, target, track, scene }) => {
+  if (object === 'track') return { object, track: deviceTrackRef(target) };
+  if (object === 'scene') return { object, scene: sceneRef(target) };
+  if (object === 'clip') return { object, track: trackRef(track), scene: sceneRef(scene) };
+  return null;
 };
 const mixParamAllowed = (track, param, index) => {
   if (track?.kind === 'master') {
@@ -250,7 +281,7 @@ const noteInRegion = (note, region) =>
 const clipPayload = (t, s, clip) => ({
   track: trackRef(t),
   scene: sceneRef(s),
-  clip: { length: clip.length, name: clip.name },
+  clip: { length: clip.length, name: clip.name, color: clip.color },
 });
 
 const udp = createSocket('udp4');
@@ -262,12 +293,12 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.16.0-fake'),
+    script: arg('script', '0.17.0-fake'),
     pid: process.pid,
     features: ['apply_ack'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
-      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,' +
+      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet').split(','),
   });
 
@@ -390,12 +421,24 @@ function apply(type, payload, gseq) {
       t[payload.param] = !!payload.value;
       break;
     }
+    case 'ObjectMetaSet': {
+      const target = metadataTarget(payload);
+      if (!target) return reject('невідомий metadata target');
+      if (!['name', 'color'].includes(payload.prop)) return reject('невідома metadata property');
+      if (payload.prop === 'name' && typeof payload.value !== 'string') return reject('назва не є рядком');
+      if (payload.prop === 'color' && (!Number.isInteger(payload.value) || payload.value < 0 || payload.value > 0xffffff)) {
+        return reject('колір поза RGB-діапазоном');
+      }
+      target[payload.prop] = payload.value;
+      break;
+    }
     case 'TrackCreate': {
       if (trackById(payload.track?.id)) return reject('такий трек уже є');
       const idx = Number.isInteger(payload.idx) ? payload.idx : song.tracks.length;
       song.tracks.splice(idx, 0, {
         id: payload.track.id,
         name: payload.track.name,
+        color: payload.track.color ?? 0x777777,
         playing_slot_index: -1,
         slots: song.scenes.length,
         clips: emptyClips(song.scenes.length),
@@ -416,7 +459,11 @@ function apply(type, payload, gseq) {
     case 'SceneCreate': {
       if (sceneIdx(payload.scene?.id) >= 0) return reject('така сцена вже є');
       const idx = Number.isInteger(payload.idx) ? payload.idx : song.scenes.length;
-      song.scenes.splice(idx, 0, { id: payload.scene.id, name: payload.scene.name || '' });
+      song.scenes.splice(idx, 0, {
+        id: payload.scene.id,
+        name: payload.scene.name || '',
+        color: payload.scene.color ?? 0x777777,
+      });
       for (const t of song.tracks) {
         t.clips.splice(idx, 0, null);
         t.slots = song.scenes.length;
@@ -444,6 +491,7 @@ function apply(type, payload, gseq) {
           kind: 'midi',
           length: payload.clip?.length || NOTE_TIME_SPAN,
           name: payload.clip?.name || '',
+          color: payload.clip?.color ?? 0x777777,
           notes: [],
         };
       }
@@ -467,6 +515,7 @@ function apply(type, payload, gseq) {
         kind: 'midi',
         length: payload.clip?.length || NOTE_TIME_SPAN,
         name: payload.clip?.name || '',
+        color: payload.clip?.color ?? 0x777777,
         notes: [],
       };
       clip.notes = clip.notes.filter((note) => !noteInRegion(note, payload.region));
@@ -554,9 +603,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'addtrack': {
       const kind = rest[0] === 'audio' ? 'audio' : 'midi';
       const idx = Number.isInteger(Number(rest[1])) && rest[1] !== undefined ? Number(rest[1]) : song.tracks.length;
-      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), devices: [], mix: {}, mute: false, solo: false, arm: false };
+      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, color: 0x777777, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), devices: [], mix: {}, mute: false, solo: false, arm: false };
       song.tracks.splice(idx, 0, t);
-      emit('TrackCreate', { track: { id: t.id, name: t.name }, idx, kind });
+      emit('TrackCreate', { track: { id: t.id, name: t.name, color: t.color }, idx, kind });
       break;
     }
     case 'deltrack': {
@@ -568,13 +617,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }
     case 'addscene': {
       const idx = rest[0] !== undefined ? Number(rest[0]) : song.scenes.length;
-      const s = { id: newId(), name: '' };
+      const s = { id: newId(), name: '', color: 0x777777 };
       song.scenes.splice(idx, 0, s);
       for (const t of song.tracks) {
         t.clips.splice(idx, 0, null);
         t.slots = song.scenes.length;
       }
-      emit('SceneCreate', { scene: { id: s.id }, idx });
+      emit('SceneCreate', { scene: { id: s.id, color: s.color }, idx });
       break;
     }
     case 'delscene': {
@@ -603,7 +652,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const sidx = song.scenes.indexOf(s);
       let clip = t.clips[sidx];
       if (!clip) {
-        clip = t.clips[sidx] = { kind: 'midi', length: Math.max(NOTE_TIME_SPAN, start + duration), name: '', notes: [] };
+        clip = t.clips[sidx] = { kind: 'midi', length: Math.max(NOTE_TIME_SPAN, start + duration), name: '', color: 0x777777, notes: [] };
         emit('ClipCreate', clipPayload(t, s, clip));
       }
       if (clip.kind !== 'midi') return console.log('у слоті audio clip');
@@ -721,11 +770,27 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       emit('TrackToggle', { track: { id: t.id }, param: cmd, value: t[cmd] });
       break;
     }
+    case 'meta': {
+      const descriptor = metadataFromArg(rest[0]);
+      const prop = rest[1];
+      if (!descriptor?.target || !['name', 'color'].includes(prop)) {
+        return console.log('немає такого metadata target/property');
+      }
+      const value = prop === 'name' ? rest.slice(2).join(' ') : Number(rest[2]);
+      if ((prop === 'name' && typeof value !== 'string') ||
+          (prop === 'color' && (!Number.isInteger(value) || value < 0 || value > 0xffffff))) {
+        return console.log('некоректне metadata value');
+      }
+      descriptor.target[prop] = value;
+      emit('ObjectMetaSet', { ...metadataAddress(descriptor), prop, value });
+      break;
+    }
     case 'rename': {
       // перевірка, що uuid переживає те, від чого ламалась адресація за індексом
       const t = track();
       if (!t) return console.log('немає такого треку');
       t.name = rest.slice(1).join(' ');
+      emit('ObjectMetaSet', { object: 'track', track: deviceTrackRef(t), prop: 'name', value: t.name });
       console.log(`трек перейменовано на ${t.name}, id незмінний: ${t.id}`);
       break;
     }
@@ -751,7 +816,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
         'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',
         'addtrack [midi|audio] [idx] | deltrack <t> | addscene [idx] | delscene <n>',
-        'rename <t> <name> | move <from> <to> | state',
+        'meta <track:N|return:N|master|scene:N|clip:T:S> <name|color> <value> | rename <t> <name> | move <from> <to> | state',
       ].join('\n'));
   }
 });
