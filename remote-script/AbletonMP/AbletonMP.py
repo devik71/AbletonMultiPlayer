@@ -9,6 +9,7 @@
 """
 
 import json
+import math
 import os
 import time
 import traceback
@@ -23,7 +24,7 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.11.0"
+SCRIPT_VERSION = "0.12.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
@@ -33,6 +34,7 @@ APPLY_TYPES = [
     "ClipLaunch", "ClipStop", "SceneLaunch", "StopAllClips",
     "TrackCreate", "TrackDelete", "SceneCreate", "SceneDelete",
     "MixerSet", "TrackToggle",
+    "ClipCreate", "ClipDelete", "ClipNotesSet",
 ]
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
@@ -44,6 +46,17 @@ LOG_MAX_BYTES = 512 * 1024
 # (С‚РѕР№ СЃР°РјРёР№ checkpoint, С‰Рѕ Р№ Сѓ vision.md В§5.5).
 DEBOUNCE_SEC = 0.2
 DEBOUNCE_MAX_HOLD = 1.0
+
+# MIDI notes are synchronized as deterministic fixed regions. A whole-clip
+# snapshot can exceed the localhost UDP datagram limit; 4 beats x 16 pitches
+# keeps each semantic event bounded while preserving last-global-seq wins for
+# overlapping edits.
+NOTE_TIME_SPAN = 4.0
+NOTE_PITCH_SPAN = 16
+NOTE_FIELDS = (
+    "pitch", "start_time", "duration", "velocity", "mute",
+    "probability", "velocity_deviation", "release_velocity",
+)
 
 # РљР»СЋС‡С– РґР»СЏ set_data/get_data -- Р·Р±РµСЂС–РіР°РЅРЅСЏ РІСЃРµСЂРµРґРёРЅС– СЃР°РјРѕРіРѕ .als.
 # РџСЂС–РѕСЂРёС‚РµС‚ Р·Р° DATA_KEY_OBJ: uuid Р»РµР¶РёС‚СЊ РЅР° СЃР°РјРѕРјСѓ РѕР±'С”РєС‚С–, С‚РѕР¶ РїРµСЂРµР¶РёРІР°С”
@@ -72,9 +85,13 @@ class AbletonMP(ControlSurface):
         self._link = None
         self._lseq = 0
         self._last_beat = 0.0
-        self._mirror = {"playing": None, "tempo": None, "psi": {}, "mix": {}}
+        self._mirror = {
+            "playing": None, "tempo": None, "psi": {}, "mix": {},
+            "notes": {}, "clips": {},
+        }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
+        self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._tracks_reg = Registry(self._log)
         self._scenes_reg = Registry(self._log)
@@ -139,6 +156,7 @@ class AbletonMP(ControlSurface):
     def _teardown(self):
         # РЅРµР·Р°РІРµСЂС€РµРЅРёР№ Р¶РµСЃС‚ РЅРµ РјР°С” РїСЂРѕРїР°СЃС‚Рё СЂР°Р·РѕРј С–Р· Р·Р°РєСЂРёС‚С‚СЏРј Live
         self._safe(self._flush_clips)
+        self._safe(self._flush_notes, True)
         self._safe(self._flush_pending, True)
         self._unwire_tracks()
         if self._doc is not None:
@@ -173,6 +191,25 @@ class AbletonMP(ControlSurface):
         for track in self._doc.tracks:
             self._listen(track, "playing_slot_index", self._make_slot_cb(track))
             self._wire_mixer(track)
+            self._wire_note_slots(track)
+
+    def _wire_note_slots(self, track):
+        try:
+            slots = list(track.clip_slots)
+            scenes = list(self._doc.scenes)
+        except Exception:
+            return
+        for i, slot in enumerate(slots):
+            if i >= len(scenes):
+                break
+            scene = scenes[i]
+            self._listen(slot, "has_clip", self._make_slot_content_cb(track, scene, slot))
+            try:
+                if slot.has_clip and slot.clip.is_midi_clip:
+                    clip = slot.clip
+                    self._listen(clip, "notes", self._make_notes_cb(track, scene, clip))
+            except Exception:
+                pass
 
     def _wire_mixer(self, track):
         md = None
@@ -215,6 +252,16 @@ class AbletonMP(ControlSurface):
             self._safe(self._on_toggle, track, prop)
         return cb
 
+    def _make_slot_content_cb(self, track, scene, slot):
+        def cb():
+            self._safe(self._on_slot_content, track, scene, slot)
+        return cb
+
+    def _make_notes_cb(self, track, scene, clip):
+        def cb():
+            self._safe(self._on_notes, track, scene, clip)
+        return cb
+
     def _cb_is_playing(self):
         self._safe(self._on_is_playing)
 
@@ -244,6 +291,7 @@ class AbletonMP(ControlSurface):
     def _on_tracks(self):
         # СЃС‚СЂСѓРєС‚СѓСЂР° С‚СЂРµРєС–РІ Р·РјС–РЅРёР»Р°СЃСЊ: РїРµСЂРµРїС–РґРїРёСЃСѓС”РјРѕСЃСЊ С– СЃРєРёРґР°С”РјРѕ РґР·РµСЂРєР°Р»Рѕ СЃР»РѕС‚С–РІ,
         # С–РЅР°РєС€Рµ Р·СЃСѓРІ С–РЅРґРµРєСЃС–РІ РїРѕСЂРѕРґРёС‚СЊ С„Р°РЅС‚РѕРјРЅС– ClipLaunch
+        self._flush_notes(True)
         self._rewire_tracks()
         self._mirror["psi"] = {}
         self._clip_buf = {}  # РЅР°РєРѕРїРёС‡РµРЅРµ РїРѕСЃРёР»Р°С”С‚СЊСЃСЏ РЅР° СЃС‚Р°СЂС– С–РЅРґРµРєСЃРё
@@ -251,10 +299,16 @@ class AbletonMP(ControlSurface):
         if self._registry_ready:
             self._diff_tracks(emit=not self._suppress_struct)
             self._prime_mixer()  # listener'Рё РјС–РєС€РµСЂР° РїРµСЂРµРІС–С€Р°РЅС– РЅР° РЅРѕРІС– РѕР±'С”РєС‚Рё
+            self._prime_notes()
 
     def _on_scenes(self):
         if self._registry_ready:
+            self._flush_notes(True)
             self._diff_scenes(emit=not self._suppress_struct)
+            self._rewire_tracks()
+            self._prime_mirror(transport=False)
+            self._prime_mixer()
+            self._prime_notes()
 
     @staticmethod
     def _norm_psi(value):
@@ -293,6 +347,7 @@ class AbletonMP(ControlSurface):
             reg["scenes"].append({"id": self._scenes_reg.id_of(s), "idx": i, "name": self._safe_name(s)})
         self._registry_ready = True
         self._prime_mixer()
+        self._prime_notes()
         self._persist_registry()
         self._log("СЂРµС”СЃС‚СЂ СЃС‚РІРѕСЂРµРЅРѕ: %d С‚СЂРµРєС–РІ, %d СЃС†РµРЅ (%d РїС–РґРЅСЏС‚Рѕ Р· .als)"
                   % (len(reg["tracks"]), len(reg["scenes"]), restored))
@@ -342,6 +397,7 @@ class AbletonMP(ControlSurface):
 
         self._registry_ready = True
         self._prime_mixer()
+        self._prime_notes()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
         self._persist_registry()
@@ -544,6 +600,394 @@ class AbletonMP(ControlSurface):
         # РґРёСЃРєСЂРµС‚РЅРµ РїРµСЂРµРјРёРєР°РЅРЅСЏ -- РґРµР±Р°СѓРЅСЃ С‚СѓС‚ Р»РёС€Рµ РґРѕРґР°РІ Р±Рё Р·Р°С‚СЂРёРјРєРё
         self._emit("TrackToggle", {"track": {"id": tid}, "param": prop, "value": value})
 
+    # ------------------------------------------------------------- MIDI clips
+
+    def _clip_key(self, track, scene):
+        if not self._registry_ready:
+            return None
+        tid = self._tracks_reg.id_of(track, create=False)
+        sid = self._scenes_reg.id_of(scene, create=False)
+        return "%s:%s" % (tid, sid) if tid and sid else None
+
+    def _clip_refs(self, track, scene):
+        return {
+            "track": {"id": self._tracks_reg.id_of(track, create=False)},
+            "scene": {"id": self._scenes_reg.id_of(scene, create=False)},
+        }
+
+    def _clip_meta(self, clip):
+        try:
+            length = max(0.001, float(clip.length))
+        except Exception:
+            length = NOTE_TIME_SPAN
+        return {"length": round(length, 6), "name": self._safe_name(clip)}
+
+    def _on_slot_content(self, track, scene, slot):
+        """Track clip creation/deletion and rebind the note observer."""
+        key = self._clip_key(track, scene)
+        if key is None:
+            self._rewire_tracks()
+            return
+        previous = self._mirror["clips"].get(key)
+        current = None
+        clip = None
+        try:
+            if slot.has_clip:
+                clip = slot.clip
+                current = "midi" if clip.is_midi_clip else "audio"
+        except Exception:
+            current = None
+
+        # A note callback may still be waiting in the debounce queue when the
+        # clip is deleted or replaced. It must not follow ClipDelete with a
+        # stale ClipNotesSet that would recreate the clip on the peer.
+        self._note_pending.pop(key, None)
+        self._mirror["clips"][key] = current
+        if previous != current and not self._suppress_struct:
+            refs = self._clip_refs(track, scene)
+            if current == "midi":
+                payload = dict(refs)
+                payload["clip"] = self._clip_meta(clip)
+                self._emit("ClipCreate", payload)
+            elif current is None and previous is not None:
+                self._emit("ClipDelete", refs)
+            elif current == "audio":
+                self._warn("audio clip creation is not synchronized; collect the sample and copy the .als structure")
+
+        # has_clip changed: the old clip listener is dead or a new one is needed.
+        self._rewire_tracks()
+        if current == "midi" and clip is not None:
+            notes = self._clip_notes(clip)
+            self._mirror["notes"][key] = notes
+            if previous != current and not self._suppress_struct:
+                self._emit_all_note_regions(track, scene, clip, notes)
+        else:
+            self._mirror["notes"].pop(key, None)
+
+    def _on_notes(self, track, scene, clip):
+        """Coalesce a piano-roll gesture before calculating changed regions."""
+        key = self._clip_key(track, scene)
+        if key is None:
+            return
+        now = time.time()
+        previous = self._note_pending.get(key)
+        self._note_pending[key] = {
+            "track": track,
+            "scene": scene,
+            "clip": clip,
+            "due": now + DEBOUNCE_SEC,
+            "first": previous["first"] if previous else now,
+        }
+
+    def _flush_notes(self, force=False):
+        now = time.time()
+        for key in list(self._note_pending.keys()):
+            pending = self._note_pending[key]
+            if not force and now < pending["due"] and now - pending["first"] < DEBOUNCE_MAX_HOLD:
+                continue
+            del self._note_pending[key]
+            try:
+                current = self._clip_notes(pending["clip"])
+            except Exception:
+                continue
+            previous = self._mirror["notes"].get(key)
+            self._mirror["notes"][key] = current
+            if previous is None:
+                continue  # a newly discovered clip is a baseline, not a local edit
+            regions = self._changed_note_regions(previous, current)
+            for region in sorted(regions):
+                self._emit_note_region(
+                    pending["track"], pending["scene"], pending["clip"], current, region)
+
+    def _emit_all_note_regions(self, track, scene, clip, notes):
+        regions = set(self._note_region(note) for note in notes)
+        for region in sorted(regions):
+            self._emit_note_region(track, scene, clip, notes, region)
+
+    def _emit_note_region(self, track, scene, clip, notes, region):
+        from_pitch, pitch_span, from_time, time_span = region
+        payload = self._clip_refs(track, scene)
+        payload["clip"] = self._clip_meta(clip)
+        payload["region"] = {
+            "from_pitch": from_pitch,
+            "pitch_span": pitch_span,
+            "from_time": from_time,
+            "time_span": time_span,
+        }
+        payload["notes"] = self._notes_in_region(notes, region)
+        self._emit("ClipNotesSet", payload)
+
+    def _changed_note_regions(self, before, after):
+        old_counts = self._note_counts(before)
+        new_counts = self._note_counts(after)
+        regions = set()
+        samples = {}
+        for note in before + after:
+            samples[self._note_signature(note)] = note
+        for signature in set(old_counts) | set(new_counts):
+            if old_counts.get(signature, 0) != new_counts.get(signature, 0):
+                regions.add(self._note_region(samples[signature]))
+        return regions
+
+    def _note_region(self, note):
+        pitch = int(note["pitch"])
+        start = float(note["start_time"])
+        from_pitch = (pitch // NOTE_PITCH_SPAN) * NOTE_PITCH_SPAN
+        from_time = math.floor(start / NOTE_TIME_SPAN) * NOTE_TIME_SPAN
+        return (from_pitch, min(NOTE_PITCH_SPAN, 128 - from_pitch),
+                round(from_time, 6), NOTE_TIME_SPAN)
+
+    def _notes_in_region(self, notes, region):
+        return sorted([
+            note for note in notes
+            if self._note_in_region(note, region)
+        ], key=self._note_signature)
+
+    @staticmethod
+    def _note_in_region(note, region):
+        from_pitch, pitch_span, from_time, time_span = region
+        return (from_pitch <= note["pitch"] < from_pitch + pitch_span
+                and from_time <= note["start_time"] < from_time + time_span)
+
+    def _note_counts(self, notes):
+        counts = {}
+        for note in notes:
+            signature = self._note_signature(note)
+            counts[signature] = counts.get(signature, 0) + 1
+        return counts
+
+    @staticmethod
+    def _note_signature(note):
+        return tuple(note[field] for field in NOTE_FIELDS)
+
+    @staticmethod
+    def _note_value(note, field, default):
+        if isinstance(note, dict):
+            return note.get(field, default)
+        return getattr(note, field, default)
+
+    def _normal_note(self, note):
+        try:
+            out = {
+                "pitch": int(self._note_value(note, "pitch", -1)),
+                "start_time": round(float(self._note_value(note, "start_time", 0.0)), 6),
+                "duration": round(float(self._note_value(note, "duration", 0.0)), 6),
+                "velocity": round(float(self._note_value(note, "velocity", 100.0)), 6),
+                "mute": bool(self._note_value(note, "mute", False)),
+                "probability": round(float(self._note_value(note, "probability", 1.0)), 6),
+                "velocity_deviation": round(float(
+                    self._note_value(note, "velocity_deviation", 0.0)), 6),
+                "release_velocity": round(float(
+                    self._note_value(note, "release_velocity", 64.0)), 6),
+            }
+        except Exception:
+            return None
+        numeric = [out[field] for field in NOTE_FIELDS if field not in ("pitch", "mute")]
+        if not all(math.isfinite(value) for value in numeric):
+            return None
+        if not (0 <= out["pitch"] <= 127 and out["duration"] > 0
+                and 0 <= out["velocity"] <= 127
+                and 0 <= out["probability"] <= 1
+                and -127 <= out["velocity_deviation"] <= 127
+                and 0 <= out["release_velocity"] <= 127):
+            return None
+        return out
+
+    def _raw_notes(self, clip):
+        try:
+            return list(clip.get_all_notes_extended())
+        except Exception:
+            return list(clip.get_notes_extended(0, 128, -1073741824.0, 2147483648.0))
+
+    def _clip_note_records(self, clip):
+        records = []
+        for raw in self._raw_notes(clip):
+            note = self._normal_note(raw)
+            if note is None:
+                continue
+            note_id = self._note_value(raw, "note_id", None)
+            records.append((note, note_id))
+        return records
+
+    def _clip_notes(self, clip):
+        return sorted([note for note, _note_id in self._clip_note_records(clip)],
+                      key=self._note_signature)
+
+    def _prime_notes(self):
+        """Capture clip presence and note baselines without emitting startup events."""
+        self._note_pending = {}
+        self._mirror["notes"] = {}
+        self._mirror["clips"] = {}
+        if not self._registry_ready:
+            return
+        scenes = list(self._doc.scenes)
+        for track in self._doc.tracks:
+            try:
+                slots = list(track.clip_slots)
+            except Exception:
+                continue
+            for i, scene in enumerate(scenes):
+                if i >= len(slots):
+                    break
+                slot = slots[i]
+                key = self._clip_key(track, scene)
+                if key is None:
+                    continue
+                try:
+                    if not slot.has_clip:
+                        self._mirror["clips"][key] = None
+                        continue
+                    clip = slot.clip
+                    kind = "midi" if clip.is_midi_clip else "audio"
+                    self._mirror["clips"][key] = kind
+                    if kind == "midi":
+                        self._mirror["notes"][key] = self._clip_notes(clip)
+                except Exception:
+                    pass
+
+    def _prime_note_clip(self, track, scene, slot):
+        key = self._clip_key(track, scene)
+        if key is None:
+            return
+        try:
+            if not slot.has_clip:
+                self._mirror["clips"][key] = None
+                self._mirror["notes"].pop(key, None)
+                return
+            clip = slot.clip
+            kind = "midi" if clip.is_midi_clip else "audio"
+            self._mirror["clips"][key] = kind
+            if kind == "midi":
+                self._mirror["notes"][key] = self._clip_notes(clip)
+            else:
+                self._mirror["notes"].pop(key, None)
+        except Exception:
+            pass
+
+    def _resolve_clip_slot(self, payload, gseq):
+        track, _idx = self._resolve_track(payload.get("track"))
+        if track is None:
+            return None, None, None
+        sidx = self._resolve_scene(payload.get("scene"))
+        if sidx is None or sidx >= len(track.clip_slots):
+            self._warn("gseq %s: clip scene is outside the track slots" % (gseq,))
+            return None, None, None
+        return track, self._doc.scenes[sidx], track.clip_slots[sidx]
+
+    def _clip_length_from_payload(self, payload):
+        try:
+            length = float((payload.get("clip") or {}).get("length", NOTE_TIME_SPAN))
+        except Exception:
+            length = NOTE_TIME_SPAN
+        if not math.isfinite(length) or length <= 0 or length > 1073741824.0:
+            length = NOTE_TIME_SPAN
+        return length
+
+    def _ensure_midi_clip(self, track, scene, slot, payload):
+        try:
+            if slot.has_clip:
+                return slot.clip if slot.clip.is_midi_clip else None
+        except Exception:
+            return None
+        key = self._clip_key(track, scene)
+        if key is not None:
+            self._mirror["clips"][key] = "midi"
+            self._mirror["notes"][key] = []
+        slot.create_clip(self._clip_length_from_payload(payload))
+        clip = slot.clip
+        name = (payload.get("clip") or {}).get("name")
+        if isinstance(name, str) and name:
+            try:
+                clip.name = name
+            except Exception:
+                pass
+        return clip if clip.is_midi_clip else None
+
+    def _validated_note_region(self, payload):
+        region = payload.get("region") or {}
+        try:
+            from_pitch = int(region.get("from_pitch"))
+            pitch_span = int(region.get("pitch_span"))
+            from_time = round(float(region.get("from_time")), 6)
+            time_span = round(float(region.get("time_span")), 6)
+        except Exception:
+            return None
+        if (not math.isfinite(from_time) or not math.isfinite(time_span)
+                or from_pitch < 0 or pitch_span <= 0 or from_pitch + pitch_span > 128
+                or time_span <= 0):
+            return None
+        notes = payload.get("notes")
+        if not isinstance(notes, list) or len(notes) > 4096:
+            return None
+        normal = []
+        for raw in notes:
+            note = self._normal_note(raw)
+            if note is None:
+                return None
+            if not (from_pitch <= note["pitch"] < from_pitch + pitch_span
+                    and from_time <= note["start_time"] < from_time + time_span):
+                return None
+            normal.append(note)
+        return ((from_pitch, pitch_span, from_time, time_span),
+                sorted(normal, key=self._note_signature))
+
+    def _make_note_spec(self, note):
+        return Live.Clip.MidiNoteSpecification(
+            pitch=note["pitch"],
+            start_time=note["start_time"],
+            duration=note["duration"],
+            velocity=note["velocity"],
+            mute=note["mute"],
+            probability=note["probability"],
+            velocity_deviation=note["velocity_deviation"],
+            release_velocity=note["release_velocity"],
+        )
+
+    def _apply_note_region(self, track, scene, slot, payload, gseq):
+        validated = self._validated_note_region(payload)
+        if validated is None:
+            self._warn("gseq %s: invalid MIDI note region" % (gseq,))
+            return
+        region, target = validated
+        clip = self._ensure_midi_clip(track, scene, slot, payload)
+        if clip is None:
+            self._warn("gseq %s: target slot is not a MIDI clip" % (gseq,))
+            return
+
+        current_records = self._clip_note_records(clip)
+        current_region_records = [
+            record for record in current_records
+            if self._note_in_region(record[0], region)
+        ]
+        current_region = sorted([note for note, _note_id in current_region_records],
+                                key=self._note_signature)
+        if current_region == target:
+            self._prime_note_clip(track, scene, slot)
+            return
+
+        # Construct every new note before mutating Live. A constructor failure
+        # therefore cannot leave a half-removed region.
+        specs = tuple(self._make_note_spec(note) for note in target)
+        ids = tuple(note_id for _note, note_id in current_region_records if note_id is not None)
+        unaffected = [
+            note for note, _note_id in current_records
+            if not self._note_in_region(note, region)
+        ]
+        key = self._clip_key(track, scene)
+        if key is not None:
+            self._mirror["clips"][key] = "midi"
+            self._mirror["notes"][key] = sorted(unaffected + target, key=self._note_signature)
+        try:
+            if ids:
+                clip.remove_notes_by_id(ids)
+            elif current_region_records:
+                clip.remove_notes_extended(region[0], region[1], region[2], region[3])
+            if specs:
+                clip.add_new_notes(specs)
+        except Exception:
+            self._prime_note_clip(track, scene, slot)
+            raise
+
     # ------------------------------------------------------------ coalescing
 
     def _defer(self, key, etype, payload):
@@ -726,6 +1170,50 @@ class AbletonMP(ControlSurface):
                 self._suppress_struct = False
                 self._diff_scenes(emit=False)
 
+        elif etype == "ClipCreate":
+            track, scene, slot = self._resolve_clip_slot(payload, gseq)
+            if slot is None:
+                return
+            try:
+                if slot.has_clip and not slot.clip.is_midi_clip:
+                    self._warn("gseq %s: cannot replace an audio clip with a MIDI clip" % (gseq,))
+                    return
+            except Exception:
+                return
+            self._suppress_struct = True
+            try:
+                clip = self._ensure_midi_clip(track, scene, slot, payload)
+                if clip is None:
+                    self._warn("gseq %s: MIDI clip could not be created" % (gseq,))
+            finally:
+                self._suppress_struct = False
+                self._rewire_tracks()
+                self._prime_note_clip(track, scene, slot)
+
+        elif etype == "ClipDelete":
+            track, scene, slot = self._resolve_clip_slot(payload, gseq)
+            if slot is None:
+                return
+            key = self._clip_key(track, scene)
+            if key is not None:
+                self._mirror["clips"][key] = None
+                self._mirror["notes"].pop(key, None)
+                self._note_pending.pop(key, None)
+            self._suppress_struct = True
+            try:
+                if slot.has_clip:
+                    slot.delete_clip()
+            finally:
+                self._suppress_struct = False
+                self._rewire_tracks()
+                self._prime_note_clip(track, scene, slot)
+
+        elif etype == "ClipNotesSet":
+            track, scene, slot = self._resolve_clip_slot(payload, gseq)
+            if slot is None:
+                return
+            self._apply_note_region(track, scene, slot, payload, gseq)
+
         elif etype == "MixerSet":
             track, _idx = self._resolve_track(payload.get("track"))
             if track is None:
@@ -794,6 +1282,7 @@ class AbletonMP(ControlSurface):
         for msg in self._link.poll():
             self._safe(self._dispatch, msg)
         self._safe(self._flush_clips)
+        self._safe(self._flush_notes)
         self._safe(self._flush_pending)
         now = time.time()
         if now - self._last_beat >= HEARTBEAT_SEC:

@@ -5,7 +5,8 @@
 //   node tools/fake-live.js --udp-in 19845 --udp-out 19846
 //
 // Команди зі stdin: play | stop | tempo <bpm> | launch <t> <s> | scene <n>
-//                   stopclip <t> | stopall | rename <t> <name> | state
+//                   stopclip <t> | stopall | note <t> <s> <pitch> <start> <duration> <velocity>
+//                   delnote <t> <s> <pitch> <start> | delclip <t> <s> | state
 
 import { createSocket } from 'node:dgram';
 import { randomBytes } from 'node:crypto';
@@ -18,6 +19,10 @@ function arg(name, fallback) {
 
 const PORT_DAEMON = Number(arg('udp-in', 19845)); // куди шлемо
 const PORT_SELF = Number(arg('udp-out', 19846)); // де слухаємо
+const NOTE_TIME_SPAN = 4;
+const NOTE_PITCH_SPAN = 16;
+
+const emptyClips = (count) => Array.from({ length: count }, () => null);
 
 // Фейковий стан "проєкту" -- дзеркало того, що тримає справжній bridge.
 // id заповнюються на бутстрапі: або генеруємо, або приймаємо чужі.
@@ -25,9 +30,9 @@ const song = {
   playing: false,
   tempo: 120,
   tracks: [
-    { id: null, name: '1-MIDI', playing_slot_index: -1, slots: 8, mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8, mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '1-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, clips: emptyClips(8), mix: {}, mute: false, solo: false, arm: false },
   ],
   scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}` })),
 };
@@ -39,6 +44,24 @@ const trackById = (id) => song.tracks.find((t) => t.id === id);
 const sceneIdx = (id) => song.scenes.findIndex((s) => s.id === id);
 const trackRef = (t) => ({ id: t.id, name: t.name });
 const sceneRef = (s) => ({ id: s.id });
+const noteRegion = (note) => {
+  const fromPitch = Math.floor(note.pitch / NOTE_PITCH_SPAN) * NOTE_PITCH_SPAN;
+  const fromTime = Math.floor(note.start_time / NOTE_TIME_SPAN) * NOTE_TIME_SPAN;
+  return {
+    from_pitch: fromPitch,
+    pitch_span: Math.min(NOTE_PITCH_SPAN, 128 - fromPitch),
+    from_time: fromTime,
+    time_span: NOTE_TIME_SPAN,
+  };
+};
+const noteInRegion = (note, region) =>
+  note.pitch >= region.from_pitch && note.pitch < region.from_pitch + region.pitch_span &&
+  note.start_time >= region.from_time && note.start_time < region.from_time + region.time_span;
+const clipPayload = (t, s, clip) => ({
+  track: trackRef(t),
+  scene: sceneRef(s),
+  clip: { length: clip.length, name: clip.name },
+});
 
 const udp = createSocket('udp4');
 const send = (m) => udp.send(Buffer.from(JSON.stringify(m)), PORT_DAEMON, '127.0.0.1');
@@ -49,12 +72,13 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.11.0-fake'),
+    script: arg('script', '0.12.0-fake'),
     pid: process.pid,
     features: ['apply_ack'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
-      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle').split(','),
+      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,' +
+      'ClipCreate,ClipDelete,ClipNotesSet').split(','),
   });
 
 function emit(type, payload) {
@@ -155,6 +179,11 @@ function apply(type, payload, gseq) {
         name: payload.track.name,
         playing_slot_index: -1,
         slots: song.scenes.length,
+        clips: emptyClips(song.scenes.length),
+        mix: {},
+        mute: false,
+        solo: false,
+        arm: false,
       });
       break;
     }
@@ -168,12 +197,61 @@ function apply(type, payload, gseq) {
       if (sceneIdx(payload.scene?.id) >= 0) return reject('така сцена вже є');
       const idx = Number.isInteger(payload.idx) ? payload.idx : song.scenes.length;
       song.scenes.splice(idx, 0, { id: payload.scene.id, name: payload.scene.name || '' });
+      for (const t of song.tracks) {
+        t.clips.splice(idx, 0, null);
+        t.slots = song.scenes.length;
+      }
       break;
     }
     case 'SceneDelete': {
       const i = sceneIdx(payload.scene?.id);
       if (i < 0) return reject('сцена вже видалена');
       song.scenes.splice(i, 1);
+      for (const t of song.tracks) {
+        t.clips.splice(i, 1);
+        t.slots = song.scenes.length;
+      }
+      break;
+    }
+    case 'ClipCreate': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      if (!t) return reject('невідомий трек');
+      if (s < 0) return reject('невідома сцена');
+      if (t.clips[s]?.kind === 'audio') return reject('у слоті audio clip');
+      if (!t.clips[s]) {
+        t.clips[s] = {
+          kind: 'midi',
+          length: payload.clip?.length || NOTE_TIME_SPAN,
+          name: payload.clip?.name || '',
+          notes: [],
+        };
+      }
+      break;
+    }
+    case 'ClipDelete': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      if (!t) return reject('невідомий трек');
+      if (s < 0) return reject('невідома сцена');
+      t.clips[s] = null;
+      break;
+    }
+    case 'ClipNotesSet': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      if (!t) return reject('невідомий трек');
+      if (s < 0) return reject('невідома сцена');
+      if (t.clips[s]?.kind === 'audio') return reject('у слоті audio clip');
+      const clip = t.clips[s] ||= {
+        kind: 'midi',
+        length: payload.clip?.length || NOTE_TIME_SPAN,
+        name: payload.clip?.name || '',
+        notes: [],
+      };
+      clip.notes = clip.notes.filter((note) => !noteInRegion(note, payload.region));
+      clip.notes.push(...(payload.notes || []).map((note) => ({ ...note })));
+      clip.notes.sort((a, b) => a.start_time - b.start_time || a.pitch - b.pitch);
       break;
     }
     default:
@@ -256,7 +334,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'addtrack': {
       const kind = rest[0] === 'audio' ? 'audio' : 'midi';
       const idx = Number.isInteger(Number(rest[1])) && rest[1] !== undefined ? Number(rest[1]) : song.tracks.length;
-      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, playing_slot_index: -1, slots: song.scenes.length };
+      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), mix: {}, mute: false, solo: false, arm: false };
       song.tracks.splice(idx, 0, t);
       emit('TrackCreate', { track: { id: t.id, name: t.name }, idx, kind });
       break;
@@ -272,14 +350,88 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const idx = rest[0] !== undefined ? Number(rest[0]) : song.scenes.length;
       const s = { id: newId(), name: '' };
       song.scenes.splice(idx, 0, s);
+      for (const t of song.tracks) {
+        t.clips.splice(idx, 0, null);
+        t.slots = song.scenes.length;
+      }
       emit('SceneCreate', { scene: { id: s.id }, idx });
       break;
     }
     case 'delscene': {
       const s = song.scenes[Number(rest[0]) || 0];
       if (!s) return console.log('немає такої сцени');
-      song.scenes.splice(song.scenes.indexOf(s), 1);
+      const idx = song.scenes.indexOf(s);
+      song.scenes.splice(idx, 1);
+      for (const t of song.tracks) {
+        t.clips.splice(idx, 1);
+        t.slots = song.scenes.length;
+      }
       emit('SceneDelete', { scene: { id: s.id } });
+      break;
+    }
+    case 'note': {
+      const t = track();
+      const s = song.scenes[Number(rest[1]) || 0];
+      const pitch = Number(rest[2]);
+      const start = Number(rest[3]);
+      const duration = Number(rest[4]);
+      const velocity = Number(rest[5] ?? 100);
+      if (!t || !s || !Number.isInteger(pitch) || pitch < 0 || pitch > 127 ||
+          !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) {
+        return console.log('некоректна нота або адреса кліпу');
+      }
+      const sidx = song.scenes.indexOf(s);
+      let clip = t.clips[sidx];
+      if (!clip) {
+        clip = t.clips[sidx] = { kind: 'midi', length: Math.max(NOTE_TIME_SPAN, start + duration), name: '', notes: [] };
+        emit('ClipCreate', clipPayload(t, s, clip));
+      }
+      if (clip.kind !== 'midi') return console.log('у слоті audio clip');
+      clip.length = Math.max(clip.length, start + duration);
+      const note = {
+        pitch,
+        start_time: start,
+        duration,
+        velocity,
+        mute: false,
+        probability: 1,
+        velocity_deviation: 0,
+        release_velocity: 64,
+      };
+      clip.notes.push(note);
+      const region = noteRegion(note);
+      emit('ClipNotesSet', {
+        ...clipPayload(t, s, clip),
+        region,
+        notes: clip.notes.filter((n) => noteInRegion(n, region)),
+      });
+      break;
+    }
+    case 'delnote': {
+      const t = track();
+      const s = song.scenes[Number(rest[1]) || 0];
+      const pitch = Number(rest[2]);
+      const start = Number(rest[3]);
+      const sidx = song.scenes.indexOf(s);
+      const clip = t?.clips[sidx];
+      if (!t || !s || clip?.kind !== 'midi') return console.log('немає такого MIDI clip');
+      const sample = { pitch, start_time: start };
+      const region = noteRegion(sample);
+      clip.notes = clip.notes.filter((n) => n.pitch !== pitch || n.start_time !== start);
+      emit('ClipNotesSet', {
+        ...clipPayload(t, s, clip),
+        region,
+        notes: clip.notes.filter((n) => noteInRegion(n, region)),
+      });
+      break;
+    }
+    case 'delclip': {
+      const t = track();
+      const s = song.scenes[Number(rest[1]) || 0];
+      const sidx = song.scenes.indexOf(s);
+      if (!t || !s || !t.clips[sidx]) return console.log('немає такого clip');
+      t.clips[sidx] = null;
+      emit('ClipDelete', { track: trackRef(t), scene: sceneRef(s) });
       break;
     }
     case 'vol':
@@ -332,6 +484,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log([
         'play | stop | tempo <bpm>',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
+        'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
         'addtrack [midi|audio] [idx] | deltrack <t> | addscene [idx] | delscene <n>',
         'rename <t> <name> | move <from> <to> | state',
       ].join('\n'));
