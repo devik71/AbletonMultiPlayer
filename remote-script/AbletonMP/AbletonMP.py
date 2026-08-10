@@ -25,7 +25,7 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.16.0"
+SCRIPT_VERSION = "0.17.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
@@ -34,7 +34,7 @@ APPLY_TYPES = [
     "TransportSet", "TempoSet",
     "ClipLaunch", "ClipStop", "SceneLaunch", "StopAllClips",
     "TrackCreate", "TrackDelete", "SceneCreate", "SceneDelete",
-    "MixerSet", "TrackToggle", "DeviceParamSet",
+    "MixerSet", "TrackToggle", "DeviceParamSet", "ObjectMetaSet",
     "ClipCreate", "ClipDelete", "ClipNotesSet",
 ]
 HEARTBEAT_SEC = 2.0
@@ -88,7 +88,7 @@ class AbletonMP(ControlSurface):
         self._last_beat = 0.0
         self._mirror = {
             "playing": None, "tempo": None, "psi": {}, "mix": {},
-            "device": {}, "notes": {}, "clips": {},
+            "device": {}, "notes": {}, "clips": {}, "meta": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -200,12 +200,16 @@ class AbletonMP(ControlSurface):
         self._unwire_tracks()
         for track in self._doc.tracks:
             self._listen(track, "playing_slot_index", self._make_slot_cb(track))
+            self._wire_metadata("track", track, track=track)
             self._wire_mixer(track)
             self._wire_devices(track)
             self._wire_note_slots(track)
         for track in self._device_aux_tracks():
+            self._wire_metadata("track", track, track=track)
             self._wire_mixer(track)
             self._wire_devices(track)
+        for scene in self._doc.scenes:
+            self._wire_metadata("scene", scene, scene=scene)
 
     def _wire_note_slots(self, track):
         try:
@@ -219,9 +223,11 @@ class AbletonMP(ControlSurface):
             scene = scenes[i]
             self._listen(slot, "has_clip", self._make_slot_content_cb(track, scene, slot))
             try:
-                if slot.has_clip and slot.clip.is_midi_clip:
+                if slot.has_clip:
                     clip = slot.clip
-                    self._listen(clip, "notes", self._make_notes_cb(track, scene, clip))
+                    self._wire_metadata("clip", clip, track=track, scene=scene)
+                    if clip.is_midi_clip:
+                        self._listen(clip, "notes", self._make_notes_cb(track, scene, clip))
             except Exception:
                 pass
 
@@ -232,6 +238,11 @@ class AbletonMP(ControlSurface):
                 self._listen(p, "value", self._make_mix_cb(track, param, idx))
         for prop in self._toggle_props(track):
             self._listen(track, prop, self._make_toggle_cb(track, prop))
+
+    def _wire_metadata(self, kind, obj, track=None, scene=None):
+        for prop in ("name", "color"):
+            self._listen(obj, prop, self._make_metadata_cb(
+                kind, obj, prop, track=track, scene=scene))
 
     def _wire_devices(self, track):
         """Observe parameters recursively through Rack chains."""
@@ -287,6 +298,11 @@ class AbletonMP(ControlSurface):
     def _make_toggle_cb(self, track, prop):
         def cb():
             self._safe(self._on_toggle, track, prop)
+        return cb
+
+    def _make_metadata_cb(self, kind, obj, prop, track=None, scene=None):
+        def cb():
+            self._safe(self._on_metadata, kind, obj, prop, track, scene)
         return cb
 
     def _make_devices_cb(self):
@@ -351,6 +367,7 @@ class AbletonMP(ControlSurface):
             self._prime_mixer()  # listener'Рё РјС–РєС€РµСЂР° РїРµСЂРµРІС–С€Р°РЅС– РЅР° РЅРѕРІС– РѕР±'С”РєС‚Рё
             self._prime_devices()
             self._prime_notes()
+            self._prime_metadata()
 
     def _on_scenes(self):
         if self._registry_ready:
@@ -361,6 +378,7 @@ class AbletonMP(ControlSurface):
             self._prime_mixer()
             self._prime_devices()
             self._prime_notes()
+            self._prime_metadata()
 
     def _on_devices(self):
         """Rebind observers after any Track/Chain/Rack structure change."""
@@ -419,6 +437,7 @@ class AbletonMP(ControlSurface):
         self._prime_mixer()
         self._prime_devices()
         self._prime_notes()
+        self._prime_metadata()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
                   % (len(reg["tracks"]), len(reg["scenes"]), len(reg["aux_tracks"]),
@@ -491,6 +510,7 @@ class AbletonMP(ControlSurface):
         self._prime_mixer()
         self._prime_devices()
         self._prime_notes()
+        self._prime_metadata()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
         self._persist_registry()
@@ -735,8 +755,12 @@ class AbletonMP(ControlSurface):
         if not emit:
             return
         for uid, idx, track in created:
+            ref = {"id": uid, "name": self._safe_name(track)}
+            color = self._safe_color(track)
+            if color is not None:
+                ref["color"] = color
             self._emit("TrackCreate", {
-                "track": {"id": uid, "name": self._safe_name(track)},
+                "track": ref,
                 "idx": idx,
                 "kind": self._track_kind(track),
             })
@@ -756,9 +780,69 @@ class AbletonMP(ControlSurface):
             name = self._safe_name(scene)
             if name:
                 ref["name"] = name
+            color = self._safe_color(scene)
+            if color is not None:
+                ref["color"] = color
             self._emit("SceneCreate", {"scene": ref, "idx": idx})
         for uid in removed:
             self._emit("SceneDelete", {"scene": {"id": uid}})
+
+    # --------------------------------------------------------------- metadata
+
+    @staticmethod
+    def _safe_color(obj):
+        try:
+            value = int(obj.color)
+            return value if 0 <= value <= 0xFFFFFF else None
+        except Exception:
+            return None
+
+    def _metadata_address(self, kind, obj, track=None, scene=None):
+        if kind == "track":
+            ref = self._device_track_ref(track if track is not None else obj)
+            return {"object": kind, "track": ref} if ref else None
+        if kind == "scene":
+            target = scene if scene is not None else obj
+            uid = self._scenes_reg.id_of(target, create=False)
+            return {"object": kind, "scene": {"id": uid}} if uid else None
+        if kind == "clip" and track is not None and scene is not None:
+            refs = self._clip_refs(track, scene)
+            if refs["track"].get("id") and refs["scene"].get("id"):
+                refs["object"] = kind
+                return refs
+        return None
+
+    @staticmethod
+    def _metadata_key(address, prop):
+        return "%s:%s" % (json.dumps(address, sort_keys=True, ensure_ascii=True,
+                                      separators=(",", ":")), prop)
+
+    def _metadata_value(self, obj, prop):
+        if prop == "name":
+            return self._safe_name(obj)
+        if prop == "color":
+            return self._safe_color(obj)
+        return None
+
+    def _on_metadata(self, kind, obj, prop, track=None, scene=None):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        address = self._metadata_address(kind, obj, track, scene)
+        value = self._metadata_value(obj, prop)
+        if address is None or value is None:
+            return
+        key = self._metadata_key(address, prop)
+        if self._mirror["meta"].get(key) == value:
+            return
+        self._mirror["meta"][key] = value
+        payload = dict(address)
+        payload.update({"prop": prop, "value": value})
+        self._emit("ObjectMetaSet", payload)
+        if prop == "name" and kind in ("track", "scene"):
+            target_track = track if track is not None else obj
+            if kind == "track" and self._aux_kind_of(target_track):
+                self._refresh_aux_tracks()
+            self._persist_registry()
 
     # ----------------------------------------------------------------- mixer
 
@@ -1188,7 +1272,11 @@ class AbletonMP(ControlSurface):
             length = max(0.001, float(clip.length))
         except Exception:
             length = NOTE_TIME_SPAN
-        return {"length": round(length, 6), "name": self._safe_name(clip)}
+        result = {"length": round(length, 6), "name": self._safe_name(clip)}
+        color = self._safe_color(clip)
+        if color is not None:
+            result["color"] = color
+        return result
 
     def _on_slot_content(self, track, scene, slot):
         """Track clip creation/deletion and rebind the note observer."""
@@ -1224,6 +1312,7 @@ class AbletonMP(ControlSurface):
 
         # has_clip changed: the old clip listener is dead or a new one is needed.
         self._rewire_tracks()
+        self._prime_metadata()
         if current == "midi" and clip is not None:
             notes = self._clip_notes(clip)
             self._mirror["notes"][key] = notes
@@ -1464,9 +1553,15 @@ class AbletonMP(ControlSurface):
         slot.create_clip(self._clip_length_from_payload(payload))
         clip = slot.clip
         name = (payload.get("clip") or {}).get("name")
-        if isinstance(name, str) and name:
+        if isinstance(name, str):
             try:
                 clip.name = name
+            except Exception:
+                pass
+        color = (payload.get("clip") or {}).get("color")
+        if isinstance(color, int) and not isinstance(color, bool) and 0 <= color <= 0xFFFFFF:
+            try:
+                clip.color = color
             except Exception:
                 pass
         return clip if clip.is_midi_clip else None
@@ -1675,8 +1770,11 @@ class AbletonMP(ControlSurface):
                 else:
                     self._doc.create_audio_track(idx)
                 new = self._doc.tracks[idx]
-                if ref.get("name"):
+                if isinstance(ref.get("name"), str):
                     new.name = ref["name"]
+                color = ref.get("color")
+                if isinstance(color, int) and not isinstance(color, bool) and 0 <= color <= 0xFFFFFF:
+                    new.color = color
                 self._tracks_reg.bind(uid, new)
             finally:
                 self._suppress_struct = False
@@ -1710,8 +1808,11 @@ class AbletonMP(ControlSurface):
             try:
                 self._doc.create_scene(idx)
                 new = self._doc.scenes[idx]
-                if ref.get("name"):
+                if isinstance(ref.get("name"), str):
                     new.name = ref["name"]
+                color = ref.get("color")
+                if isinstance(color, int) and not isinstance(color, bool) and 0 <= color <= 0xFFFFFF:
+                    new.color = color
                 self._scenes_reg.bind(uid, new)
             finally:
                 self._suppress_struct = False
@@ -1738,6 +1839,61 @@ class AbletonMP(ControlSurface):
                 self._suppress_struct = False
                 self._diff_scenes(emit=False)
 
+        elif etype == "ObjectMetaSet":
+            kind = payload.get("object")
+            prop = payload.get("prop")
+            if prop not in ("name", "color"):
+                self._warn("gseq %s: metadata property %r is unknown" % (gseq, prop))
+                return
+            target = None
+            track = None
+            scene = None
+            if kind == "track":
+                target, _track_ref = self._resolve_device_track(payload.get("track"))
+                track = target
+            elif kind == "scene":
+                sidx = self._resolve_scene(payload.get("scene"))
+                if sidx is not None:
+                    target = scene = self._doc.scenes[sidx]
+            elif kind == "clip":
+                track, scene, slot = self._resolve_clip_slot(payload, gseq)
+                try:
+                    target = slot.clip if slot is not None and slot.has_clip else None
+                except Exception:
+                    target = None
+            else:
+                self._warn("gseq %s: metadata object %r is unknown" % (gseq, kind))
+                return
+            if target is None:
+                self._warn("gseq %s: metadata target is absent" % (gseq,))
+                return
+            value = payload.get("value")
+            if prop == "name":
+                if not isinstance(value, str):
+                    self._warn("gseq %s: metadata name is not a string" % (gseq,))
+                    return
+            elif not (isinstance(value, int) and not isinstance(value, bool)
+                      and 0 <= value <= 0xFFFFFF):
+                self._warn("gseq %s: metadata color is outside RGB range" % (gseq,))
+                return
+            address = self._metadata_address(kind, target, track, scene)
+            if address is None:
+                return
+            key = self._metadata_key(address, prop)
+            self._mirror["meta"][key] = value
+            try:
+                setattr(target, prop, value)
+                actual = self._metadata_value(target, prop)
+                if actual is not None:
+                    self._mirror["meta"][key] = actual
+            except Exception as e:
+                self._warn("gseq %s: metadata %s could not be set: %r" % (gseq, prop, e))
+                return
+            if prop == "name" and kind in ("track", "scene"):
+                if kind == "track" and self._aux_kind_of(track):
+                    self._refresh_aux_tracks()
+                self._persist_registry()
+
         elif etype == "ClipCreate":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
             if slot is None:
@@ -1757,6 +1913,7 @@ class AbletonMP(ControlSurface):
                 self._suppress_struct = False
                 self._rewire_tracks()
                 self._prime_note_clip(track, scene, slot)
+                self._prime_metadata()
 
         elif etype == "ClipDelete":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -1775,6 +1932,7 @@ class AbletonMP(ControlSurface):
                 self._suppress_struct = False
                 self._rewire_tracks()
                 self._prime_note_clip(track, scene, slot)
+                self._prime_metadata()
 
         elif etype == "ClipNotesSet":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -2078,6 +2236,40 @@ class AbletonMP(ControlSurface):
                 self._mirror["psi"][i] = self._norm_psi(track.playing_slot_index)
             except Exception:
                 pass
+
+    def _prime_metadata(self):
+        """Capture Track/Scene/Session Clip labels and colors without startup events."""
+        self._mirror["meta"] = {}
+        if not self._registry_ready:
+            return
+
+        def prime(kind, obj, track=None, scene=None):
+            address = self._metadata_address(kind, obj, track, scene)
+            if address is None:
+                return
+            for prop in ("name", "color"):
+                value = self._metadata_value(obj, prop)
+                if value is not None:
+                    self._mirror["meta"][self._metadata_key(address, prop)] = value
+
+        for track in self._iter_device_tracks():
+            prime("track", track, track=track)
+        scenes = list(self._doc.scenes)
+        for scene in scenes:
+            prime("scene", scene, scene=scene)
+        for track in self._doc.tracks:
+            try:
+                slots = list(track.clip_slots)
+            except Exception:
+                continue
+            for i, scene in enumerate(scenes):
+                if i >= len(slots):
+                    break
+                try:
+                    if slots[i].has_clip:
+                        prime("clip", slots[i].clip, track=track, scene=scene)
+                except Exception:
+                    pass
 
     def _prime_mixer(self):
         """Р—Р°РїРѕРІРЅСЋС” РґР·РµСЂРєР°Р»Рѕ РјС–РєС€РµСЂР° РїС–СЃР»СЏ Р±СѓС‚СЃС‚СЂР°РїСѓ СЂРµС”СЃС‚СЂСѓ.

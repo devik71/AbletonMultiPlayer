@@ -170,6 +170,39 @@ try {
     if (/<- #\d+ TempoSet/.test(l1.out)) throw new Error('p1 застосував власний TempoSet — ехо');
   });
 
+  await check('Track metadata: назва і колір синхронізуються в обох напрямках', async () => {
+    let from = l2.out.length;
+    l1.stdin.write('meta track:1 name Bass Lead\n');
+    await waitFor(l2, /<- #\d+ ObjectMetaSet .*"object":"track".*"prop":"name","value":"Bass Lead"/, 8000, from);
+    from = l1.out.length;
+    l2.stdin.write('meta track:1 color 1122867\n');
+    await waitFor(l1, /<- #\d+ ObjectMetaSet .*"object":"track".*"prop":"color","value":1122867/, 8000, from);
+  });
+
+  await check('Return metadata адресується aux UUID', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('meta return:0 name Shared Return\n');
+    await waitFor(l2, /<- #\d+ ObjectMetaSet .*"kind":"return".*"prop":"name","value":"Shared Return"/, 8000, from);
+    l1.stdin.write('meta return:0 color 4478310\n');
+    await waitFor(l2, /<- #\d+ ObjectMetaSet .*"kind":"return".*"prop":"color","value":4478310/, 8000, from);
+  });
+
+  await check('Master metadata синхронізується у зворотний бік', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('meta master name Shared Master\n');
+    await waitFor(l1, /<- #\d+ ObjectMetaSet .*"kind":"master".*"prop":"name","value":"Shared Master"/, 8000, from);
+    l2.stdin.write('meta master color 7833753\n');
+    await waitFor(l1, /<- #\d+ ObjectMetaSet .*"kind":"master".*"prop":"color","value":7833753/, 8000, from);
+  });
+
+  await check('Scene metadata синхронізується UUID-адресою', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('meta scene:2 name Drop\n');
+    await waitFor(l2, /<- #\d+ ObjectMetaSet .*"object":"scene".*"prop":"name","value":"Drop"/, 8000, from);
+    l1.stdin.write('meta scene:2 color 10053171\n');
+    await waitFor(l2, /<- #\d+ ObjectMetaSet .*"object":"scene".*"prop":"color","value":10053171/, 8000, from);
+  });
+
   await check('scene launch доїхав як одна подія, а не пачка ClipLaunch', async () => {
     const from = l2.out.length;
     l1.stdin.write('scene 3\n');
@@ -200,6 +233,14 @@ try {
         !/"pitch": 72/.test(l2.out.slice(stateFrom))) {
       throw new Error('стан MIDI-ноти у партнера не збігається');
     }
+  });
+
+  await check('Session Clip metadata синхронізується через Track+Scene UUID', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('meta clip:0:0 name Shared Clip\n');
+    await waitFor(l1, /<- #\d+ ObjectMetaSet .*"object":"clip".*"prop":"name","value":"Shared Clip"/, 8000, from);
+    l2.stdin.write('meta clip:0:0 color 16755200\n');
+    await waitFor(l1, /<- #\d+ ObjectMetaSet .*"object":"clip".*"prop":"color","value":16755200/, 8000, from);
   });
 
   await check('видалення ноти очищає її регіон і не чіпає сусідній', async () => {
@@ -245,7 +286,7 @@ try {
 
     l2.stdin.write('state\n');
     await new Promise((r) => setTimeout(r, 300));
-    const hit = new RegExp(`"id": "${id}",\\s*"name": "[^"]*",\\s*"playing_slot_index": 5`);
+    const hit = new RegExp(`"id": "${id}",\\s*"name": "[^"]*",(?:\\s*"color": \\d+,)?\\s*"playing_slot_index": 5`);
     if (!hit.test(l2.out)) throw new Error('кліп поїхав не в той трек');
   });
 
@@ -415,10 +456,10 @@ try {
     }
   });
 
-  await check('журнал: 33 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 43 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 33) throw new Error(`очікував 33 події, у журналі ${lines.length}`);
+    if (lines.length !== 43) throw new Error(`очікував 43 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

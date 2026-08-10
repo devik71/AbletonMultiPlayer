@@ -16,7 +16,8 @@
 MIDI-кліпів та їхні ноти. Від bridge 0.13 синхронізуються параметри верхньорівневих
 девайсів на звичайних треках, від 0.14 — параметри девайсів усередині вкладених
 Rack chains, від 0.15 — девайси на Return Tracks і Master Track, а від 0.16 —
-мікшер Return/Master. Структура девайсів і Arrangement — ще ні, тож два `.als` після
+мікшер Return/Master. Від 0.17 синхронізуються назви й кольори Track/Scene/Session Clip.
+Структура девайсів і Arrangement — ще ні, тож два `.als` після
 спільної сесії поки не збігаються повністю.
 
 ## Як це влаштовано
@@ -46,6 +47,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python, у процесі Live)
 | `ClipLaunch`, `ClipStop`, `SceneLaunch`, `StopAllClips` | запуск і зупинка |
 | `TrackCreate`, `TrackDelete`, `SceneCreate`, `SceneDelete` | структура |
 | `MixerSet`, `TrackToggle` | мікшер звичайних/Return/Master треків (включно crossfader і cue) |
+| `ObjectMetaSet` | назва і RGB-колір Track/Return/Master, Scene та Session Clip |
 | `DeviceParamSet` | automatable-параметри девайсів звичайних/Return/Master треків, включно із вкладеними Rack chains |
 | `ClipCreate`, `ClipDelete`, `ClipNotesSet` | Session MIDI-кліпи та ноти |
 | `RegistryInit` | ідентичність об'єктів на старті сесії |
@@ -124,7 +126,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 5 hardening/recovery + 37 E2E-перевірок
+npm test                   # 5 hardening/recovery + 42 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
@@ -133,7 +135,8 @@ node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного �
 `mute 0`, `addtrack`, `move 0 2`, `note 0 0 60 0 1 100`, `delnote 0 0 60 0`,
 `delclip 0 0`, `device 0 0 1 0.75`, `device 0 3/1/0/0/0 0 0.9`,
 `device return:0 0 0 0.5`, `device master 0 0 0.5`, `mix return:0 volume 0.5`,
-`toggle return:0 mute`, `mix master crossfader 0.5`, `state`.
+`toggle return:0 mute`, `mix master crossfader 0.5`, `meta scene:0 name Intro`,
+`meta clip:0:0 color 16755200`, `state`.
 У `device` шлях через `/` чергує індекси device/chain/device; останній елемент —
 цільовий device, після шляху йдуть індекс параметра та значення.
 
@@ -158,7 +161,7 @@ node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного �
 Відомий розсинхрон.
 
 **MIDI-синхронізація поки охоплює лише Session View.** Arrangement-кліпи,
-audio clip creation, clip envelopes, loop/start markers і назва/довжина вже
+audio clip creation, clip envelopes, loop/start markers і довжина вже
 наявного кліпу не спостерігаються. Для екстремально щільного MIDI один нотний
 тайл може перевищити ліміт UDP-датаграми; bridge запише `datagram too large` у лог.
 

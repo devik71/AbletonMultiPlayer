@@ -23,7 +23,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.16.0","pid":1234,"features":["apply_ack"],"events":[...]}
+{"m":"hello","live":"12.3.8","script":"0.17.0","pid":1234,"features":["apply_ack"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
@@ -179,14 +179,15 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `ClipStop` | `{track: {id, name}}` | `track.stop_all_clips()` |
 | `SceneLaunch` | `{scene: {id, name?}}` | `scenes[j].fire()` |
 | `StopAllClips` | `{}` | `song.stop_all_clips()` |
-| `TrackCreate` | `{track: {id, name}, idx, kind: "midi"\|"audio"}` | `create_midi_track(i)` / `create_audio_track(i)` |
+| `TrackCreate` | `{track: {id, name, color?}, idx, kind: "midi"\|"audio"}` | `create_midi_track(i)` / `create_audio_track(i)` |
 | `TrackDelete` | `{track: {id}}` | `song.delete_track(i)` |
-| `SceneCreate` | `{scene: {id, name?}, idx}` | `song.create_scene(i)` |
+| `SceneCreate` | `{scene: {id, name?, color?}, idx}` | `song.create_scene(i)` |
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
 | `MixerSet` | `{track: {id, kind?: "return"\|"master"}, param, index?, value}` | `mixer_device.<param>.value = v` |
 | `TrackToggle` | `{track: {id, kind?: "return"}, param, value: bool}` | `track.<param> = v` |
+| `ObjectMetaSet` | `{object: "track"\|"scene"\|"clip", track?, scene?, prop: "name"\|"color", value}` | `<object>.<prop> = value` |
 | `DeviceParamSet` | `{track: {id, kind?: "return"|"master"}, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
-| `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name}}` | `clip_slot.create_clip(length)` |
+| `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name, color?}}` | `clip_slot.create_clip(length)` |
 | `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
 | `ClipNotesSet` | `{track, scene, clip, region, notes: [...]}` | заміна всіх MIDI-нот у регіоні |
 
@@ -203,6 +204,14 @@ Relay пише `journal.jsonl` — один закомічений івент н
 
 Для звичайного Track адреса лишається `{id}`; Return/Master використовують
 той самий aux-простір `{id, kind}`, що й `DeviceParamSet`.
+
+### Назви й кольори
+
+`ObjectMetaSet` одразу синхронізує `name` або `color` для звичайного,
+Return чи Master Track, Scene або Session Clip. Track адресується
+своїм UUID/aux UUID, Scene — UUID сцени, а Clip — парою Track+Scene UUID.
+`color` — ціле RGB-число `0x00rrggbb` в діапазоні `0..0xFFFFFF`;
+Live вибирає найближчий колір зі своєї палітри.
 
 ### Параметри девайсів
 
