@@ -23,7 +23,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.14.0","pid":1234,"features":["apply_ack"],"events":[...]}
+{"m":"hello","live":"12.3.8","script":"0.15.0","pid":1234,"features":["apply_ack"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
@@ -38,7 +38,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 {"m":"apply","type":"TransportSet","payload":{"playing":true},"gseq":42}
 {"m":"snapshot_request"}
 {"m":"registry_build"}
-{"m":"registry_adopt","registry":{"tracks":[...],"scenes":[...],"chains":[...]}}
+{"m":"registry_adopt","registry":{"tracks":[...],"scenes":[...],"aux_tracks":[...],"chains":[...]}}
 {"m":"ping","t":1723000000.0}
 ```
 
@@ -172,7 +172,7 @@ Relay пише `journal.jsonl` — один закомічений івент н
 
 | Type | Payload | Apply у LOM |
 |---|---|---|
-| `RegistryInit` | `{tracks: [{id, idx, name}], scenes: [...], chains: [{id, track, parent_chain, rack, kind, idx, name}]}` | — (бутстрап, див. нижче) |
+| `RegistryInit` | `{tracks: [{id, idx, name}], scenes: [...], aux_tracks: [{id, kind, idx, name}], chains: [{id, track, track_kind?, parent_chain, rack, kind, idx, name}]}` | — (бутстрап, див. нижче) |
 | `TransportSet` | `{playing: bool}` | `song.start_playing()` / `stop_playing()` |
 | `TempoSet` | `{bpm: float}` | `song.tempo = bpm` |
 | `ClipLaunch` | `{track: {id, name}, scene: {id, name?}}` | `clip_slots[j].fire()` |
@@ -185,7 +185,7 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
 | `MixerSet` | `{track: {id}, param: "volume"\|"panning"\|"send", index?, value}` | `mixer_device.<param>.value = v` |
 | `TrackToggle` | `{track: {id}, param: "mute"\|"solo"\|"arm", value: bool}` | `track.<param> = v` |
-| `DeviceParamSet` | `{track, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
+| `DeviceParamSet` | `{track: {id, kind?: "return"|"master"}, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
 | `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name}}` | `clip_slot.create_clip(length)` |
 | `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
 | `ClipNotesSet` | `{track, scene, clip, region, notes: [...]}` | заміна всіх MIDI-нот у регіоні |
@@ -197,8 +197,8 @@ Relay пише `journal.jsonl` — один закомічений івент н
 
 ### Параметри девайсів
 
-`DeviceParamSet` покриває automatable-параметри девайсів звичайних треків, рекурсивно
-включно з Rack `chains` і `return_chains`. Неперервні значення дебаунсяться на
+`DeviceParamSet` покриває automatable-параметри девайсів звичайних, Return і Master
+треків, рекурсивно включно з Rack `chains` і `return_chains`. Неперервні значення дебаунсяться на
 200 мс, quantized-перемикачі та enum-и йдуть одразу. Кожне значення клампиться
 локальними `min`/`max`; disabled-параметр не змінюється.
 
@@ -220,6 +220,17 @@ ordinal — це відома межа до появи синхронізаці�
 не застосовується в інший Chain. Сам цільовий device далі адресується сигнатурою
 всередині останнього Chain.
 
+Для звичайного треку `track` лишається старим `{id}`. Return і Master мають окремий
+простір aux-ідентичності й передають `{id, kind: "return"}` або
+`{id, kind: "master"}`. Bridge перевіряє і uuid, і kind, тому aux-подія не може
+випадково застосуватися до звичайного треку чи іншого типу контейнера.
+
+Нові `RegistryInit` містять `aux_tracks`: Return має locator `kind + idx + name`,
+Master — лише `kind`, бо він singleton, а його UI-назва може бути локалізована.
+UUID пишеться через Track `set_data` та в Song fallback-map. Для сесій, створених
+до bridge 0.15 і тому без `aux_tracks`, UUID детерміновано виводиться з locator;
+це дозволяє двом новим bridge приєднатися до старого журналу з однаковими id.
+
 Нові `RegistryInit` містять записи Rack chains із parent-chain UUID та точним
 bootstrap locator. Bridge пробує записати UUID на сам Chain через `set_data`, а
 повну fallback-мапу завжди пише на Song. Для журналів, створених bridge до 0.14
@@ -229,8 +240,8 @@ chain kind/index/name. Однакові копії `.als` отримують о�
 Якщо конкретна версія Live персистить `Chain.set_data`, подальша позиція вже не
 впливає на нього; інакше лишається слабший Song-map fallback.
 
-У milestone 0.14 свідомо не входять return/master devices, а також створення,
-видалення, перейменування й переставляння Rack/Chain/device структури. Структурні
+У milestone 0.15 свідомо не входять створення, видалення, перейменування й
+переставляння Return/Master/Rack/Chain/device структури. Структурні
 зміни треба виконати однаково на обох машинах; mismatch дає warning/no-op.
 
 Send адресується індексом, не uuid: у LOM це позиція в списку, прив'язана до

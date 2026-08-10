@@ -7,7 +7,7 @@
 // Команди зі stdin: play | stop | tempo <bpm> | launch <t> <s> | scene <n>
 //                   stopclip <t> | stopall | note <t> <s> <pitch> <start> <duration> <velocity>
 //                   delnote <t> <s> <pitch> <start> | delclip <t> <s>
-//                   device <track> <device[/chain/device...]> <parameter> <value> | state
+//                   device <track|return:N|master> <device[/chain/device...]> <parameter> <value> | state
 
 import { createSocket } from 'node:dgram';
 import { createHash, randomBytes } from 'node:crypto';
@@ -81,6 +81,11 @@ const song = {
     { id: null, name: '2-MIDI', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
     { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
   ],
+  return_tracks: [
+    { id: null, kind: 'return', name: 'A-Return', devices: [fakeFilter(0.2), fakeRack()] },
+    { id: null, kind: 'return', name: 'B-Return', devices: [fakeFilter(0.3)] },
+  ],
+  master_track: { id: null, kind: 'master', name: 'Master', devices: [fakeFilter(0.7), fakeRack()] },
   scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}` })),
 };
 let lseq = 0;
@@ -88,6 +93,21 @@ let registryReady = false;
 
 const newId = () => randomBytes(6).toString('hex');
 const trackById = (id) => song.tracks.find((t) => t.id === id);
+const auxTracks = () => [...song.return_tracks, song.master_track];
+const allDeviceTracks = () => [...song.tracks, ...auxTracks()];
+const auxTrackRef = (t) => ({ id: t.id, kind: t.kind });
+const deviceTrackRef = (t) => t.kind ? auxTrackRef(t) : { id: t.id };
+const deviceTrackByRef = (ref) => {
+  if (!ref?.kind) return trackById(ref?.id);
+  if (!['return', 'master'].includes(ref.kind)) return null;
+  return auxTracks().find((t) => t.id === ref.id && t.kind === ref.kind);
+};
+const deviceTrackFromArg = (value) => {
+  if (value === 'master') return song.master_track;
+  const match = /^return:(\d+)$/.exec(value || '');
+  if (match) return song.return_tracks[Number(match[1])];
+  return song.tracks[Number(value) || 0];
+};
 const sceneIdx = (id) => song.scenes.findIndex((s) => s.id === id);
 const trackRef = (t) => ({ id: t.id, name: t.name });
 const sceneRef = (s) => ({ id: s.id });
@@ -107,14 +127,40 @@ const chainGroups = (rack) => [
   ['chains', rack.chains || []],
   ['return_chains', rack.return_chains || []],
 ];
-const chainLocator = (track, parentId, container, rack, kind, idx, chain) => ({
-  track: track.id,
-  parent_chain: parentId,
-  rack: deviceRef(container, rack),
-  kind,
-  idx,
-  name: chain.name,
-});
+const chainLocator = (track, parentId, container, rack, kind, idx, chain) => {
+  const locator = {
+    track: track.id,
+    parent_chain: parentId,
+    rack: deviceRef(container, rack),
+    kind,
+    idx,
+    name: chain.name,
+  };
+  if (track.kind) locator.track_kind = track.kind;
+  return locator;
+};
+const auxLocator = (track, idx) => track.kind === 'master'
+  ? { kind: 'master' }
+  : { kind: 'return', idx, name: track.name };
+let auxTrackRecords = [];
+function refreshAuxTrackIds(preferredRecords = [], randomFallback = false) {
+  const preferred = new Map(preferredRecords.map((rec) => {
+    const locator = rec.kind === 'master'
+      ? { kind: 'master' }
+      : { kind: 'return', idx: rec.idx, name: rec.name };
+    return [JSON.stringify(locator), rec.id];
+  }));
+  auxTrackRecords = [];
+  auxTracks().forEach((track) => {
+    const idx = track.kind === 'return' ? song.return_tracks.indexOf(track) : 0;
+    const locator = auxLocator(track, idx);
+    const key = JSON.stringify(locator);
+    track.id = preferred.get(key) || track.id || (randomFallback
+      ? newId()
+      : createHash('sha256').update(key).digest('hex').slice(0, 12));
+    auxTrackRecords.push({ id: track.id, kind: track.kind, idx, name: track.name });
+  });
+}
 let chainRecords = [];
 function refreshChainIds(preferredRecords = []) {
   const preferred = new Map(preferredRecords.map((rec) => {
@@ -136,7 +182,7 @@ function refreshChainIds(preferredRecords = []) {
       }
     }
   };
-  for (const track of song.tracks) walk(track, track, null, 0);
+  for (const track of allDeviceTracks()) walk(track, track, null, 0);
 }
 const chainInContainer = (container, id) => {
   for (const rack of container.devices || []) {
@@ -201,7 +247,7 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.14.0-fake'),
+    script: arg('script', '0.15.0-fake'),
     pid: process.pid,
     features: ['apply_ack'],
     events: arg('events',
@@ -229,12 +275,14 @@ const snapshot = () => ({
 function buildRegistry() {
   song.tracks.forEach((t) => (t.id = newId()));
   song.scenes.forEach((s) => (s.id = newId()));
+  refreshAuxTrackIds([], true);
   refreshChainIds();
   registryReady = true;
   console.log('реєстр створено');
   return {
     tracks: song.tracks.map((t, idx) => ({ id: t.id, idx, name: t.name })),
     scenes: song.scenes.map((s, idx) => ({ id: s.id, idx, name: s.name })),
+    aux_tracks: auxTrackRecords,
     chains: chainRecords,
   };
 }
@@ -251,6 +299,11 @@ function adoptRegistry(reg) {
       else if (rec.name && o.name !== rec.name) problems.push(`${kind} ${rec.idx}: ${o.name} != ${rec.name}`);
       else o.id = rec.id;
     }
+  }
+  refreshAuxTrackIds(reg.aux_tracks || []);
+  const knownAux = new Set(auxTrackRecords.map((rec) => rec.id));
+  for (const rec of reg.aux_tracks || []) {
+    if (!knownAux.has(rec.id)) problems.push(`aux track ${rec.kind}/${rec.name}: unresolved`);
   }
   refreshChainIds(reg.chains || []);
   const knownChains = new Set(chainRecords.map((rec) => rec.id));
@@ -302,7 +355,7 @@ function apply(type, payload, gseq) {
       break;
     }
     case 'DeviceParamSet': {
-      const t = trackById(payload.track?.id);
+      const t = deviceTrackByRef(payload.track);
       if (!t) return reject('невідомий трек');
       const { device, parameter } = resolveDeviceParameter(
         t, payload.chain_path || [], payload.device, payload.parameter);
@@ -584,7 +637,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       break;
     }
     case 'device': {
-      const t = track();
+      const t = deviceTrackFromArg(rest[0]);
       const path = String(rest[1] || '').split('/').map(Number);
       const { container, device, chainPath } = locateDevice(t, path);
       const parameter = device?.parameters[Number(rest[2])];
@@ -594,7 +647,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       }
       parameter.value = Math.max(parameter.min, Math.min(parameter.max, value));
       const payload = {
-        track: { id: t.id },
+        track: deviceTrackRef(t),
         device: deviceRef(container, device),
         parameter: parameterRef(device, parameter),
         value: parameter.value,

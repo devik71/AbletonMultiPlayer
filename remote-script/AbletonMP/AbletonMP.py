@@ -25,7 +25,7 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.14.0"
+SCRIPT_VERSION = "0.15.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
@@ -96,7 +96,10 @@ class AbletonMP(ControlSurface):
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._tracks_reg = Registry(self._log)
         self._scenes_reg = Registry(self._log)
+        self._aux_tracks_reg = Registry(self._log)
         self._chains_reg = Registry(self._log)
+        self._saved_aux_track_records = []
+        self._aux_track_records = []
         self._saved_chain_records = []
         self._chain_records = []
         # РґРѕ Р±СѓС‚СЃС‚СЂР°РїСѓ uuid С‰Рµ РЅРµ СЃРїС–Р»СЊРЅС– Р· РїР°СЂС‚РЅРµСЂРѕРј, С‚РѕР¶ РїРѕРґС–С— Р· РїРѕСЃРёР»Р°РЅРЅСЏРјРё
@@ -145,6 +148,9 @@ class AbletonMP(ControlSurface):
             "song.set_data": hasattr(self._doc, "set_data"),
             "track.set_data": bool(self._doc.tracks) and hasattr(self._doc.tracks[0], "set_data"),
             "scene.set_data": bool(self._doc.scenes) and hasattr(self._doc.scenes[0], "set_data"),
+            "return_track.set_data": bool(self._doc.return_tracks) and
+                                     hasattr(self._doc.return_tracks[0], "set_data"),
+            "master_track.set_data": hasattr(self._doc.master_track, "set_data"),
         }
         try:
             caps["file_path"] = str(self._doc.file_path) or "(РЅРµ Р·Р±РµСЂРµР¶РµРЅРѕ)"
@@ -197,6 +203,8 @@ class AbletonMP(ControlSurface):
             self._wire_mixer(track)
             self._wire_devices(track)
             self._wire_note_slots(track)
+        for track in self._device_aux_tracks():
+            self._wire_devices(track)
 
     def _wire_note_slots(self, track):
         try:
@@ -345,7 +353,8 @@ class AbletonMP(ControlSurface):
         self._prime_mirror(transport=False)
         if self._registry_ready:
             self._diff_tracks(emit=not self._suppress_struct)
-            if self._refresh_chains():
+            aux_changed = self._refresh_aux_tracks()
+            if self._refresh_chains() or aux_changed:
                 self._persist_registry()
             self._prime_mixer()  # listener'Рё РјС–РєС€РµСЂР° РїРµСЂРµРІС–С€Р°РЅС– РЅР° РЅРѕРІС– РѕР±'С”РєС‚Рё
             self._prime_devices()
@@ -399,6 +408,7 @@ class AbletonMP(ControlSurface):
         """Р’РёРґР°С” uuid СѓСЃС–Рј РѕР±'С”РєС‚Р°Рј. Р РµР·СѓР»СЊС‚Р°С‚ СЃС‚Р°С” РїРѕРґС–С”СЋ RegistryInit Сѓ Р¶СѓСЂРЅР°Р»С–."""
         self._tracks_reg.clear()
         self._scenes_reg.clear()
+        self._aux_tracks_reg.clear()
         self._chains_reg.clear()
         # СЃРїРµСЂС€Сѓ РїС–РґРЅС–РјР°С”РјРѕ uuid С–Р· СЃР°РјРѕРіРѕ .als: СЏРєС‰Рѕ РѕР±РёРґРІС– РјР°С€РёРЅРё РІС–РґРєСЂРёР»Рё С‚РѕР№
         # СЃР°РјРёР№ С„Р°Р№Р», РІРѕРЅРё РѕС‚СЂРёРјР°СЋС‚СЊ РѕРґРЅР°РєРѕРІС– uuid С‰Рµ РґРѕ Р±СѓРґСЊ-СЏРєРѕРіРѕ РѕР±РјС–РЅСѓ
@@ -408,6 +418,8 @@ class AbletonMP(ControlSurface):
             reg["tracks"].append({"id": self._tracks_reg.id_of(t), "idx": i, "name": self._safe_name(t)})
         for i, s in enumerate(self._doc.scenes):
             reg["scenes"].append({"id": self._scenes_reg.id_of(s), "idx": i, "name": self._safe_name(s)})
+        self._refresh_aux_tracks()
+        reg["aux_tracks"] = list(self._aux_track_records)
         self._refresh_chains()
         reg["chains"] = list(self._chain_records)
         self._registry_ready = True
@@ -416,8 +428,9 @@ class AbletonMP(ControlSurface):
         self._prime_devices()
         self._prime_notes()
         self._persist_registry()
-        self._log("registry created: %d tracks, %d scenes, %d Rack chains (%d ids restored)"
-                  % (len(reg["tracks"]), len(reg["scenes"]), len(reg["chains"]), restored))
+        self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
+                  % (len(reg["tracks"]), len(reg["scenes"]), len(reg["aux_tracks"]),
+                     len(reg["chains"]), restored))
         return reg
 
     def _adopt_registry(self, reg):
@@ -428,6 +441,7 @@ class AbletonMP(ControlSurface):
         """
         self._tracks_reg.clear()
         self._scenes_reg.clear()
+        self._aux_tracks_reg.clear()
         self._chains_reg.clear()
         # uuid, Р·Р±РµСЂРµР¶РµРЅС– РІ .als, РіРѕР»РѕРІРЅС–С€С– Р·Р° РїРѕР·РёС†С–СЋ: С–Рј'СЏ С‚СЂРµРєСѓ РІ Live
         # Р·РјС–РЅСЋС”С‚СЊСЃСЏ СЃР°РјРµ СЃРѕР±РѕСЋ РІС–Рґ РєРёРЅСѓС‚РѕРіРѕ РґРµРІР°Р№СЃР°, С‚РѕР¶ Р·РІС–СЂРєР° Р·Р° С–РјРµРЅРµРј
@@ -463,6 +477,14 @@ class AbletonMP(ControlSurface):
                 by_position += 1
                 matched[kind][1] += 1
 
+        preferred_aux = reg.get("aux_tracks") or []
+        self._refresh_aux_tracks(preferred_aux)
+        if preferred_aux:
+            resolved_aux_ids = set(rec.get("id") for rec in self._aux_track_records)
+            missing_aux = [rec for rec in preferred_aux if rec.get("id") not in resolved_aux_ids]
+            if missing_aux:
+                problems.append("aux tracks unresolved: %d" % len(missing_aux))
+
         preferred_chains = reg.get("chains") or []
         self._refresh_chains(preferred_chains)
         if preferred_chains:
@@ -480,9 +502,10 @@ class AbletonMP(ControlSurface):
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
         self._persist_registry()
-        self._log("registry adopted: %d tracks, %d scenes, %d Rack chains (%d stored, %d by position)"
-                  % (len(self._tracks_reg), len(self._scenes_reg), len(self._chain_records),
-                     by_data, by_position))
+        self._log("registry adopted: %d tracks, %d scenes, %d aux tracks, %d Rack chains "
+                  "(%d stored, %d by position)"
+                  % (len(self._tracks_reg), len(self._scenes_reg), len(self._aux_track_records),
+                     len(self._chain_records), by_data, by_position))
         if problems:
             # РїСЂРѕС”РєС‚Рё СЂРѕР·С–Р№С€Р»РёСЃСЊ; РїРѕРґС–С— РЅР° РЅРµР·С–СЃС‚Р°РІР»РµРЅС– РѕР±'С”РєС‚Рё РїСЂРѕСЃС‚Рѕ РЅРµ Р·Р°СЃС‚РѕСЃСѓСЋС‚СЊСЃСЏ
             self._warn("Р±СѓС‚СЃС‚СЂР°Рї СЂРµС”СЃС‚СЂСѓ, РЅРµР·С–СЃС‚Р°РІР»РµРЅРѕ %d: %s"
@@ -526,7 +549,8 @@ class AbletonMP(ControlSurface):
         """
         by_object = 0
         for reg, objects in ((self._tracks_reg, self._doc.tracks),
-                             (self._scenes_reg, self._doc.scenes)):
+                             (self._scenes_reg, self._doc.scenes),
+                             (self._aux_tracks_reg, self._device_aux_tracks())):
             for obj in objects:
                 uid = self._obj_stored_id(obj)
                 if uid:
@@ -539,6 +563,7 @@ class AbletonMP(ControlSurface):
         except Exception:
             saved = None
         self._saved_chain_records = list((saved or {}).get("chains") or [])
+        self._saved_aux_track_records = list((saved or {}).get("aux_tracks") or [])
 
         by_map = 0
         if saved:
@@ -555,6 +580,19 @@ class AbletonMP(ControlSurface):
                     reg.bind(rec.get("id"), objects[i])
                     by_map += 1
 
+            saved_aux = {}
+            for rec in self._saved_aux_track_records:
+                if rec.get("id"):
+                    saved_aux[self._aux_locator_key(rec.get("kind"), rec.get("idx"),
+                                                    rec.get("name"))] = rec["id"]
+            for kind, idx, obj in self._iter_aux_tracks():
+                if self._aux_tracks_reg.id_of(obj, create=False):
+                    continue
+                uid = saved_aux.get(self._aux_locator_key(kind, idx, self._safe_name(obj)))
+                if uid:
+                    self._aux_tracks_reg.bind(uid, obj)
+                    by_map += 1
+
         if by_object or by_map:
             self._log("Р· .als РІС–РґРЅРѕРІР»РµРЅРѕ %d uuid (%d РЅР° РѕР±'С”РєС‚Р°С…, %d Р· РјР°РїРё)"
                       % (by_object + by_map, by_object, by_map))
@@ -568,7 +606,8 @@ class AbletonMP(ControlSurface):
         С„Р°Р№Р»Сѓ, С‚РѕР¶ РґРµС‚РµРєС‚СѓРІР°С‚Рё РїСЂРѕР±Р»РµРјСѓ РїРѕ exception РЅРµ РјРѕР¶РЅР°.
         """
         for reg, objects in ((self._tracks_reg, self._doc.tracks),
-                             (self._scenes_reg, self._doc.scenes)):
+                             (self._scenes_reg, self._doc.scenes),
+                             (self._aux_tracks_reg, self._device_aux_tracks())):
             for obj in objects:
                 uid = reg.id_of(obj, create=False)
                 if uid:
@@ -579,7 +618,8 @@ class AbletonMP(ControlSurface):
             if chain is not None:
                 self._obj_store_id(chain, rec["id"])
 
-        snap = {"tracks": [], "scenes": [], "chains": list(self._chain_records)}
+        snap = {"tracks": [], "scenes": [], "aux_tracks": list(self._aux_track_records),
+                "chains": list(self._chain_records)}
         for key, reg, objects in (("tracks", self._tracks_reg, self._doc.tracks),
                                   ("scenes", self._scenes_reg, self._doc.scenes)):
             for i, obj in enumerate(objects):
@@ -590,6 +630,102 @@ class AbletonMP(ControlSurface):
             self._doc.set_data(DATA_KEY_MAP, json.dumps(snap))
         except Exception as e:
             self._warn("СЂРµС”СЃС‚СЂ РЅРµ Р·Р±РµСЂРµР¶РµРЅРѕ РІ .als: %r" % (e,))
+
+    def _iter_aux_tracks(self):
+        """Yield stable locator parts for Return tracks and the Master track."""
+        try:
+            for idx, track in enumerate(self._doc.return_tracks):
+                yield "return", idx, track
+        except Exception:
+            pass
+        try:
+            master = self._doc.master_track
+            if master is not None:
+                yield "master", 0, master
+        except Exception:
+            pass
+
+    def _device_aux_tracks(self):
+        return [track for _kind, _idx, track in self._iter_aux_tracks()]
+
+    @staticmethod
+    def _aux_locator_key(kind, idx, name):
+        # Master is a singleton. Its UI name can be localized, so only the kind
+        # belongs to its migration locator. Return tracks need position + name.
+        locator = {"kind": kind}
+        if kind == "return":
+            locator["idx"] = idx
+            locator["name"] = name or ""
+        return json.dumps(locator, sort_keys=True, ensure_ascii=True,
+                          separators=(",", ":"))
+
+    def _refresh_aux_tracks(self, preferred_records=None):
+        """Assign stable IDs to Return/Master device containers.
+
+        New RegistryInit records are canonical. Old sessions migrate through
+        per-object/Song persistence and finally a deterministic structural ID.
+        """
+        old_records = json.dumps(self._aux_track_records, sort_keys=True,
+                                 ensure_ascii=True, separators=(",", ":"))
+        preferred = {}
+        for rec in (preferred_records or []):
+            if rec.get("id"):
+                preferred[self._aux_locator_key(rec.get("kind"), rec.get("idx"),
+                                                rec.get("name"))] = rec["id"]
+        saved = {}
+        for rec in self._saved_aux_track_records:
+            if rec.get("id"):
+                saved[self._aux_locator_key(rec.get("kind"), rec.get("idx"),
+                                            rec.get("name"))] = rec["id"]
+
+        records = []
+        live_ids = set()
+        for kind, idx, track in self._iter_aux_tracks():
+            name = self._safe_name(track)
+            locator_key = self._aux_locator_key(kind, idx, name)
+            current = self._aux_tracks_reg.id_of(track, create=False)
+            uid = (preferred.get(locator_key) or current or self._obj_stored_id(track) or
+                   saved.get(locator_key))
+            if not uid:
+                uid = hashlib.sha256(locator_key.encode("utf-8")).hexdigest()[:12]
+            if uid != current:
+                self._aux_tracks_reg.bind(uid, track)
+            rec = {"id": uid, "kind": kind, "idx": idx, "name": name}
+            records.append(rec)
+            live_ids.add(uid)
+
+        for uid in self._aux_tracks_reg.known_ids():
+            if uid not in live_ids:
+                self._aux_tracks_reg.forget(uid)
+        self._aux_track_records = records
+        new_records = json.dumps(records, sort_keys=True, ensure_ascii=True,
+                                 separators=(",", ":"))
+        return old_records != new_records
+
+    def _aux_kind_of(self, track):
+        for kind, _idx, candidate in self._iter_aux_tracks():
+            try:
+                if candidate == track:
+                    return kind
+            except Exception:
+                pass
+        return None
+
+    def _device_track_ref(self, track):
+        tid = self._tracks_reg.id_of(track, create=False)
+        if tid:
+            return {"id": tid}
+        aid = self._aux_tracks_reg.id_of(track, create=False)
+        kind = self._aux_kind_of(track)
+        if aid and kind:
+            return {"id": aid, "kind": kind}
+        return None
+
+    def _iter_device_tracks(self):
+        for track in self._doc.tracks:
+            yield track
+        for track in self._device_aux_tracks():
+            yield track
 
     def _track_kind(self, track):
         try:
@@ -780,15 +916,18 @@ class AbletonMP(ControlSurface):
                 pass
         return groups
 
-    def _chain_locator(self, tid, parent_id, container, rack, kind, idx, chain):
-        return {
-            "track": tid,
+    def _chain_locator(self, track_ref, parent_id, container, rack, kind, idx, chain):
+        locator = {
+            "track": track_ref.get("id"),
             "parent_chain": parent_id,
             "rack": self._device_ref(container, rack),
             "kind": kind,
             "idx": idx,
             "name": self._safe_name(chain),
         }
+        if track_ref.get("kind"):
+            locator["track_kind"] = track_ref["kind"]
+        return locator
 
     @staticmethod
     def _chain_locator_key(locator):
@@ -808,12 +947,16 @@ class AbletonMP(ControlSurface):
         for rec in (preferred_records or []):
             locator = {key: rec.get(key) for key in
                        ("track", "parent_chain", "rack", "kind", "idx", "name")}
+            if rec.get("track_kind"):
+                locator["track_kind"] = rec["track_kind"]
             if rec.get("id"):
                 preferred[self._chain_locator_key(locator)] = rec["id"]
         saved = {}
         for rec in self._saved_chain_records:
             locator = {key: rec.get(key) for key in
                        ("track", "parent_chain", "rack", "kind", "idx", "name")}
+            if rec.get("track_kind"):
+                locator["track_kind"] = rec["track_kind"]
             if rec.get("id"):
                 saved[self._chain_locator_key(locator)] = rec["id"]
 
@@ -828,8 +971,8 @@ class AbletonMP(ControlSurface):
                 devices = list(container.devices)
             except Exception:
                 return
-            tid = self._tracks_reg.id_of(track, create=False)
-            if not tid:
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
                 return
             for rack in devices:
                 if not self._device_has_chains(rack):
@@ -837,7 +980,7 @@ class AbletonMP(ControlSurface):
                 for kind, chains in self._rack_chain_groups(rack):
                     for idx, chain in enumerate(chains):
                         locator = self._chain_locator(
-                            tid, parent_id, container, rack, kind, idx, chain)
+                            track_ref, parent_id, container, rack, kind, idx, chain)
                         if locator["rack"] is None:
                             continue
                         locator_key = self._chain_locator_key(locator)
@@ -855,7 +998,7 @@ class AbletonMP(ControlSurface):
                         records.append(rec)
                         walk(track, chain, uid, depth + 1)
 
-        for track in self._doc.tracks:
+        for track in self._iter_device_tracks():
             walk(track, track, None, 0)
         self._chain_records = records
         new_records = json.dumps(records, sort_keys=True, ensure_ascii=True,
@@ -914,9 +1057,9 @@ class AbletonMP(ControlSurface):
         return False
 
     @staticmethod
-    def _device_key(tid, chain_path, device_ref, parameter_ref):
+    def _device_key(track_ref, chain_path, device_ref, parameter_ref):
         return json.dumps([
-            tid,
+            track_ref,
             chain_path,
             device_ref.get("class_name"),
             device_ref.get("class_display_name"),
@@ -974,10 +1117,10 @@ class AbletonMP(ControlSurface):
     def _on_device_param(self, track, device, parameter):
         if not self._registry_ready:
             return
-        tid = self._tracks_reg.id_of(track, create=False)
+        track_ref = self._device_track_ref(track)
         _container, device_ref, chain_path = self._device_location(track, device)
         parameter_ref = self._device_parameter_ref(device, parameter)
-        if not tid or device_ref is None or chain_path is None or parameter_ref is None:
+        if not track_ref or device_ref is None or chain_path is None or parameter_ref is None:
             return
         try:
             value = float(parameter.value)
@@ -986,7 +1129,7 @@ class AbletonMP(ControlSurface):
         if math.isnan(value) or math.isinf(value):
             return
         value = round(value, 6)
-        key = self._device_key(tid, chain_path, device_ref, parameter_ref)
+        key = self._device_key(track_ref, chain_path, device_ref, parameter_ref)
         if self._mirror["device"].get(key) == value:
             return
         self._mirror["device"][key] = value
@@ -1000,7 +1143,7 @@ class AbletonMP(ControlSurface):
             pass
 
         payload = {
-            "track": {"id": tid},
+            "track": track_ref,
             "device": device_ref,
             "parameter": parameter_ref,
             "value": value,
@@ -1652,7 +1795,7 @@ class AbletonMP(ControlSurface):
             p.value = value
 
         elif etype == "DeviceParamSet":
-            track, _idx = self._resolve_track(payload.get("track"))
+            track, track_ref = self._resolve_device_track(payload.get("track"))
             if track is None:
                 return
             device_ref = payload.get("device")
@@ -1683,8 +1826,7 @@ class AbletonMP(ControlSurface):
             except Exception:
                 pass
             value = max(float(parameter.min), min(float(parameter.max), value))
-            tid = self._tracks_reg.id_of(track, create=False)
-            key = self._device_key(tid, chain_path, device_ref, parameter_ref)
+            key = self._device_key(track_ref, chain_path, device_ref, parameter_ref)
             self._mirror["device"][key] = round(value, 6)
             try:
                 parameter.value = value
@@ -1816,6 +1958,24 @@ class AbletonMP(ControlSurface):
             return None, None
         return track, self._track_index(track)
 
+    def _resolve_device_track(self, ref):
+        """Resolve a DeviceParamSet container without widening ordinary track APIs."""
+        if not isinstance(ref, dict):
+            return None, None
+        kind = ref.get("kind")
+        if kind is None:
+            track, _idx = self._resolve_track(ref)
+            return (track, {"id": ref.get("id")}) if track is not None else (None, None)
+        if kind not in ("return", "master"):
+            self._warn("device track kind %r is unknown; event skipped" % (kind,))
+            return None, None
+        uid = ref.get("id")
+        track = self._aux_tracks_reg.obj_of(uid) if uid else None
+        if track is None or self._aux_kind_of(track) != kind:
+            self._warn("%s device track %r is unknown; event skipped" % (kind, uid))
+            return None, None
+        return track, {"id": uid, "kind": kind}
+
     def _resolve_scene(self, ref):
         """РЎС†РµРЅСѓ Р°РґСЂРµСЃСѓС”РјРѕ uuid, Р°Р»Рµ LOM РїСЂР°С†СЋС” С–РЅРґРµРєСЃР°РјРё -- РІРµСЂС‚Р°С”РјРѕ С–РЅРґРµРєСЃ."""
         if not isinstance(ref, dict):
@@ -1937,11 +2097,11 @@ class AbletonMP(ControlSurface):
                     pass
 
     def _prime_devices(self):
-        """Prime the complete Track/Rack device tree without startup events."""
+        """Prime all ordinary/Return/Master device trees without startup events."""
         self._mirror["device"] = {}
-        for track in self._doc.tracks:
-            tid = self._tracks_reg.id_of(track, create=False)
-            if not tid:
+        for track in self._iter_device_tracks():
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
                 continue
             for container, device, chain_path in self._iter_track_devices(track):
                 device_ref = self._device_ref(container, device)
@@ -1961,7 +2121,7 @@ class AbletonMP(ControlSurface):
                         continue
                     if math.isnan(value) or math.isinf(value):
                         continue
-                    key = self._device_key(tid, chain_path, device_ref, parameter_ref)
+                    key = self._device_key(track_ref, chain_path, device_ref, parameter_ref)
                     self._mirror["device"][key] = round(value, 6)
 
     def _mix_slots(self, track):
