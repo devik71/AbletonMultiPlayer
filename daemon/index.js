@@ -41,6 +41,7 @@ const SLUG = `${AUTHOR}.${SESSION}`.replace(/[^\w.-]+/g, '_');
 const statePath = join(STATE_DIR, `${SLUG}.json`);
 const outboxPath = join(STATE_DIR, `${SLUG}.outbox.jsonl`);
 const localJournalPath = join(STATE_DIR, `${SLUG}.applied.jsonl`);
+const pendingPath = join(STATE_DIR, `${SLUG}.pending.jsonl`);
 
 function log(...a) {
   // локальний час, щоб збігалося з bridge.log при звірянні логів
@@ -86,9 +87,23 @@ let clock = { offset: 0, rtt: null };
 let registry = null;
 let registryAsked = false;
 
-/** Події, що прийшли поки bridge мовчав. Застосуються, щойно він озветься. */
+/** Чужі commit-и зберігаються до підтвердження bridge. Інакше рестарт daemon
+ *  після просування lastGseq назавжди втратив би ще не застосовану подію. */
 let pendingApply = [];
-const MAX_PENDING = 500;
+if (existsSync(pendingPath)) {
+  pendingApply = readFileSync(pendingPath, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    })
+    .filter((event) => event && Number.isSafeInteger(event.gseq));
+  if (pendingApply.length) log(`відновлено ${pendingApply.length} незастосованих подій для bridge`);
+}
+const pendingSent = new Set();
+const savePending = () =>
+  writeFileSync(pendingPath, pendingApply.map((event) => JSON.stringify(event)).join('\n') +
+    (pendingApply.length ? '\n' : ''));
 
 const filesync = new FileSync({
   send: (msg) => {
@@ -127,8 +142,11 @@ udp.on('message', (buf) => {
   switch (msg.m) {
     case 'hello':
       bridgeAlive = true;
+      pendingSent.clear();
       log(`bridge підключився: Live ${msg.live}, script ${msg.script}, pid ${msg.pid}`);
-      bridgeInfo = { live: msg.live, script: msg.script, events: msg.events || [] };
+      bridgeInfo = {
+        live: msg.live, script: msg.script, events: msg.events || [], features: msg.features || [],
+      };
       announceCapabilities();
       registryAsked = false; // Live перезавантажився -- його реєстр треба відновити
       bootstrapRegistry();
@@ -136,19 +154,21 @@ udp.on('message', (buf) => {
       break;
     case 'bye':
       bridgeAlive = false;
+      pendingSent.clear();
+      bridgeInfo = null;
       log('bridge відключився');
       break;
     case 'heartbeat':
       if (!bridgeAlive) {
         bridgeAlive = true;
         log('bridge знову на звʼязку');
+        // Спершу з'ясовуємо, чи вміє саме цей екземпляр bridge apply_ack.
+        // Інакше capability від попереднього Live дасть хибну гарантію доставки.
+        if (!bridgeInfo) toBridge({ m: 'hello_request' });
         // Live міг працювати ще до старту daemon -- тоді hello вже не буде,
         // і без цього виклику сесія лишиться без реєстру назавжди
         bootstrapRegistry();
-        drainPending();
-        // heartbeat не несе можливостей bridge, а hello ми пропустили --
-        // без цього запиту розсинхрон версій лишиться невидимим
-        if (!bridgeInfo) toBridge({ m: 'hello_request' });
+        if (bridgeInfo) drainPending();
       }
       break;
     case 'event':
@@ -167,6 +187,18 @@ udp.on('message', (buf) => {
           `${msg.registry?.scenes?.length} сцен`);
       submit('RegistryInit', msg.registry);
       break;
+    case 'apply_ack': {
+      const gseq = Number(msg.gseq);
+      pendingSent.delete(gseq);
+      if (!msg.ok) {
+        log(`bridge не підтвердив застосування #${gseq}: ${msg.error || 'невідома помилка'}`);
+        break;
+      }
+      const before = pendingApply.length;
+      pendingApply = pendingApply.filter((event) => event.gseq !== gseq);
+      if (pendingApply.length !== before) savePending();
+      break;
+    }
     case 'log':
       log(`[bridge/${msg.level}] ${msg.text}`);
       break;
@@ -327,10 +359,23 @@ function bootstrapRegistry() {
  *  має спершу отримати реєстр, інакше жодна з них не зарезолвиться. */
 function drainPending() {
   if (!bridgeAlive || !pendingApply.length) return;
-  const q = pendingApply;
-  pendingApply = [];
+  const q = pendingApply.filter((event) => !pendingSent.has(event.gseq));
+  if (!q.length) return;
   log(`застосовую ${q.length} відкладених подій`);
-  for (const ev of q) toBridge({ m: 'apply', type: ev.type, payload: ev.payload, gseq: ev.gseq });
+  for (const ev of q) {
+    pendingSent.add(ev.gseq);
+    toBridge({ m: 'apply', type: ev.type, payload: ev.payload, gseq: ev.gseq });
+  }
+
+  // Bridge до 0.11.0 не знає apply_ack. Для нього лишаємо стару семантику
+  // "UDP-відправка = доставлено", але явно показуємо слабшу гарантію в логах.
+  if (!bridgeInfo?.features?.includes('apply_ack')) {
+    log('УВАГА: bridge без apply_ack — pending очищено без підтвердження застосування');
+    const sent = new Set(q.map((event) => event.gseq));
+    pendingApply = pendingApply.filter((event) => !sent.has(event.gseq));
+    for (const gseq of sent) pendingSent.delete(gseq);
+    savePending();
+  }
 }
 
 function submit(type, payload) {
@@ -350,7 +395,20 @@ function flushOutbox() {
 }
 
 function onCommit(ev) {
-  if (ev.gseq <= state.lastGseq) return; // вже бачили
+  const mine = ev.author === AUTHOR;
+  if (ev.gseq <= state.lastGseq) {
+    // Idempotent ack на ре-сабміт: lastGseq уже міг зберегтися до падіння,
+    // а outbox — ще ні. Старий commit все одно має завершити локальну доставку.
+    if (mine) {
+      const before = outbox.length;
+      outbox = outbox.filter((event) => event.lseq !== ev.lseq);
+      if (outbox.length !== before) {
+        saveOutbox();
+        log(`#${ev.gseq} ${ev.type} (повторний ack, outbox очищено)`);
+      }
+    }
+    return;
+  }
   state.lastGseq = ev.gseq;
   saveState();
   appendFileSync(localJournalPath, JSON.stringify(ev) + '\n');
@@ -366,7 +424,6 @@ function onCommit(ev) {
     return;
   }
 
-  const mine = ev.author === AUTHOR;
   if (mine) {
     const before = outbox.length;
     outbox = outbox.filter((e) => e.lseq !== ev.lseq);
@@ -377,18 +434,9 @@ function onCommit(ev) {
   }
 
   log(`#${ev.gseq} ${ev.type} ${JSON.stringify(ev.payload)} <- ${ev.author}`);
-  if (!bridgeAlive) {
-    // lastGseq уже просунувся, тож просто пропустити -- значить втратити подію
-    // назавжди. Найчастіший випадок: daemon щойно стартував і забрав хвіст
-    // журналу, а bridge ще не встиг озватись (heartbeat раз на 2 с).
-    pendingApply.push(ev);
-    if (pendingApply.length > MAX_PENDING) {
-      pendingApply.shift();
-      log(`  ...буфер переповнено (>${MAX_PENDING}), найстаріші події втрачено`);
-    }
-    return;
-  }
-  toBridge({ m: 'apply', type: ev.type, payload: ev.payload, gseq: ev.gseq });
+  pendingApply.push(ev);
+  savePending();
+  drainPending();
 }
 
 // -------------------------------------------------------------------- watch
@@ -400,6 +448,8 @@ setInterval(() => filesync.rescan(), 10_000);
 setInterval(() => {
   if (bridgeAlive && Date.now() - bridgeLastSeen > 6000) {
     bridgeAlive = false;
+    pendingSent.clear();
+    bridgeInfo = null;
     log('bridge замовк (Live закритий або скрипт не вибраний у Preferences)');
   }
 }, 3000);

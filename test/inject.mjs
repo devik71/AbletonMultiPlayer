@@ -17,7 +17,8 @@ if (!type) {
 const author = process.env.MP_AUTHOR || 'ghost';
 const relay = process.env.MP_RELAY || 'ws://127.0.0.1:19870';
 const session = process.env.MP_SESSION || 'default';
-const payload = payloadRaw ? JSON.parse(payloadRaw) : {};
+const payloadSource = payloadRaw || process.env.MP_PAYLOAD;
+const payload = payloadSource ? JSON.parse(payloadSource) : {};
 
 const ws = new WebSocket(relay);
 

@@ -5,7 +5,9 @@
 
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -14,6 +16,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.MP_RELAY_PORT || 19870);
 const PROTO = 1;
 const JOURNAL_DIR = process.env.MP_JOURNAL_DIR || join(__dirname, 'journals');
+const MAX_WS_PAYLOAD = 2 * 1024 * 1024;
+
+function validSessionName(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 &&
+    value !== '.' && value !== '..' && !/[<>:"/\\|?*\u0000-\u001f]/.test(value) && !/[ .]$/.test(value);
+}
+
+function validAuthor(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 &&
+    !/[\u0000-\u001f]/.test(value);
+}
 
 // ---------------------------------------------------------------- canonical
 
@@ -36,10 +49,14 @@ class Session {
     this.name = name;
     this.journal = [];
     this.registry = null;  // payload першого RegistryInit; далі він незмінний
-    this.seen = new Set(); // "author:lseq" -- дедуплікація ре-сабмітів
+    this.seen = new Map(); // "author:lseq" -> commit для idempotent ack ре-сабмітів
     this.clients = new Set();
+    this.loadError = null;
+    this.checkpointError = null;
     this.path = join(JOURNAL_DIR, `${name}.jsonl`);
+    this.checkpointPath = join(JOURNAL_DIR, `${name}.checkpoint.json`);
     this.#load();
+    if (!this.loadError) this.#verifyCheckpoint();
   }
 
   get head() {
@@ -49,33 +66,104 @@ class Session {
 
   #load() {
     if (!existsSync(this.path)) return;
-    const lines = readFileSync(this.path, 'utf8').split('\n').filter(Boolean);
+    let lines;
+    try {
+      lines = readFileSync(this.path, 'utf8').split('\n').filter(Boolean);
+    } catch (e) {
+      this.loadError = `журнал не читається: ${e.message}`;
+      log(`[${this.name}] ${this.loadError}`);
+      return;
+    }
     let prevHash = '';
     for (const line of lines) {
       let ev;
       try {
         ev = JSON.parse(line);
       } catch {
-        log(`[${this.name}] пошкоджений рядок журналу, зупиняюсь на gseq=${this.head.gseq}`);
+        this.loadError = `пошкоджений рядок після gseq=${this.head.gseq}`;
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
         break;
       }
       const { hash, prev_hash: prev, ...body } = ev;
+      const expectedGseq = this.journal.length + 1;
+      if (ev.gseq !== expectedGseq) {
+        this.loadError = `gseq=${ev.gseq} замість ${expectedGseq}`;
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+        break;
+      }
       if (prev !== prevHash || hashEvent(prev, body) !== hash) {
-        log(`[${this.name}] hash-chain розірвано на gseq=${ev.gseq}; хвіст відкинуто`);
+        this.loadError = `hash-chain розірвано на gseq=${ev.gseq}`;
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
         break;
       }
       this.journal.push(ev);
-      this.seen.add(`${ev.author}:${ev.lseq}`);
+      this.seen.set(`${ev.author}:${ev.lseq}`, ev);
       if (ev.type === 'RegistryInit' && !this.registry) this.registry = ev.payload;
       prevHash = hash;
     }
     log(`[${this.name}] журнал відновлено: ${this.journal.length} подій, head=${this.head.gseq}`);
   }
 
-  /** Повертає закомічену подію, або null якщо це дублікат. */
+  #verifyCheckpoint() {
+    if (existsSync(this.checkpointPath)) {
+      let checkpoint;
+      try {
+        checkpoint = JSON.parse(readFileSync(this.checkpointPath, 'utf8'));
+      } catch (error) {
+        this.loadError = `checkpoint не читається: ${error.message}`;
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+        return;
+      }
+      if (checkpoint.version !== 1 || !Number.isSafeInteger(checkpoint.gseq) ||
+          checkpoint.gseq < 0 || typeof checkpoint.hash !== 'string') {
+        this.loadError = 'checkpoint має некоректний формат';
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+        return;
+      }
+      if (checkpoint.gseq > this.head.gseq) {
+        this.loadError = `checkpoint попереду журналу: ${checkpoint.gseq} > ${this.head.gseq}`;
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+        return;
+      }
+      const anchoredHash = checkpoint.gseq === 0 ? '' : this.journal[checkpoint.gseq - 1]?.hash;
+      if (checkpoint.hash !== anchoredHash) {
+        this.loadError = `checkpoint не збігається з журналом на gseq=${checkpoint.gseq}`;
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+        return;
+      }
+      if (checkpoint.gseq === this.head.gseq && checkpoint.hash === this.head.hash) return;
+      log(`[${this.name}] checkpoint відстає (${checkpoint.gseq} < ${this.head.gseq}), оновлюю`);
+    }
+    this.#writeCheckpoint();
+  }
+
+  #writeCheckpoint() {
+    const checkpoint = {
+      version: 1,
+      session: this.name,
+      gseq: this.head.gseq,
+      hash: this.head.hash,
+      updated_at: Date.now() / 1000,
+    };
+    const tmp = `${this.checkpointPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(checkpoint) + '\n');
+      renameSync(tmp, this.checkpointPath);
+      this.checkpointError = null;
+      return true;
+    } catch (error) {
+      try { rmSync(tmp, { force: true }); } catch {}
+      this.checkpointError = error.message;
+      log(`[${this.name}] НЕ ВДАЛОСЬ записати checkpoint: ${error.message}`);
+      return false;
+    }
+  }
+
+  /** Повертає commit і ознаку дубліката; null лише для відхиленого RegistryInit. */
   commit({ type, payload, author, lseq, ts }) {
+    if (this.loadError) throw new Error(this.loadError);
     const dedupeKey = `${author}:${lseq}`;
-    if (this.seen.has(dedupeKey)) return null;
+    if (this.seen.has(dedupeKey)) return { event: this.seen.get(dedupeKey), duplicate: true };
 
     // Реєстр ідентичності створюється один раз за сесію. Так вирішується гонка
     // одночасного конекту двох гравців: обидва бачать порожній журнал, обидва
@@ -98,15 +186,14 @@ class Session {
     };
     const ev = { ...body, prev_hash: prev.hash, hash: hashEvent(prev.hash, body) };
 
+    // Commit існує лише після успішного запису. Інакше клієнти побачили б подію,
+    // якої вже не буде в журналі після рестарту relay.
+    appendFileSync(this.path, JSON.stringify(ev) + '\n');
     this.journal.push(ev);
-    this.seen.add(dedupeKey);
+    this.seen.set(dedupeKey, ev);
     if (type === 'RegistryInit') this.registry = ev.payload;
-    try {
-      appendFileSync(this.path, JSON.stringify(ev) + '\n');
-    } catch (e) {
-      log(`[${this.name}] НЕ ВДАЛОСЬ записати журнал: ${e.message}`);
-    }
-    return ev;
+    this.#writeCheckpoint();
+    return { event: ev, duplicate: false };
   }
 
   tailSince(gseq) {
@@ -147,6 +234,8 @@ const http = createServer((req, res) => {
       session: s.name,
       head: s.head.gseq,
       peers: s.peers(),
+      journal_error: s.loadError,
+      checkpoint_error: s.checkpointError,
     }));
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, proto: PROTO, sessions: body }, null, 2));
@@ -155,7 +244,7 @@ const http = createServer((req, res) => {
   res.writeHead(404).end();
 });
 
-const wss = new WebSocketServer({ server: http });
+const wss = new WebSocketServer({ server: http, maxPayload: MAX_WS_PAYLOAD });
 
 wss.on('connection', (ws) => {
   const client = { ws, author: null, session: null };
@@ -175,16 +264,26 @@ wss.on('connection', (ws) => {
 
     switch (msg.m) {
       case 'join': {
+        if (client.session) {
+          send({ m: 'error', code: 'already_joined', text: 'join уже виконано' });
+          return ws.close();
+        }
         if (msg.proto !== PROTO) {
           send({ m: 'error', code: 'proto_mismatch', text: `relay говорить proto ${PROTO}` });
           return ws.close();
         }
-        if (!msg.author) {
-          send({ m: 'error', code: 'no_author', text: 'author обовʼязковий' });
+        const author = String(msg.author ?? '');
+        if (!validAuthor(author)) {
+          send({ m: 'error', code: 'bad_author', text: 'author має містити 1–128 друкованих символів' });
           return ws.close();
         }
-        const session = getSession(msg.session || 'default');
-        client.author = String(msg.author);
+        const sessionName = msg.session || 'default';
+        if (!validSessionName(sessionName)) {
+          send({ m: 'error', code: 'bad_session', text: 'неприпустима назва сесії' });
+          return ws.close();
+        }
+        const session = getSession(sessionName);
+        client.author = author;
         client.session = session;
         session.clients.add(client);
 
@@ -207,11 +306,26 @@ wss.on('connection', (ws) => {
       case 'submit': {
         if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
         const e = msg.event || {};
-        if (!e.type || typeof e.lseq !== 'number') {
+        if (typeof e.type !== 'string' || !e.type || e.type.length > 64 ||
+            !Number.isSafeInteger(e.lseq) || e.lseq < 0) {
           return send({ m: 'error', code: 'bad_event', text: 'потрібні type і lseq' });
         }
-        const ev = client.session.commit({ ...e, author: client.author });
-        if (!ev) break; // дублікат після реконнекту -- тихо ігноруємо
+        let result;
+        try {
+          result = client.session.commit({ ...e, author: client.author });
+        } catch (error) {
+          log(`[${client.session.name}] НЕ ВДАЛОСЬ записати журнал: ${error.message}`);
+          return send({ m: 'error', code: 'journal_write_failed', text: 'подію не закомічено' });
+        }
+        if (!result) break; // повторний RegistryInit відхилено
+        const { event: ev, duplicate } = result;
+        if (duplicate) {
+          // Автор міг отримати commit, записати lastGseq і впасти до очищення outbox.
+          // Повторна відповідь тим самим commit робить цей recovery idempotent.
+          send({ m: 'commit', event: ev });
+          log(`[${client.session.name}] duplicate ack #${ev.gseq} ${ev.type} -> ${ev.author}`);
+          break;
+        }
         client.session.broadcast({ m: 'commit', event: ev }); // включно з автором
         log(`[${client.session.name}] #${ev.gseq} ${ev.type} ${JSON.stringify(ev.payload)} <- ${ev.author}`);
         break;

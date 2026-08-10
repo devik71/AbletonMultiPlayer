@@ -23,7 +23,7 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.10.0"
+SCRIPT_VERSION = "0.11.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
@@ -108,6 +108,7 @@ class AbletonMP(ControlSurface):
             "script": SCRIPT_VERSION,
             "pid": os.getpid(),
             "events": APPLY_TYPES,
+            "features": ["apply_ack"],
         })
         self._link.send({"m": "snapshot", "state": self._snapshot()})
         self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
@@ -802,7 +803,14 @@ class AbletonMP(ControlSurface):
     def _dispatch(self, msg):
         m = msg.get("m")
         if m == "apply":
-            self._apply(msg.get("type"), msg.get("payload") or {}, msg.get("gseq"))
+            gseq = msg.get("gseq")
+            try:
+                self._apply(msg.get("type"), msg.get("payload") or {}, gseq)
+            except Exception as e:
+                self._link.send({"m": "apply_ack", "gseq": gseq,
+                                 "ok": False, "error": repr(e)})
+                raise
+            self._link.send({"m": "apply_ack", "gseq": gseq, "ok": True})
         elif m == "snapshot_request":
             self._link.send({"m": "snapshot", "state": self._snapshot()})
         elif m == "hello_request":
@@ -813,6 +821,7 @@ class AbletonMP(ControlSurface):
                 "script": SCRIPT_VERSION,
                 "pid": os.getpid(),
                 "events": APPLY_TYPES,
+                "features": ["apply_ack"],
             })
         elif m == "registry_build":
             self._link.send({"m": "registry", "registry": self._build_registry()})

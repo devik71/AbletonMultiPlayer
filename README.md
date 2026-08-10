@@ -114,7 +114,8 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-node test/e2e.mjs          # 23 перевірки; E2E_VERBOSE=1 для повного виводу
+npm test                   # 5 hardening/recovery + 23 E2E-перевірок
+node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
 Ручний прогін: підняти relay, потім по парі daemon + fake-live на різних портах.
@@ -123,6 +124,9 @@ node test/e2e.mjs          # 23 перевірки; E2E_VERBOSE=1 для пов�
 
 `test/inject.mjs` кидає одну подію в relay від імені окремого учасника — зручно
 перевіряти застосування в справжньому Live без другої машини.
+У PowerShell JSON надійніше передавати через `$env:MP_PAYLOAD='{"bpm":135}'`,
+а потім запускати `node test/inject.mjs TempoSet` — native argument parsing може
+зняти внутрішні лапки з inline payload.
 
 ## Межі, про які варто знати
 
