@@ -126,9 +126,16 @@ try {
   console.log('ланцюг піднявся\n');
 
   await check('реєстр: один створює, другий приймає', async () => {
-    await waitFor(l1, /реєстр створено/);
-    await waitFor(l2, /реєстр прийнято$/m);
-    if (/незіставлено/.test(l2.out)) throw new Error('реєстр прийнято з розбіжностями');
+    await Promise.all([
+      waitFor(l1, /реєстр прийнято$/m),
+      waitFor(l2, /реєстр прийнято$/m),
+    ]);
+    if (!/реєстр створено/.test(l1.out) && !/реєстр створено/.test(l2.out)) {
+      throw new Error('жоден bridge не створив початковий реєстр');
+    }
+    if (/незіставлено/.test(l1.out) || /незіставлено/.test(l2.out)) {
+      throw new Error('реєстр прийнято з розбіжностями');
+    }
   });
 
   await check('daemon, стартований при живому Live, теж отримує реєстр', async () => {
