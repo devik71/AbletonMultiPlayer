@@ -284,6 +284,38 @@ try {
     await waitFor(l2, /<- #\d+ TrackToggle .*"param":"mute","value":true/, 8000, from);
   });
 
+  await check('Return mixer: volume і pan синхронізуються з aux UUID', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('mix return:0 volume 0.44\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"kind":"return".*"param":"volume","value":0\.44/, 8000, from);
+    l1.stdin.write('mix return:0 panning 0.31\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"kind":"return".*"param":"panning","value":0\.31/, 8000, from);
+  });
+
+  await check('Return mixer: mute і solo синхронізуються у зворотний бік', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('toggle return:1 mute\n');
+    await waitFor(l1, /<- #\d+ TrackToggle .*"kind":"return".*"param":"mute","value":true/, 8000, from);
+    l2.stdin.write('toggle return:1 solo\n');
+    await waitFor(l1, /<- #\d+ TrackToggle .*"kind":"return".*"param":"solo","value":true/, 8000, from);
+  });
+
+  await check('Master mixer: volume, pan і crossfader синхронізуються', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('mix master volume 0.72\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"kind":"master".*"param":"volume","value":0\.72/, 8000, from);
+    l1.stdin.write('mix master panning 0.58\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"kind":"master".*"param":"panning","value":0\.58/, 8000, from);
+    l1.stdin.write('mix master crossfader 0.81\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"kind":"master".*"param":"crossfader","value":0\.81/, 8000, from);
+  });
+
+  await check('Master mixer: cue volume синхронізується у зворотний бік', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('mix master cue_volume 0.36\n');
+    await waitFor(l1, /<- #\d+ MixerSet .*"kind":"master".*"param":"cue_volume","value":0\.36/, 8000, from);
+  });
+
   await check('device parameter адресується сигнатурою та ordinal дубліката', async () => {
     const from = l2.out.length;
     // device 2 is the second of two identical Auto Filters: ordinal must be 1.
@@ -383,10 +415,10 @@ try {
     }
   });
 
-  await check('журнал: 25 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 33 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 25) throw new Error(`очікував 25 подій, у журналі ${lines.length}`);
+    if (lines.length !== 33) throw new Error(`очікував 33 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);
