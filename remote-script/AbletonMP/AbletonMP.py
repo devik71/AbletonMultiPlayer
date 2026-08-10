@@ -24,7 +24,7 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.12.0"
+SCRIPT_VERSION = "0.13.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
@@ -33,7 +33,7 @@ APPLY_TYPES = [
     "TransportSet", "TempoSet",
     "ClipLaunch", "ClipStop", "SceneLaunch", "StopAllClips",
     "TrackCreate", "TrackDelete", "SceneCreate", "SceneDelete",
-    "MixerSet", "TrackToggle",
+    "MixerSet", "TrackToggle", "DeviceParamSet",
     "ClipCreate", "ClipDelete", "ClipNotesSet",
 ]
 HEARTBEAT_SEC = 2.0
@@ -87,7 +87,7 @@ class AbletonMP(ControlSurface):
         self._last_beat = 0.0
         self._mirror = {
             "playing": None, "tempo": None, "psi": {}, "mix": {},
-            "notes": {}, "clips": {},
+            "device": {}, "notes": {}, "clips": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -191,6 +191,7 @@ class AbletonMP(ControlSurface):
         for track in self._doc.tracks:
             self._listen(track, "playing_slot_index", self._make_slot_cb(track))
             self._wire_mixer(track)
+            self._wire_devices(track)
             self._wire_note_slots(track)
 
     def _wire_note_slots(self, track):
@@ -228,6 +229,30 @@ class AbletonMP(ControlSurface):
         for prop in ("mute", "solo", "arm"):
             self._listen(track, prop, self._make_toggle_cb(track, prop))
 
+    def _wire_devices(self, track):
+        """Observe automatable parameters of top-level devices on a regular track.
+
+        Rack chains deliberately are not traversed in this milestone: they need a
+        stable identity for every Chain before nested device addresses are safe.
+        """
+        self._listen(track, "devices", self._make_devices_cb())
+        try:
+            devices = list(track.devices)
+        except Exception:
+            return
+        for device in devices:
+            # Some LOM variants expose the mixer through Track.devices. Mixer has
+            # its own event types, so observing it here would duplicate changes.
+            if self._device_signature(device) is None:
+                continue
+            try:
+                parameters = list(device.parameters)
+            except Exception:
+                continue
+            for parameter in parameters:
+                self._listen(parameter, "value",
+                             self._make_device_param_cb(track, device, parameter))
+
     def _unwire_tracks(self):
         for obj, prop, cb in self._obj_cbs:
             try:
@@ -250,6 +275,16 @@ class AbletonMP(ControlSurface):
     def _make_toggle_cb(self, track, prop):
         def cb():
             self._safe(self._on_toggle, track, prop)
+        return cb
+
+    def _make_devices_cb(self):
+        def cb():
+            self._safe(self._on_devices)
+        return cb
+
+    def _make_device_param_cb(self, track, device, parameter):
+        def cb():
+            self._safe(self._on_device_param, track, device, parameter)
         return cb
 
     def _make_slot_content_cb(self, track, scene, slot):
@@ -299,6 +334,7 @@ class AbletonMP(ControlSurface):
         if self._registry_ready:
             self._diff_tracks(emit=not self._suppress_struct)
             self._prime_mixer()  # listener'Рё РјС–РєС€РµСЂР° РїРµСЂРµРІС–С€Р°РЅС– РЅР° РЅРѕРІС– РѕР±'С”РєС‚Рё
+            self._prime_devices()
             self._prime_notes()
 
     def _on_scenes(self):
@@ -308,7 +344,16 @@ class AbletonMP(ControlSurface):
             self._rewire_tracks()
             self._prime_mirror(transport=False)
             self._prime_mixer()
+            self._prime_devices()
             self._prime_notes()
+
+    def _on_devices(self):
+        """Rebind observers after a top-level device list change."""
+        self._rewire_tracks()
+        if self._registry_ready:
+            # Device structure is not an event yet. Treat its current parameter
+            # values as the new baseline rather than emitting a synthetic burst.
+            self._prime_devices()
 
     @staticmethod
     def _norm_psi(value):
@@ -347,6 +392,7 @@ class AbletonMP(ControlSurface):
             reg["scenes"].append({"id": self._scenes_reg.id_of(s), "idx": i, "name": self._safe_name(s)})
         self._registry_ready = True
         self._prime_mixer()
+        self._prime_devices()
         self._prime_notes()
         self._persist_registry()
         self._log("СЂРµС”СЃС‚СЂ СЃС‚РІРѕСЂРµРЅРѕ: %d С‚СЂРµРєС–РІ, %d СЃС†РµРЅ (%d РїС–РґРЅСЏС‚Рѕ Р· .als)"
@@ -397,6 +443,7 @@ class AbletonMP(ControlSurface):
 
         self._registry_ready = True
         self._prime_mixer()
+        self._prime_devices()
         self._prime_notes()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
@@ -599,6 +646,171 @@ class AbletonMP(ControlSurface):
         self._mirror["mix"][key] = value
         # РґРёСЃРєСЂРµС‚РЅРµ РїРµСЂРµРјРёРєР°РЅРЅСЏ -- РґРµР±Р°СѓРЅСЃ С‚СѓС‚ Р»РёС€Рµ РґРѕРґР°РІ Р±Рё Р·Р°С‚СЂРёРјРєРё
         self._emit("TrackToggle", {"track": {"id": tid}, "param": prop, "value": value})
+
+    # ------------------------------------------------------------- devices
+
+    @staticmethod
+    def _device_signature(device):
+        """Return the stable part of a top-level device address.
+
+        ``name`` is user-editable, while class_display_name is the original
+        device/plugin name. MixerDevice is handled by MixerSet/TrackToggle.
+        """
+        try:
+            class_name = str(device.class_name)
+            display_name = str(device.class_display_name)
+        except Exception:
+            return None
+        if not class_name or class_name == "MixerDevice":
+            return None
+        return class_name, display_name
+
+    @staticmethod
+    def _device_parameter_name(parameter):
+        # original_name keeps a Rack Macro address stable after the user renames
+        # it. For ordinary/plugin parameters Live may expose only name.
+        try:
+            name = str(parameter.original_name)
+            if name:
+                return name
+        except Exception:
+            pass
+        try:
+            return str(parameter.name)
+        except Exception:
+            return ""
+
+    def _device_ref(self, track, device):
+        signature = self._device_signature(device)
+        if signature is None:
+            return None
+        ordinal = 0
+        try:
+            devices = list(track.devices)
+        except Exception:
+            return None
+        found = False
+        for candidate in devices:
+            if candidate == device:
+                found = True
+                break
+            if self._device_signature(candidate) == signature:
+                ordinal += 1
+        if not found:
+            return None
+        return {
+            "class_name": signature[0],
+            "class_display_name": signature[1],
+            "ordinal": ordinal,
+        }
+
+    def _device_parameter_ref(self, device, parameter):
+        name = self._device_parameter_name(parameter)
+        if not name:
+            return None
+        ordinal = 0
+        try:
+            parameters = list(device.parameters)
+        except Exception:
+            return None
+        found = False
+        for candidate in parameters:
+            if candidate == parameter:
+                found = True
+                break
+            if self._device_parameter_name(candidate) == name:
+                ordinal += 1
+        if not found:
+            return None
+        return {"name": name, "ordinal": ordinal}
+
+    @staticmethod
+    def _device_key(tid, device_ref, parameter_ref):
+        return json.dumps([
+            tid,
+            device_ref.get("class_name"),
+            device_ref.get("class_display_name"),
+            device_ref.get("ordinal"),
+            parameter_ref.get("name"),
+            parameter_ref.get("ordinal"),
+        ], ensure_ascii=True, separators=(",", ":"))
+
+    def _resolve_device_parameter(self, track, device_ref, parameter_ref):
+        if not isinstance(device_ref, dict) or not isinstance(parameter_ref, dict):
+            return None, None
+        class_name = device_ref.get("class_name")
+        display_name = device_ref.get("class_display_name")
+        device_ordinal = device_ref.get("ordinal")
+        parameter_name = parameter_ref.get("name")
+        parameter_ordinal = parameter_ref.get("ordinal")
+        if (not isinstance(class_name, str) or not isinstance(display_name, str) or
+                not isinstance(device_ordinal, int) or device_ordinal < 0 or
+                not isinstance(parameter_name, str) or
+                not isinstance(parameter_ordinal, int) or parameter_ordinal < 0):
+            return None, None
+        try:
+            devices = [
+                device for device in track.devices
+                if self._device_signature(device) == (class_name, display_name)
+            ]
+        except Exception:
+            return None, None
+        if device_ordinal >= len(devices):
+            return None, None
+        device = devices[device_ordinal]
+        try:
+            parameters = [
+                parameter for parameter in device.parameters
+                if self._device_parameter_name(parameter) == parameter_name
+            ]
+        except Exception:
+            return device, None
+        if parameter_ordinal >= len(parameters):
+            return device, None
+        return device, parameters[parameter_ordinal]
+
+    def _on_device_param(self, track, device, parameter):
+        if not self._registry_ready:
+            return
+        tid = self._tracks_reg.id_of(track, create=False)
+        device_ref = self._device_ref(track, device)
+        parameter_ref = self._device_parameter_ref(device, parameter)
+        if not tid or device_ref is None or parameter_ref is None:
+            return
+        try:
+            value = float(parameter.value)
+        except Exception:
+            return
+        if math.isnan(value) or math.isinf(value):
+            return
+        value = round(value, 6)
+        key = self._device_key(tid, device_ref, parameter_ref)
+        if self._mirror["device"].get(key) == value:
+            return
+        self._mirror["device"][key] = value
+
+        # Active automation changes value on every playback tick. State 2 is a
+        # user's manual override and should be synchronized as an intentional edit.
+        try:
+            if int(parameter.automation_state) == 1 or not bool(parameter.is_enabled):
+                return
+        except Exception:
+            pass
+
+        payload = {
+            "track": {"id": tid},
+            "device": device_ref,
+            "parameter": parameter_ref,
+            "value": value,
+        }
+        try:
+            quantized = bool(parameter.is_quantized)
+        except Exception:
+            quantized = False
+        if quantized:
+            self._emit("DeviceParamSet", payload)
+        else:
+            self._defer("device:" + key, "DeviceParamSet", payload)
 
     # ------------------------------------------------------------- MIDI clips
 
@@ -1235,6 +1447,45 @@ class AbletonMP(ControlSurface):
             self._mirror["mix"][self._mix_key(tid, param, idx)] = round(value, 6)
             p.value = value
 
+        elif etype == "DeviceParamSet":
+            track, _idx = self._resolve_track(payload.get("track"))
+            if track is None:
+                return
+            device_ref = payload.get("device")
+            parameter_ref = payload.get("parameter")
+            device, parameter = self._resolve_device_parameter(
+                track, device_ref, parameter_ref)
+            if device is None:
+                self._warn("gseq %s: device %r is absent; parameter event skipped"
+                           % (gseq, device_ref))
+                return
+            if parameter is None:
+                self._warn("gseq %s: parameter %r is absent on device %r; event skipped"
+                           % (gseq, parameter_ref, device_ref))
+                return
+            try:
+                value = float(payload.get("value"))
+            except Exception:
+                return
+            if math.isnan(value) or math.isinf(value):
+                self._warn("gseq %s: non-finite device parameter value" % (gseq,))
+                return
+            try:
+                if not bool(parameter.is_enabled):
+                    self._warn("gseq %s: parameter %r is disabled; event skipped"
+                               % (gseq, parameter_ref))
+                    return
+            except Exception:
+                pass
+            value = max(float(parameter.min), min(float(parameter.max), value))
+            tid = self._tracks_reg.id_of(track, create=False)
+            key = self._device_key(tid, device_ref, parameter_ref)
+            self._mirror["device"][key] = round(value, 6)
+            try:
+                parameter.value = value
+            except Exception as e:
+                self._warn("gseq %s: device parameter could not be set: %r" % (gseq, e))
+
         elif etype == "TrackToggle":
             track, _idx = self._resolve_track(payload.get("track"))
             if track is None:
@@ -1479,6 +1730,38 @@ class AbletonMP(ControlSurface):
                     self._mirror["mix"]["%s:%s" % (tid, prop)] = bool(getattr(track, prop))
                 except Exception:
                     pass
+
+    def _prime_devices(self):
+        """Prime top-level device values without generating startup events."""
+        self._mirror["device"] = {}
+        for track in self._doc.tracks:
+            tid = self._tracks_reg.id_of(track, create=False)
+            if not tid:
+                continue
+            try:
+                devices = list(track.devices)
+            except Exception:
+                continue
+            for device in devices:
+                device_ref = self._device_ref(track, device)
+                if device_ref is None:
+                    continue
+                try:
+                    parameters = list(device.parameters)
+                except Exception:
+                    continue
+                for parameter in parameters:
+                    parameter_ref = self._device_parameter_ref(device, parameter)
+                    if parameter_ref is None:
+                        continue
+                    try:
+                        value = float(parameter.value)
+                    except Exception:
+                        continue
+                    if math.isnan(value) or math.isinf(value):
+                        continue
+                    key = self._device_key(tid, device_ref, parameter_ref)
+                    self._mirror["device"][key] = round(value, 6)
 
     def _mix_slots(self, track):
         slots = [("volume", None), ("panning", None)]
