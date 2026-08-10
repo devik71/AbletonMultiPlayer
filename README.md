@@ -14,8 +14,9 @@
 і 12.3.5 одночасно. Синхронізуються транспорт, темп, запуск кліпів і сцен,
 структура треків, мікшер, а від версії bridge 0.12 — створення/видалення Session
 MIDI-кліпів та їхні ноти. Від bridge 0.13 синхронізуються параметри верхньорівневих
-девайсів на звичайних треках, а від 0.14 — параметри девайсів усередині вкладених
-Rack chains. Структура девайсів і Arrangement — ще ні, тож два `.als` після
+девайсів на звичайних треках, від 0.14 — параметри девайсів усередині вкладених
+Rack chains, а від 0.15 — девайси на Return Tracks і Master Track. Структура
+девайсів і Arrangement — ще ні, тож два `.als` після
 спільної сесії поки не збігаються повністю.
 
 ## Як це влаштовано
@@ -45,13 +46,17 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python, у процесі Live)
 | `ClipLaunch`, `ClipStop`, `SceneLaunch`, `StopAllClips` | запуск і зупинка |
 | `TrackCreate`, `TrackDelete`, `SceneCreate`, `SceneDelete` | структура |
 | `MixerSet`, `TrackToggle` | гучність, панорама, send-и, mute/solo/arm |
-| `DeviceParamSet` | automatable-параметри девайсів, включно із вкладеними Rack chains |
+| `DeviceParamSet` | automatable-параметри девайсів звичайних/Return/Master треків, включно із вкладеними Rack chains |
 | `ClipCreate`, `ClipDelete`, `ClipNotesSet` | Session MIDI-кліпи та ноти |
 | `RegistryInit` | ідентичність об'єктів на старті сесії |
 
 Треки і сцени адресуються **стабільними uuid**, не індексами. uuid зберігаються
 всередині `.als` (`set_data`), тож дві машини, що відкрили копію того самого
 файлу, отримують однакову ідентичність ще до будь-якого обміну.
+
+Return Tracks і Master Track мають окремі aux-uuid. У `DeviceParamSet` вони явно
+позначаються як `track.kind: "return"|"master"`, тому їх неможливо помилково
+застосувати до звичайного треку з таким самим id.
 
 Семпли з теки проєкту синхронізуються автоматично, окремим шаром — relay їх
 не журналює, лише пересилає.
@@ -119,14 +124,15 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 5 hardening/recovery + 30 E2E-перевірок
+npm test                   # 5 hardening/recovery + 33 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
 Ручний прогін: підняти relay, потім по парі daemon + fake-live на різних портах.
 Команди fake-live: `play`, `tempo 128`, `launch 1 2`, `scene 3`, `vol 1 0.5`,
 `mute 0`, `addtrack`, `move 0 2`, `note 0 0 60 0 1 100`, `delnote 0 0 60 0`,
-`delclip 0 0`, `device 0 0 1 0.75`, `device 0 3/1/0/0/0 0 0.9`, `state`.
+`delclip 0 0`, `device 0 0 1 0.75`, `device 0 3/1/0/0/0 0 0.9`,
+`device return:0 0 0 0.5`, `device master 0 0 0.5`, `state`.
 У `device` шлях через `/` чергує індекси device/chain/device; останній елемент —
 цільовий device, після шляху йдуть індекс параметра та значення.
 
@@ -156,6 +162,10 @@ audio clip creation, clip envelopes, loop/start markers і назва/довжи
 тайл може перевищити ліміт UDP-датаграми; bridge запише `datagram too large` у лог.
 
 **Немає локів.** Одночасна зміна одного параметра = виграє останній за `global_seq`.
+
+**Структура девайсів не синхронізується.** Звичайні, Return і Master треки мають
+містити однакові Rack/Chain/device дерева на обох машинах. Невідповідний locator
+дає warning/no-op, а не застосування до схожого девайса в іншому контейнері.
 
 **Relay — single point of failure.** Журнал сесії існує лише на його машині;
 разом із нею зникне й історія подій.

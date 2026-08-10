@@ -315,6 +315,25 @@ try {
     await waitFor(l1, /<- #\d+ DeviceParamSet .*"class_name":"AutoFilter".*"value":0\.12,"chain_path":\[\{"id":"[0-9a-f]{12}"\}\]/, 8000, from);
   });
 
+  await check('параметр device на Return Track доходить до партнера', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('device return:0 0 0 0.44\n');
+    await waitFor(l2, /<- #\d+ DeviceParamSet \{"track":\{"id":"[0-9a-f]{12}","kind":"return"\}.*"class_name":"AutoFilter".*"value":0\.44/, 8000, from);
+  });
+
+  await check('параметр device на Master Track синхронізується у зворотний бік', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('device master 0 0 0.88\n');
+    await waitFor(l1, /<- #\d+ DeviceParamSet \{"track":\{"id":"[0-9a-f]{12}","kind":"master"\}.*"class_name":"AutoFilter".*"value":0\.88/, 8000, from);
+  });
+
+  await check('Return Track зберігає aux identity через вкладені Rack chains', async () => {
+    const from = l2.out.length;
+    // Return 0: outer Rack #1 / duplicate chain #1 / inner Rack #0 / chain #0 / filter #0.
+    l1.stdin.write('device return:0 1/1/0/0/0 0 0.73\n');
+    await waitFor(l2, /<- #\d+ DeviceParamSet \{"track":\{"id":"[0-9a-f]{12}","kind":"return"\}.*"value":0\.73,"chain_path":\[\{"id":"[0-9a-f]{12}"\},\{"id":"[0-9a-f]{12}"\}\]/, 8000, from);
+  });
+
   let newTrackId = null;
 
   await check('створення треку доїхало до партнера', async () => {
@@ -364,10 +383,10 @@ try {
     }
   });
 
-  await check('журнал: 22 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 25 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 22) throw new Error(`очікував 22 події, у журналі ${lines.length}`);
+    if (lines.length !== 25) throw new Error(`очікував 25 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

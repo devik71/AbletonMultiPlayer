@@ -185,6 +185,7 @@ udp.on('message', (buf) => {
       // bridge згенерував uuid для своїх об'єктів -- кладемо їх у журнал
       log(`bridge створив реєстр: ${msg.registry?.tracks?.length} треків, ` +
           `${msg.registry?.scenes?.length} сцен, ` +
+          `${msg.registry?.aux_tracks?.length || 0} Return/Master, ` +
           `${msg.registry?.chains?.length || 0} Rack chains`);
       submit('RegistryInit', msg.registry);
       break;
