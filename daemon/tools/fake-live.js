@@ -7,7 +7,9 @@
 // Команди зі stdin: play | stop | tempo <bpm> | launch <t> <s> | scene <n>
 //                   stopclip <t> | stopall | note <t> <s> <pitch> <start> <duration> <velocity>
 //                   delnote <t> <s> <pitch> <start> | delclip <t> <s>
-//                   device <track|return:N|master> <device[/chain/device...]> <parameter> <value> | state
+//                   mix <track|return:N|master> <parameter> <value> [send-index]
+//                   toggle <track|return:N> <mute|solo|arm> | state
+//                   device <track|return:N|master> <device[/chain/device...]> <parameter> <value>
 
 import { createSocket } from 'node:dgram';
 import { createHash, randomBytes } from 'node:crypto';
@@ -82,10 +84,10 @@ const song = {
     { id: null, name: '3-Audio', playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
   ],
   return_tracks: [
-    { id: null, kind: 'return', name: 'A-Return', devices: [fakeFilter(0.2), fakeRack()] },
-    { id: null, kind: 'return', name: 'B-Return', devices: [fakeFilter(0.3)] },
+    { id: null, kind: 'return', name: 'A-Return', devices: [fakeFilter(0.2), fakeRack()], mix: {}, mute: false, solo: false },
+    { id: null, kind: 'return', name: 'B-Return', devices: [fakeFilter(0.3)], mix: {}, mute: false, solo: false },
   ],
-  master_track: { id: null, kind: 'master', name: 'Master', devices: [fakeFilter(0.7), fakeRack()] },
+  master_track: { id: null, kind: 'master', name: 'Master', devices: [fakeFilter(0.7), fakeRack()], mix: {} },
   scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}` })),
 };
 let lseq = 0;
@@ -107,6 +109,19 @@ const deviceTrackFromArg = (value) => {
   const match = /^return:(\d+)$/.exec(value || '');
   if (match) return song.return_tracks[Number(match[1])];
   return song.tracks[Number(value) || 0];
+};
+const mixParamAllowed = (track, param, index) => {
+  if (track?.kind === 'master') {
+    return index == null && ['volume', 'panning', 'crossfader', 'cue_volume'].includes(param);
+  }
+  if (track?.kind === 'return') return index == null && ['volume', 'panning'].includes(param);
+  if (param === 'send') return Number.isInteger(index) && index >= 0;
+  return index == null && ['volume', 'panning'].includes(param);
+};
+const toggleAllowed = (track, param) => {
+  if (track?.kind === 'master') return false;
+  if (track?.kind === 'return') return ['mute', 'solo'].includes(param);
+  return ['mute', 'solo', 'arm'].includes(param);
 };
 const sceneIdx = (id) => song.scenes.findIndex((s) => s.id === id);
 const trackRef = (t) => ({ id: t.id, name: t.name });
@@ -247,7 +262,7 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.15.0-fake'),
+    script: arg('script', '0.16.0-fake'),
     pid: process.pid,
     features: ['apply_ack'],
     events: arg('events',
@@ -349,9 +364,11 @@ function apply(type, payload, gseq) {
       for (const t of song.tracks) t.playing_slot_index = -1;
       break;
     case 'MixerSet': {
-      const t = trackById(payload.track?.id);
+      const t = deviceTrackByRef(payload.track);
       if (!t) return reject('невідомий трек');
-      t.mix[`${payload.param}:${payload.index ?? '-'}`] = payload.value;
+      const index = payload.index ?? null;
+      if (!mixParamAllowed(t, payload.param, index)) return reject('недопустимий параметр mixer');
+      t.mix[`${payload.param}:${index ?? '-'}`] = payload.value;
       break;
     }
     case 'DeviceParamSet': {
@@ -367,8 +384,9 @@ function apply(type, payload, gseq) {
       break;
     }
     case 'TrackToggle': {
-      const t = trackById(payload.track?.id);
+      const t = deviceTrackByRef(payload.track);
       if (!t) return reject('невідомий трек');
+      if (!toggleAllowed(t, payload.param)) return reject('недопустимий перемикач');
       t[payload.param] = !!payload.value;
       break;
     }
@@ -654,6 +672,30 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       };
       if (chainPath.length) payload.chain_path = chainPath;
       emit('DeviceParamSet', payload);
+      break;
+    }
+    case 'mix': {
+      const t = deviceTrackFromArg(rest[0]);
+      const param = rest[1];
+      const value = Number(rest[2]);
+      const idx = rest[3] == null ? null : Number(rest[3]);
+      if (!t || !Number.isFinite(value) || !mixParamAllowed(t, param, idx)) {
+        return console.log('немає такого mixer parameter або значення некоректне');
+      }
+      t.mix[`${param}:${idx ?? '-'}`] = value;
+      const payload = { track: deviceTrackRef(t), param, value };
+      if (idx !== null) payload.index = idx;
+      emit('MixerSet', payload);
+      break;
+    }
+    case 'toggle': {
+      const t = deviceTrackFromArg(rest[0]);
+      const param = rest[1];
+      if (!t || !toggleAllowed(t, param)) {
+        return console.log('немає такого mixer toggle');
+      }
+      t[param] = !t[param];
+      emit('TrackToggle', { track: deviceTrackRef(t), param, value: t[param] });
       break;
     }
     case 'vol':

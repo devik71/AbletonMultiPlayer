@@ -15,8 +15,8 @@
 структура треків, мікшер, а від версії bridge 0.12 — створення/видалення Session
 MIDI-кліпів та їхні ноти. Від bridge 0.13 синхронізуються параметри верхньорівневих
 девайсів на звичайних треках, від 0.14 — параметри девайсів усередині вкладених
-Rack chains, а від 0.15 — девайси на Return Tracks і Master Track. Структура
-девайсів і Arrangement — ще ні, тож два `.als` після
+Rack chains, від 0.15 — девайси на Return Tracks і Master Track, а від 0.16 —
+мікшер Return/Master. Структура девайсів і Arrangement — ще ні, тож два `.als` після
 спільної сесії поки не збігаються повністю.
 
 ## Як це влаштовано
@@ -45,7 +45,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python, у процесі Live)
 | `TransportSet`, `TempoSet` | play/stop, темп (з дебаунсом) |
 | `ClipLaunch`, `ClipStop`, `SceneLaunch`, `StopAllClips` | запуск і зупинка |
 | `TrackCreate`, `TrackDelete`, `SceneCreate`, `SceneDelete` | структура |
-| `MixerSet`, `TrackToggle` | гучність, панорама, send-и, mute/solo/arm |
+| `MixerSet`, `TrackToggle` | мікшер звичайних/Return/Master треків (включно crossfader і cue) |
 | `DeviceParamSet` | automatable-параметри девайсів звичайних/Return/Master треків, включно із вкладеними Rack chains |
 | `ClipCreate`, `ClipDelete`, `ClipNotesSet` | Session MIDI-кліпи та ноти |
 | `RegistryInit` | ідентичність об'єктів на старті сесії |
@@ -124,7 +124,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 5 hardening/recovery + 33 E2E-перевірки
+npm test                   # 5 hardening/recovery + 37 E2E-перевірок
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
@@ -132,7 +132,8 @@ node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного �
 Команди fake-live: `play`, `tempo 128`, `launch 1 2`, `scene 3`, `vol 1 0.5`,
 `mute 0`, `addtrack`, `move 0 2`, `note 0 0 60 0 1 100`, `delnote 0 0 60 0`,
 `delclip 0 0`, `device 0 0 1 0.75`, `device 0 3/1/0/0/0 0 0.9`,
-`device return:0 0 0 0.5`, `device master 0 0 0.5`, `state`.
+`device return:0 0 0 0.5`, `device master 0 0 0.5`, `mix return:0 volume 0.5`,
+`toggle return:0 mute`, `mix master crossfader 0.5`, `state`.
 У `device` шлях через `/` чергує індекси device/chain/device; останній елемент —
 цільовий device, після шляху йдуть індекс параметра та значення.
 

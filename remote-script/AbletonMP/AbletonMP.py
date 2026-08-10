@@ -25,7 +25,7 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 from .link import UdpLink
 from .registry import Registry
 
-SCRIPT_VERSION = "0.15.0"
+SCRIPT_VERSION = "0.16.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
@@ -204,6 +204,7 @@ class AbletonMP(ControlSurface):
             self._wire_devices(track)
             self._wire_note_slots(track)
         for track in self._device_aux_tracks():
+            self._wire_mixer(track)
             self._wire_devices(track)
 
     def _wire_note_slots(self, track):
@@ -225,20 +226,11 @@ class AbletonMP(ControlSurface):
                 pass
 
     def _wire_mixer(self, track):
-        md = None
-        try:
-            md = track.mixer_device
-        except Exception:
-            return
-        self._listen(md.volume, "value", self._make_mix_cb(track, "volume", None))
-        self._listen(md.panning, "value", self._make_mix_cb(track, "panning", None))
-        try:
-            sends = list(md.sends)
-        except Exception:
-            sends = []
-        for i, send in enumerate(sends):
-            self._listen(send, "value", self._make_mix_cb(track, "send", i))
-        for prop in ("mute", "solo", "arm"):
+        for param, idx in self._mix_slots(track):
+            p = self._mix_param(track, param, idx)
+            if p is not None:
+                self._listen(p, "value", self._make_mix_cb(track, param, idx))
+        for prop in self._toggle_props(track):
             self._listen(track, prop, self._make_toggle_cb(track, prop))
 
     def _wire_devices(self, track):
@@ -771,35 +763,52 @@ class AbletonMP(ControlSurface):
     # ----------------------------------------------------------------- mixer
 
     def _mix_param(self, track, param, idx):
+        if (param, idx) not in self._mix_slots(track):
+            return None
         try:
             md = track.mixer_device
             if param == "volume":
                 return md.volume
             if param == "panning":
                 return md.panning
+            if param == "crossfader":
+                return md.crossfader
+            if param == "cue_volume":
+                return md.cue_volume
             if param == "send":
                 sends = list(md.sends)
-                return sends[idx] if isinstance(idx, int) and idx < len(sends) else None
+                return sends[idx]
         except Exception:
             pass
         return None
 
-    def _mix_key(self, tid, param, idx):
-        return "%s:%s:%s" % (tid, param, idx)
+    @staticmethod
+    def _mix_track_key(track_ref):
+        if not isinstance(track_ref, dict):
+            return str(track_ref)
+        kind = track_ref.get("kind")
+        uid = track_ref.get("id")
+        return "%s:%s" % (kind, uid) if kind else str(uid)
+
+    def _mix_key(self, track_ref, param, idx):
+        return "%s:%s:%s" % (self._mix_track_key(track_ref), param, idx)
+
+    def _toggle_key(self, track_ref, prop):
+        return "%s:%s" % (self._mix_track_key(track_ref), prop)
 
     def _on_mix(self, track, param, idx):
         if not self._registry_ready:
             return
-        tid = self._tracks_reg.id_of(track, create=False)
+        track_ref = self._device_track_ref(track)
         p = self._mix_param(track, param, idx)
-        if not tid or p is None:
+        if not track_ref or p is None:
             return
         value = round(float(p.value), 6)
-        key = self._mix_key(tid, param, idx)
+        key = self._mix_key(track_ref, param, idx)
         if self._mirror["mix"].get(key) == value:
             return
         self._mirror["mix"][key] = value
-        payload = {"track": {"id": tid}, "param": param, "value": value}
+        payload = {"track": track_ref, "param": param, "value": value}
         if idx is not None:
             payload["index"] = idx
         # РЅРµРїРµСЂРµСЂРІРЅР° РІРµР»РёС‡РёРЅР° -- РґРµР±Р°СѓРЅСЃРёРјРѕ, СЏРє tempo: СЂСѓС… С„РµР№РґРµСЂР° С†Рµ РѕРґРёРЅ Р¶РµСЃС‚
@@ -808,19 +817,19 @@ class AbletonMP(ControlSurface):
     def _on_toggle(self, track, prop):
         if not self._registry_ready:
             return
-        tid = self._tracks_reg.id_of(track, create=False)
-        if not tid:
+        track_ref = self._device_track_ref(track)
+        if not track_ref or prop not in self._toggle_props(track):
             return
         try:
             value = bool(getattr(track, prop))
         except Exception:
             return
-        key = "%s:%s" % (tid, prop)
+        key = self._toggle_key(track_ref, prop)
         if self._mirror["mix"].get(key) == value:
             return
         self._mirror["mix"][key] = value
         # РґРёСЃРєСЂРµС‚РЅРµ РїРµСЂРµРјРёРєР°РЅРЅСЏ -- РґРµР±Р°СѓРЅСЃ С‚СѓС‚ Р»РёС€Рµ РґРѕРґР°РІ Р±Рё Р·Р°С‚СЂРёРјРєРё
-        self._emit("TrackToggle", {"track": {"id": tid}, "param": prop, "value": value})
+        self._emit("TrackToggle", {"track": track_ref, "param": prop, "value": value})
 
     # ------------------------------------------------------------- devices
 
@@ -1774,7 +1783,7 @@ class AbletonMP(ControlSurface):
             self._apply_note_region(track, scene, slot, payload, gseq)
 
         elif etype == "MixerSet":
-            track, _idx = self._resolve_track(payload.get("track"))
+            track, track_ref = self._resolve_device_track(payload.get("track"))
             if track is None:
                 return
             param = payload.get("param")
@@ -1783,7 +1792,6 @@ class AbletonMP(ControlSurface):
             if p is None:
                 self._warn("gseq %s: РїР°СЂР°РјРµС‚СЂ %r/%r РІС–РґСЃСѓС‚РЅС–Р№" % (gseq, param, idx))
                 return
-            tid = self._tracks_reg.id_of(track, create=False)
             try:
                 value = float(payload.get("value"))
             except Exception:
@@ -1791,7 +1799,7 @@ class AbletonMP(ControlSurface):
             # DeviceParameter РєРёРґР°С” РїСЂРё РІРёС…РѕРґС– Р·Р° РјРµР¶С–, Р° РјРµР¶С– send-С–РІ
             # РІС–РґСЂС–Р·РЅСЏСЋС‚СЊСЃСЏ РІС–Рґ volume -- Р±РµСЂРµРјРѕ С—С… Р· СЃР°РјРѕРіРѕ РїР°СЂР°РјРµС‚СЂР°
             value = max(p.min, min(p.max, value))
-            self._mirror["mix"][self._mix_key(tid, param, idx)] = round(value, 6)
+            self._mirror["mix"][self._mix_key(track_ref, param, idx)] = round(value, 6)
             p.value = value
 
         elif etype == "DeviceParamSet":
@@ -1834,16 +1842,15 @@ class AbletonMP(ControlSurface):
                 self._warn("gseq %s: device parameter could not be set: %r" % (gseq, e))
 
         elif etype == "TrackToggle":
-            track, _idx = self._resolve_track(payload.get("track"))
+            track, track_ref = self._resolve_device_track(payload.get("track"))
             if track is None:
                 return
             prop = payload.get("param")
-            if prop not in ("mute", "solo", "arm"):
+            if prop not in self._toggle_props(track):
                 self._warn("gseq %s: РЅРµРІС–РґРѕРјРёР№ РїРµСЂРµРјРёРєР°С‡ %r" % (gseq, prop))
                 return
-            tid = self._tracks_reg.id_of(track, create=False)
             value = bool(payload.get("value"))
-            self._mirror["mix"]["%s:%s" % (tid, prop)] = value
+            self._mirror["mix"][self._toggle_key(track_ref, prop)] = value
             try:
                 setattr(track, prop, value)
             except Exception as e:
@@ -2079,20 +2086,20 @@ class AbletonMP(ControlSurface):
         None С– РїРѕСЂРѕРґР¶СѓРІР°РІ РїРѕРґС–СЋ -- Р° РЅР° СЃС‚Р°СЂС‚С– С‚Р°РєРёС… В«Р·РјС–РЅВ» РѕРґСЂР°Р·Сѓ РґРµСЃСЏС‚РєРё.
         """
         self._mirror["mix"] = {}
-        for track in self._doc.tracks:
-            tid = self._tracks_reg.id_of(track, create=False)
-            if not tid:
+        for track in self._iter_device_tracks():
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
                 continue
             for param, idx in self._mix_slots(track):
                 p = self._mix_param(track, param, idx)
                 if p is not None:
                     try:
-                        self._mirror["mix"][self._mix_key(tid, param, idx)] = round(float(p.value), 6)
+                        self._mirror["mix"][self._mix_key(track_ref, param, idx)] = round(float(p.value), 6)
                     except Exception:
                         pass
-            for prop in ("mute", "solo", "arm"):
+            for prop in self._toggle_props(track):
                 try:
-                    self._mirror["mix"]["%s:%s" % (tid, prop)] = bool(getattr(track, prop))
+                    self._mirror["mix"][self._toggle_key(track_ref, prop)] = bool(getattr(track, prop))
                 except Exception:
                     pass
 
@@ -2126,12 +2133,26 @@ class AbletonMP(ControlSurface):
 
     def _mix_slots(self, track):
         slots = [("volume", None), ("panning", None)]
+        kind = self._aux_kind_of(track)
+        if kind == "master":
+            slots.extend((("crossfader", None), ("cue_volume", None)))
+            return slots
+        if kind == "return":
+            return slots
         try:
             for i in range(len(track.mixer_device.sends)):
                 slots.append(("send", i))
         except Exception:
             pass
         return slots
+
+    def _toggle_props(self, track):
+        kind = self._aux_kind_of(track)
+        if kind == "master":
+            return ()
+        if kind == "return":
+            return ("mute", "solo")
+        return ("mute", "solo", "arm")
 
     def _snapshot(self):
         tracks = []

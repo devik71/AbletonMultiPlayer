@@ -23,7 +23,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.15.0","pid":1234,"features":["apply_ack"],"events":[...]}
+{"m":"hello","live":"12.3.8","script":"0.16.0","pid":1234,"features":["apply_ack"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
@@ -183,8 +183,8 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `TrackDelete` | `{track: {id}}` | `song.delete_track(i)` |
 | `SceneCreate` | `{scene: {id, name?}, idx}` | `song.create_scene(i)` |
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
-| `MixerSet` | `{track: {id}, param: "volume"\|"panning"\|"send", index?, value}` | `mixer_device.<param>.value = v` |
-| `TrackToggle` | `{track: {id}, param: "mute"\|"solo"\|"arm", value: bool}` | `track.<param> = v` |
+| `MixerSet` | `{track: {id, kind?: "return"\|"master"}, param, index?, value}` | `mixer_device.<param>.value = v` |
+| `TrackToggle` | `{track: {id, kind?: "return"}, param, value: bool}` | `track.<param> = v` |
 | `DeviceParamSet` | `{track: {id, kind?: "return"|"master"}, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
 | `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name}}` | `clip_slot.create_clip(length)` |
 | `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
@@ -194,6 +194,15 @@ Relay пише `journal.jsonl` — один закомічений івент н
 `TrackToggle` йде одразу: дебаунс дискретного перемикача лише додав би затримки.
 Значення клампиться межами самого `DeviceParameter` (`p.min`/`p.max`) — вони різні
 для гучності й send-ів, а вихід за межі кидає виняток.
+
+Допустимі mixer-параметри залежать від типу треку:
+
+- звичайний Track: `volume`, `panning`, `send`; `mute`, `solo`, `arm`;
+- Return Track: `volume`, `panning`; `mute`, `solo`;
+- Master Track: `volume`, `panning`, `crossfader`, `cue_volume`; без `TrackToggle`.
+
+Для звичайного Track адреса лишається `{id}`; Return/Master використовують
+той самий aux-простір `{id, kind}`, що й `DeviceParamSet`.
 
 ### Параметри девайсів
 
@@ -240,7 +249,7 @@ chain kind/index/name. Однакові копії `.als` отримують о�
 Якщо конкретна версія Live персистить `Chain.set_data`, подальша позиція вже не
 впливає на нього; інакше лишається слабший Song-map fallback.
 
-У milestone 0.15 свідомо не входять створення, видалення, перейменування й
+У milestone 0.16 свідомо не входять створення, видалення, перейменування й
 переставляння Return/Master/Rack/Chain/device структури. Структурні
 зміни треба виконати однаково на обох машинах; mismatch дає warning/no-op.
 
