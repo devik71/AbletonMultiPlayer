@@ -23,7 +23,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.11.0","pid":1234,"features":["apply_ack"]}
+{"m":"hello","live":"12.3.8","script":"0.12.0","pid":1234,"features":["apply_ack"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
@@ -185,6 +185,9 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
 | `MixerSet` | `{track: {id}, param: "volume"\|"panning"\|"send", index?, value}` | `mixer_device.<param>.value = v` |
 | `TrackToggle` | `{track: {id}, param: "mute"\|"solo"\|"arm", value: bool}` | `track.<param> = v` |
+| `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name}}` | `clip_slot.create_clip(length)` |
+| `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
+| `ClipNotesSet` | `{track, scene, clip, region, notes: [...]}` | заміна всіх MIDI-нот у регіоні |
 
 `MixerSet` дебаунситься як `tempo` — рух фейдера це один жест, а не сотня кроків.
 `TrackToggle` йде одразу: дебаунс дискретного перемикача лише додав би затримки.
@@ -198,6 +201,39 @@ Send адресується індексом, не uuid: у LOM це позиц�
 
 `name` у посиланні на сцену необовʼязкове: у сцен Live за замовчуванням імені немає
 (цифри в UI — це індекси). Немає імені — немає контрольної суми, і це видно з payload.
+
+### MIDI-кліпи й нотні регіони
+
+`ClipCreate` і `ClipDelete` синхронізують наявність MIDI-кліпу в Session View.
+Audio clip creation цими подіями не передається. `ClipNotesSet` не пересилає
+внутрішні `note_id`: вони локальні для конкретного екземпляра Live й потрібні лише
+приймальному bridge, щоб видалити старі ноти перед додаванням нових.
+
+Ноти діляться на детерміновані тайли: 4 долі за часом × 16 MIDI-висот. Payload
+описує один тайл:
+
+```jsonc
+{
+  "track": {"id": "..."},
+  "scene": {"id": "..."},
+  "clip": {"length": 8.0, "name": "Bass"},
+  "region": {"from_pitch": 48, "pitch_span": 16, "from_time": 0.0, "time_span": 4.0},
+  "notes": [{
+    "pitch": 60, "start_time": 0.0, "duration": 1.0, "velocity": 108.0,
+    "mute": false, "probability": 1.0, "velocity_deviation": 0.0,
+    "release_velocity": 64.0
+  }]
+}
+```
+
+Застосування повністю замінює всі ноти, **початок** яких лежить у вказаному тайлі;
+нота, що тягнеться за його праву межу, все одно належить тайлу свого `start_time`.
+Різні тайли зливаються незалежно, а для одночасних правок одного тайла виграє
+останній `global_seq`. Listener нот дебаунситься на 200 мс зі стелею 1 с.
+
+Тайли суттєво зменшують UDP-повідомлення порівняно з snapshot усього кліпу, але
+не дають математичної межі для патологічно щільного MIDI. Одна JSON-датаграма має
+вміститись у 65 507 байтів; завеликий тайл bridge відкине й запише це в лог.
 
 ### Коалесинг: журнал несе дії, а не зміни LOM
 

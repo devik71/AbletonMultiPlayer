@@ -126,9 +126,16 @@ try {
   console.log('ланцюг піднявся\n');
 
   await check('реєстр: один створює, другий приймає', async () => {
-    await waitFor(l1, /реєстр створено/);
-    await waitFor(l2, /реєстр прийнято$/m);
-    if (/незіставлено/.test(l2.out)) throw new Error('реєстр прийнято з розбіжностями');
+    await Promise.all([
+      waitFor(l1, /реєстр прийнято$/m),
+      waitFor(l2, /реєстр прийнято$/m),
+    ]);
+    if (!/реєстр створено/.test(l1.out) && !/реєстр створено/.test(l2.out)) {
+      throw new Error('жоден bridge не створив початковий реєстр');
+    }
+    if (/незіставлено/.test(l1.out) || /незіставлено/.test(l2.out)) {
+      throw new Error('реєстр прийнято з розбіжностями');
+    }
   });
 
   await check('daemon, стартований при живому Live, теж отримує реєстр', async () => {
@@ -176,6 +183,46 @@ try {
     l1.stdin.write('stopall\n');
     await waitFor(l2, /<- #\d+ StopAllClips/);
     if (l2.out.match(/<- #\d+ ClipStop/g)) throw new Error('стоп розсипався на окремі ClipStop');
+  });
+
+  await check('новий MIDI clip і нота доїхали до партнера', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('note 0 0 60 0 1 108\n');
+    await waitFor(l2, /<- #\d+ ClipCreate .*"length":4/, 8000, from);
+    await waitFor(l2, /<- #\d+ ClipNotesSet .*"pitch":60.*"velocity":108/, 8000, from);
+    l1.stdin.write('note 0 0 72 5 0.5 96\n');
+    await waitFor(l2, /<- #\d+ ClipNotesSet .*"pitch":72.*"start_time":5/, 8000, from);
+
+    const stateFrom = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"pitch": 60/, 8000, stateFrom);
+    if (!/"velocity": 108/.test(l2.out.slice(stateFrom)) ||
+        !/"pitch": 72/.test(l2.out.slice(stateFrom))) {
+      throw new Error('стан MIDI-ноти у партнера не збігається');
+    }
+  });
+
+  await check('видалення ноти очищає її регіон і не чіпає сусідній', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('delnote 0 0 60 0\n');
+    await waitFor(l1, /<- #\d+ ClipNotesSet .*"notes":\[\]/, 8000, from);
+
+    const stateFrom = l1.out.length;
+    l1.stdin.write('state\n');
+    await waitFor(l1, /"pitch": 72/, 8000, stateFrom);
+    if (/"pitch": 60/.test(l1.out.slice(stateFrom))) {
+      throw new Error('видалена нота лишилась у стані партнера');
+    }
+  });
+
+  await check('видалення MIDI clip доїхало до партнера', async () => {
+    const from = l1.out.length;
+    l2.stdin.write('delclip 0 0\n');
+    await waitFor(l1, /<- #\d+ ClipDelete/, 8000, from);
+
+    const stateFrom = l1.out.length;
+    l1.stdin.write('state\n');
+    await waitFor(l1, /"clips": \[\s*null/, 8000, stateFrom);
   });
 
   await check('uuid переживає переставляння треків у партнера', async () => {
@@ -286,10 +333,10 @@ try {
     }
   });
 
-  await check('журнал: 13 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 18 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 13) throw new Error(`очікував 13 подій, у журналі ${lines.length}`);
+    if (lines.length !== 18) throw new Error(`очікував 18 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

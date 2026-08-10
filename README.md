@@ -11,9 +11,10 @@
 > Live Object Model.
 
 **Статус.** Працює на парі машин у локальній мережі, перевірено на Live 12.3.8
-і 12.3.5 одночасно. Синхронізуються транспорт, темп, кліпи, сцени, структура
-треків і мікшер. Ноти в кліпах і параметри девайсів — ще ні, тож два `.als`
-після спільної сесії поки не збігаються повністю.
+і 12.3.5 одночасно. Синхронізуються транспорт, темп, запуск кліпів і сцен,
+структура треків, мікшер, а від версії bridge 0.12 — створення/видалення Session
+MIDI-кліпів та їхні ноти. Параметри девайсів і Arrangement — ще ні, тож два
+`.als` після спільної сесії поки не збігаються повністю.
 
 ## Як це влаштовано
 
@@ -42,6 +43,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python, у процесі Live)
 | `ClipLaunch`, `ClipStop`, `SceneLaunch`, `StopAllClips` | запуск і зупинка |
 | `TrackCreate`, `TrackDelete`, `SceneCreate`, `SceneDelete` | структура |
 | `MixerSet`, `TrackToggle` | гучність, панорама, send-и, mute/solo/arm |
+| `ClipCreate`, `ClipDelete`, `ClipNotesSet` | Session MIDI-кліпи та ноти |
 | `RegistryInit` | ідентичність об'єктів на старті сесії |
 
 Треки і сцени адресуються **стабільними uuid**, не індексами. uuid зберігаються
@@ -114,13 +116,14 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 5 hardening/recovery + 23 E2E-перевірок
+npm test                   # 5 hardening/recovery + 26 E2E-перевірок
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
 Ручний прогін: підняти relay, потім по парі daemon + fake-live на різних портах.
 Команди fake-live: `play`, `tempo 128`, `launch 1 2`, `scene 3`, `vol 1 0.5`,
-`mute 0`, `addtrack`, `move 0 2`, `state`.
+`mute 0`, `addtrack`, `move 0 2`, `note 0 0 60 0 1 100`, `delnote 0 0 60 0`,
+`delclip 0 0`, `state`.
 
 `test/inject.mjs` кидає одну подію в relay від імені окремого учасника — зручно
 перевіряти застосування в справжньому Live без другої машини.
@@ -141,6 +144,11 @@ node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного �
 
 **Локальний Ctrl+Z у Live не породжує події** — LOM не дає хука на undo-стек.
 Відомий розсинхрон.
+
+**MIDI-синхронізація поки охоплює лише Session View.** Arrangement-кліпи,
+audio clip creation, clip envelopes, loop/start markers і назва/довжина вже
+наявного кліпу не спостерігаються. Для екстремально щільного MIDI один нотний
+тайл може перевищити ліміт UDP-датаграми; bridge запише `datagram too large` у лог.
 
 **Немає локів.** Одночасна зміна одного параметра = виграє останній за `global_seq`.
 
