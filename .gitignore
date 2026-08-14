@@ -1,11 +1,24 @@
 node_modules/
 __pycache__/
 *.pyc
+.DS_Store
+**/.DS_Store
 
 # рантайм-стан, не артефакти коду
 relay/journals/
 daemon/state/
 *.log
+
+# локальні секрети для AI chat / OpenAI.
+# Поклади ключ в один із цих файлів, одним рядком:
+#   remote-script/AbletonMP/openai_api_key
+#   .abletonmp/openai_api_key
+#   ~/.abletonmp/openai_api_key
+.abletonmp/
+.env
+.env.*
+*_api_key
+*token*
 
 # лог робочої сесії, не частина проєкту
 conversations/

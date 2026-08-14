@@ -23,7 +23,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.17.0","pid":1234,"features":["apply_ack"],"events":[...]}
+{"m":"hello","live":"12.3.8","script":"0.18.0","pid":1234,"features":["apply_ack","ai_chat","authenticated_lom"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
@@ -167,6 +167,14 @@ Relay пише `journal.jsonl` — один закомічений івент н
 Це **integrity checkpoint, не snapshot стану Live**. Він не дозволяє обрізати журнал:
 для compaction спочатку потрібні повний `snapshot_apply` у bridge та архів старого
 журналу. До появи цього механізму relay завжди зберігає і віддає повний tail.
+
+### Health endpoint
+
+`GET /health` на relay повертає JSON для моніторингу сесій. Крім `ok`, `proto`,
+`head` і помилок журналу, відповідь містить онлайн-клієнтів з IP/портом, версіями
+Live/script/features, статистику дій по author і breakdown за типами подій. Цей
+endpoint читає Max for Live device `AbletonMP Multiplayer Status.maxpat`; він не
+змінює журнал і не є частиною realtime-протоколу синхронізації.
 
 ## 4. Типи подій (фаза 1)
 

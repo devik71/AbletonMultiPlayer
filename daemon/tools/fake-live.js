@@ -293,7 +293,7 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.17.0-fake'),
+    script: arg('script', '0.18.0-fake'),
     pid: process.pid,
     features: ['apply_ack'],
     events: arg('events',

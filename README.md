@@ -10,15 +10,28 @@
 > йде виключно через задокументовані точки розширення — Remote Script і
 > Live Object Model.
 
-**Статус.** Працює на парі машин у локальній мережі, перевірено на Live 12.3.8
-і 12.3.5 одночасно. Синхронізуються транспорт, темп, запуск кліпів і сцен,
-структура треків, мікшер, а від версії bridge 0.12 — створення/видалення Session
-MIDI-кліпів та їхні ноти. Від bridge 0.13 синхронізуються параметри верхньорівневих
-девайсів на звичайних треках, від 0.14 — параметри девайсів усередині вкладених
-Rack chains, від 0.15 — девайси на Return Tracks і Master Track, а від 0.16 —
-мікшер Return/Master. Від 0.17 синхронізуються назви й кольори Track/Scene/Session Clip.
-Структура девайсів і Arrangement — ще ні, тож два `.als` після
-спільної сесії поки не збігаються повністю.
+**Поточна версія: 0.18.0.** Працює на парі машин у локальній мережі, перевірено
+на Live 12.3.8 і 12.3.5 одночасно. Синхронізуються транспорт, темп, запуск кліпів
+і сцен, структура треків, мікшер, а від версії bridge 0.12 —
+створення/видалення Session MIDI-кліпів та їхні ноти. Від bridge 0.13
+синхронізуються параметри верхньорівневих девайсів на звичайних треках, від 0.14 —
+параметри девайсів усередині вкладених Rack chains, від 0.15 — девайси на Return
+Tracks і Master Track, від 0.16 — мікшер Return/Master, а від 0.17 — назви й
+кольори Track/Scene/Session Clip. Від 0.18 додано authenticated AI Chat/LOM API,
+Max for Live chat device і Max for Live relay status monitor. Структура девайсів
+і Arrangement — ще ні, тож два `.als` після спільної сесії поки не збігаються
+повністю.
+
+## Що нового в 0.18.0
+
+- Authenticated localhost AI Chat API у Remote Script: `http://127.0.0.1:19847/`.
+- OpenAI planner для правок через Live Object Model з чергою виконання на Live thread.
+- Editable Max patch `AbletonMP AI Chat.maxpat` для prompt/token/execute/snapshot прямо в Live.
+- Розширений relay `GET /health`: кімнати, онлайн-гравці, IP, версії Live/script,
+  кількість дій по author і breakdown за типами подій.
+- Editable Max patch `AbletonMP Multiplayer Status.maxpat` як чисте info/log вікно
+  для статусу relay і кімнати.
+- Версії npm-пакетів, bridge і fake-live вирівняні на `0.18.0`.
 
 ## Як це влаштовано
 
@@ -63,43 +76,151 @@ Return Tracks і Master Track мають окремі aux-uuid. У `DeviceParamS
 Семпли з теки проєкту синхронізуються автоматично, окремим шаром — relay їх
 не журналює, лише пересилає.
 
-## Запуск
+## Встановлення і запуск
 
-Потрібні Node 18+ і Ableton Live 11/12.
+Потрібні:
 
-### Relay — на одній машині, доступній обом
+- Node.js 18+.
+- Ableton Live 11/12.
+- Max for Live, якщо потрібні вбудовані UI-патчі.
+- OpenAI API key лише для AI Chat; базовий multiplayer працює без нього.
 
-```powershell
-cd relay; npm install; npm start        # ws://0.0.0.0:19870
+### 1. Завантажити репозиторій
+
+```bash
+git clone https://github.com/devik71/AbletonMultiPlayer.git
+cd AbletonMultiPlayer
 ```
 
-Стан сесій: `http://<host>:19870/health`. Журнали: `relay/journals/<session>.jsonl`.
+Якщо ти працюєш із локальною папкою без git, достатньо перейти в її корінь:
 
-### Daemon — на кожній машині
-
-```powershell
-cd daemon; npm install
-node index.js --author p1 --session myproject --relay ws://<relay-host>:19870
+```bash
+cd /Users/macbook/Desktop/AbletonMultiPlayer-main
 ```
 
-`--author` має бути різним у гравців — relay дедуплікує події по парі
-`(author, lseq)`. `--session` прив'язана до конкретного проєкту: під однією
-сесією має відкриватись один і той самий `.als`.
+### 2. Relay — одна машина на сесію
 
-Ключі: `--project <шлях>` (якщо сет ще не збережено і теку не вивести
-автоматично), `--state-dir`, `--udp-in` / `--udp-out`.
+Relay має бути доступним усім гравцям у локальній мережі:
 
-### Remote Script — на кожній машині
-
-```powershell
-cd remote-script; .\install.ps1          # або -Symlink для розробки
+```bash
+cd relay
+npm install
+npm start
 ```
 
-Перезапустити Live → Preferences → Link/Tempo/MIDI → Control Surface → **AbletonMP**.
-Лог: `%APPDATA%\AbletonMP\bridge.log`.
+За замовчуванням він слухає `ws://0.0.0.0:19870`. Стан сесій:
+`http://<relay-host>:19870/health`. Endpoint показує кімнати, head журналу,
+онлайн-гравців, їхні IP, Live/script версії, кількість дій по авторах і breakdown
+за типами подій. Журнали лежать у `relay/journals/<session>.jsonl`.
 
-Правки скрипта підхоплює **лише повний рестарт Live**: перезавантаження сету
+### 3. Daemon — на кожній машині
+
+Відкрити другий термінал:
+
+```bash
+cd daemon
+npm install
+node index.js --author p1 --session Untitled --relay ws://127.0.0.1:19870
+```
+
+Для другої машини `--relay` має вказувати IP машини з relay, наприклад
+`ws://192.168.3.18:19870`. `--author` має бути різним у гравців: `p1`, `p2`,
+`devik`, `laptop` тощо. Relay дедуплікує події по парі `(author, lseq)`.
+
+`--session` прив'язана до конкретного проєкту: під однією сесією має відкриватись
+один і той самий `.als`. Корисні ключі: `--project <шлях>` (якщо сет ще не
+збережено і теку не вивести автоматично), `--state-dir`, `--udp-in`, `--udp-out`.
+
+### 4. Remote Script — на кожній машині з Live
+
+#### macOS
+
+Для розробки зручно поставити symlink, щоб Live бачив зміни з репозиторію після
+повного рестарту:
+
+```bash
+REMOTE="$HOME/Music/Ableton/User Library/Remote Scripts"
+mkdir -p "$REMOTE"
+ln -s "$(pwd)/remote-script/AbletonMP" "$REMOTE/AbletonMP"
+```
+
+Якщо `"$REMOTE/AbletonMP"` уже існує як стара копія, спочатку прибери або перейменуй
+її, а потім створи symlink. Альтернатива без symlink:
+
+```bash
+rsync -a --delete "$(pwd)/remote-script/AbletonMP/" \
+  "$HOME/Music/Ableton/User Library/Remote Scripts/AbletonMP/"
+```
+
+#### Windows
+
+```powershell
+cd remote-script
+.\install.ps1          # копія
+.\install.ps1 -Symlink # symlink для розробки
+```
+
+Після встановлення повністю перезапустити Live, потім вибрати:
+Preferences -> Link/Tempo/MIDI -> Control Surface -> **AbletonMP**.
+
+Лог bridge:
+
+- macOS: `$TMPDIR/AbletonMP/bridge.log`.
+- Windows: `%APPDATA%\AbletonMP\bridge.log`.
+
+Правки Remote Script підхоплює **лише повний рестарт Live**. Перезавантаження сету
 переінстанціює Control Surface, але модуль лишається в `sys.modules`.
+
+### 5. OpenAI key для AI Chat
+
+Ключ потрібен тільки для natural-language правок у Live. Поклади його одним рядком
+в один із цих файлів:
+
+```bash
+mkdir -p "$HOME/.abletonmp"
+printf '%s\n' 'sk-...' > "$HOME/.abletonmp/openai_api_key"
+```
+
+Або локально біля Remote Script:
+
+```bash
+printf '%s\n' 'sk-...' > remote-script/AbletonMP/openai_api_key
+```
+
+Ці шляхи вже закриті `.gitignore`. Token для локального chat API створюється
+автоматично в `~/.abletonmp/chat_token`; M4L UI зазвичай читає його сам.
+
+### 6. Max for Live AI Chat UI
+
+Remote Script піднімає authenticated localhost UI/API для AI-правок:
+`http://127.0.0.1:19847/`.
+
+Editable patch:
+
+```text
+m4l/AbletonMP AI Chat.maxpat
+m4l/abletonmp_chat.js
+```
+
+Відкрити `.maxpat` у Max, перевірити що `abletonmp_chat.js` лежить поруч, потім
+`File -> Save As...` як Max for Live device (`.amxd`) у User Library. Patch має
+prompt, token, execute toggle, `ask`, `snapshot`, `stop` і `runjson`. Якщо token
+не підтягнувся автоматично, встав його вручну в поле Token.
+
+### 7. Max for Live Multiplayer Status
+
+Окремий info/log device для multiplayer relay:
+
+```text
+m4l/AbletonMP Multiplayer Status.maxpat
+m4l/abletonmp_multiplayer_status.js
+```
+
+Він опитує `http://127.0.0.1:19870/health` кожні ~2 секунди і показує статус
+сервера, кімнати, онлайн-гравців, IP, версії Live/script, скільки дій зробив
+кожен author, останню подію і розподіл подій за типами. Для віддаленого relay
+в полі Relay вказати `http://<relay-ip>:19870`; поле Room можна лишити пустим,
+або вписати конкретну `--session`.
 
 ## Друга машина
 

@@ -204,6 +204,83 @@ class Session {
     return [...this.clients].map((c) => c.author).filter(Boolean);
   }
 
+  onlineClients() {
+    const now = Date.now() / 1000;
+    return [...this.clients].map((c) => ({
+      author: c.author,
+      ip: c.ip,
+      port: c.port,
+      connected_at: c.connectedAt,
+      connected_sec: Math.max(0, Math.round(now - c.connectedAt)),
+      live: c.info?.live ?? null,
+      script: c.info?.script ?? null,
+      features: c.info?.features ?? [],
+      events: c.info?.events ?? [],
+    })).filter((c) => c.author);
+  }
+
+  authorStats() {
+    const stats = new Map();
+    const ensure = (author) => {
+      const name = author || '(unknown)';
+      if (!stats.has(name)) {
+        stats.set(name, {
+          author: name,
+          online: false,
+          ip: null,
+          commits: 0,
+          actions: 0,
+          by_type: {},
+          last_gseq: 0,
+          last_type: null,
+          last_ts: null,
+          last_srv_ts: null,
+        });
+      }
+      return stats.get(name);
+    };
+
+    for (const ev of this.journal) {
+      const s = ensure(ev.author);
+      s.commits += 1;
+      if (ev.type !== 'RegistryInit') s.actions += 1;
+      s.by_type[ev.type] = (s.by_type[ev.type] || 0) + 1;
+      s.last_gseq = ev.gseq;
+      s.last_type = ev.type;
+      s.last_ts = ev.ts ?? null;
+      s.last_srv_ts = ev.srv_ts ?? null;
+    }
+
+    for (const client of this.clients) {
+      const s = ensure(client.author);
+      s.online = true;
+      s.ip = client.ip;
+      s.port = client.port;
+      s.live = client.info?.live ?? null;
+      s.script = client.info?.script ?? null;
+      s.connected_at = client.connectedAt;
+    }
+
+    return [...stats.values()].sort((a, b) => {
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      return a.author.localeCompare(b.author);
+    });
+  }
+
+  status() {
+    return {
+      session: this.name,
+      head: this.head.gseq,
+      hash: this.head.hash,
+      online: this.clients.size,
+      peers: this.peers(),
+      clients: this.onlineClients(),
+      authors: this.authorStats(),
+      journal_error: this.loadError,
+      checkpoint_error: this.checkpointError,
+    };
+  }
+
   broadcast(msg, except = null) {
     const raw = JSON.stringify(msg);
     for (const c of this.clients) {
@@ -230,15 +307,25 @@ mkdirSync(JOURNAL_DIR, { recursive: true });
 
 const http = createServer((req, res) => {
   if (req.url === '/health') {
-    const body = [...sessions.values()].map((s) => ({
-      session: s.name,
-      head: s.head.gseq,
-      peers: s.peers(),
-      journal_error: s.loadError,
-      checkpoint_error: s.checkpointError,
-    }));
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, proto: PROTO, sessions: body }, null, 2));
+    const body = [...sessions.values()].map((s) => s.status());
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'access-control-allow-origin': '*',
+    });
+    res.end(JSON.stringify({
+      ok: true,
+      proto: PROTO,
+      now: Date.now() / 1000,
+      sessions: body,
+    }, null, 2));
+    return;
+  }
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'GET, OPTIONS',
+      'access-control-allow-headers': 'content-type',
+    }).end();
     return;
   }
   res.writeHead(404).end();
@@ -246,8 +333,19 @@ const http = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: http, maxPayload: MAX_WS_PAYLOAD });
 
-wss.on('connection', (ws) => {
-  const client = { ws, author: null, session: null };
+wss.on('connection', (ws, req) => {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const socket = req.socket || {};
+  const ip = forwarded || socket.remoteAddress || '';
+  const client = {
+    ws,
+    author: null,
+    session: null,
+    ip: ip.replace(/^::ffff:/, ''),
+    port: socket.remotePort ?? null,
+    connectedAt: Date.now() / 1000,
+    info: null,
+  };
 
   const send = (msg) => {
     if (ws.readyState === 1) ws.send(JSON.stringify(msg));

@@ -24,8 +24,17 @@ except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·
 
 from .link import UdpLink
 from .registry import Registry
+from . import chat as _chat
 
-SCRIPT_VERSION = "0.17.0"
+try:
+    import importlib
+    _chat = importlib.reload(_chat)
+except Exception:
+    pass
+
+AIChatServer = _chat.AIChatServer
+
+SCRIPT_VERSION = "0.18.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
@@ -84,6 +93,8 @@ class AbletonMP(ControlSurface):
         self._log_file = _log_path()
         self._doc = None
         self._link = None
+        self._chat = None
+        self._ai_seq = 0
         self._lseq = 0
         self._last_beat = 0.0
         self._mirror = {
@@ -115,6 +126,10 @@ class AbletonMP(ControlSurface):
     def _setup(self):
         self._doc = Live.Application.get_application().get_document()
         self._link = UdpLink(self._log)
+        self._chat = AIChatServer(self._log)
+        if self._chat.start():
+            self._show_message("AbletonMP AI chat: %s token in %s"
+                               % (self._chat.url, self._chat.token_source))
 
         self._doc.add_is_playing_listener(self._cb_is_playing)
         self._doc.add_tempo_listener(self._cb_tempo)
@@ -132,7 +147,7 @@ class AbletonMP(ControlSurface):
             "script": SCRIPT_VERSION,
             "pid": os.getpid(),
             "events": APPLY_TYPES,
-            "features": ["apply_ack"],
+            "features": ["apply_ack", "ai_chat", "authenticated_lom"],
         })
         self._link.send({"m": "snapshot", "state": self._snapshot()})
         self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
@@ -183,6 +198,9 @@ class AbletonMP(ControlSurface):
         if self._link is not None:
             self._link.send({"m": "bye"})
             self._link.close()
+        if self._chat is not None:
+            self._chat.stop()
+            self._chat = None
         self._log("AbletonMP disconnected")
 
     # ------------------------------------------------------------- listeners
@@ -2040,6 +2058,8 @@ class AbletonMP(ControlSurface):
         self._safe(self._pump)
 
     def _pump(self):
+        if self._chat is not None:
+            self._chat.poll(self._handle_chat_request)
         if self._link is None or not self._link.alive:
             return
         for msg in self._link.poll():
@@ -2073,7 +2093,7 @@ class AbletonMP(ControlSurface):
                 "script": SCRIPT_VERSION,
                 "pid": os.getpid(),
                 "events": APPLY_TYPES,
-                "features": ["apply_ack"],
+                "features": ["apply_ack", "ai_chat", "authenticated_lom"],
             })
         elif m == "registry_build":
             self._link.send({"m": "registry", "registry": self._build_registry()})
@@ -2223,6 +2243,647 @@ class AbletonMP(ControlSurface):
             "external": external,
             "missing": missing,
         }
+
+    # ---------------------------------------------------------- AI chat LOM
+
+    def _handle_chat_request(self, command, payload):
+        if command == "snapshot":
+            return self._ai_snapshot()
+        if command == "exec":
+            return self._ai_exec(payload or {})
+        raise ValueError("unknown chat command %r" % (command,))
+
+    def _ai_snapshot(self):
+        state = self._snapshot() or {}
+        state["script"] = SCRIPT_VERSION
+        state["registry_ready"] = bool(self._registry_ready)
+        state["tracks"] = []
+        for idx, track in enumerate(self._doc.tracks):
+            summary = self._ai_track_summary(track, idx=idx, kind=self._track_kind(track))
+            try:
+                summary["playing_slot_index"] = self._norm_psi(track.playing_slot_index)
+            except Exception:
+                pass
+            summary["clips"] = self._ai_clip_summaries(track)
+            state["tracks"].append(summary)
+        state["scenes"] = []
+        for idx, scene in enumerate(self._doc.scenes):
+            item = {"index": idx, "name": self._safe_name(scene)}
+            uid = self._scenes_reg.id_of(scene, create=False)
+            if uid:
+                item["id"] = uid
+            color = self._safe_color(scene)
+            if color is not None:
+                item["color"] = color
+            state["scenes"].append(item)
+        state["aux_tracks"] = []
+        for kind, idx, track in self._iter_aux_tracks():
+            summary = self._ai_track_summary(track, idx=idx, kind=kind)
+            summary["aux_kind"] = kind
+            state["aux_tracks"].append(summary)
+        return state
+
+    def _ai_track_summary(self, track, idx=None, kind=None):
+        ref = self._device_track_ref(track)
+        item = {
+            "name": self._safe_name(track),
+            "kind": kind or self._track_kind(track),
+            "mixer": {},
+            "toggles": {},
+            "devices": [],
+        }
+        if idx is not None:
+            item["index"] = idx
+        if ref and ref.get("id"):
+            item["id"] = ref["id"]
+        color = self._safe_color(track)
+        if color is not None:
+            item["color"] = color
+        for param, send_idx in self._mix_slots(track):
+            p = self._mix_param(track, param, send_idx)
+            if p is None:
+                continue
+            key = param if send_idx is None else "%s:%d" % (param, send_idx)
+            item["mixer"][key] = self._ai_parameter_summary(p)
+        for prop in self._toggle_props(track):
+            try:
+                item["toggles"][prop] = bool(getattr(track, prop))
+            except Exception:
+                pass
+        device_count = 0
+        for container, device, chain_path in self._iter_track_devices(track):
+            if device_count >= 64:
+                item["devices_truncated"] = True
+                break
+            device_count += 1
+            device_ref = self._device_ref(container, device)
+            if device_ref is None:
+                continue
+            d = dict(device_ref)
+            d["name"] = self._safe_name(device)
+            if chain_path:
+                d["chain_path"] = chain_path
+            params = []
+            try:
+                parameters = list(device.parameters)
+            except Exception:
+                parameters = []
+            for pidx, parameter in enumerate(parameters[:128]):
+                pref = self._device_parameter_ref(device, parameter) or {"index": pidx}
+                ps = dict(pref)
+                ps.update(self._ai_parameter_summary(parameter))
+                params.append(ps)
+            if len(parameters) > 128:
+                d["parameters_truncated"] = True
+            d["parameters"] = params
+            item["devices"].append(d)
+        return item
+
+    def _ai_parameter_summary(self, parameter):
+        out = {}
+        try:
+            out["name"] = str(parameter.name)
+        except Exception:
+            pass
+        try:
+            out["value"] = round(float(parameter.value), 6)
+        except Exception:
+            pass
+        for attr in ("min", "max"):
+            try:
+                out[attr] = round(float(getattr(parameter, attr)), 6)
+            except Exception:
+                pass
+        try:
+            out["is_enabled"] = bool(parameter.is_enabled)
+        except Exception:
+            pass
+        try:
+            out["is_quantized"] = bool(parameter.is_quantized)
+        except Exception:
+            pass
+        return out
+
+    def _ai_clip_summaries(self, track):
+        clips = []
+        try:
+            slots = list(track.clip_slots)
+        except Exception:
+            return clips
+        scenes = list(self._doc.scenes)
+        for scene_idx, slot in enumerate(slots[:len(scenes)]):
+            try:
+                if not slot.has_clip:
+                    continue
+                clip = slot.clip
+                item = {
+                    "scene_index": scene_idx,
+                    "kind": "midi" if clip.is_midi_clip else "audio",
+                    "name": self._safe_name(clip),
+                }
+                try:
+                    item["length"] = round(float(clip.length), 6)
+                except Exception:
+                    pass
+                color = self._safe_color(clip)
+                if color is not None:
+                    item["color"] = color
+                if clip.is_midi_clip:
+                    try:
+                        item["notes"] = len(self._clip_notes(clip))
+                    except Exception:
+                        pass
+                clips.append(item)
+            except Exception:
+                pass
+        return clips
+
+    def _ai_exec(self, payload):
+        actions = payload.get("actions")
+        if not isinstance(actions, list):
+            raise ValueError("actions must be a list")
+        if len(actions) > 128:
+            raise ValueError("too many actions")
+        results = []
+        ok = True
+        for idx, action in enumerate(actions):
+            if not isinstance(action, dict):
+                ok = False
+                results.append({"index": idx, "ok": False, "error": "action must be an object"})
+                if not payload.get("continue_on_error"):
+                    break
+                continue
+            op = action.get("op")
+            try:
+                result = self._ai_exec_action(action)
+                results.append({"index": idx, "ok": True, "op": op, "result": result})
+            except Exception as e:
+                ok = False
+                results.append({"index": idx, "ok": False, "op": op, "error": repr(e)})
+                self._warn("AI action %r failed: %r" % (op, e))
+                if not payload.get("continue_on_error"):
+                    break
+        return {"ok": ok, "results": results, "snapshot": self._ai_snapshot()}
+
+    def _ai_exec_action(self, action):
+        op = action.get("op")
+        if not isinstance(op, str):
+            raise ValueError("op is required")
+
+        if op == "snapshot":
+            return self._ai_snapshot()
+
+        if op == "apply":
+            etype = action.get("type")
+            payload = action.get("payload") or {}
+            if not isinstance(etype, str) or not isinstance(payload, dict):
+                raise ValueError("apply requires type and payload")
+            self._apply(etype, payload, self._next_ai_seq())
+            return {"applied": etype}
+
+        if op == "transport":
+            if "playing" in action:
+                if bool(action.get("playing")):
+                    self._doc.start_playing()
+                else:
+                    self._doc.stop_playing()
+            if "bpm" in action or "tempo" in action:
+                bpm = self._ai_float(action.get("bpm", action.get("tempo")), "bpm")
+                self._doc.tempo = bpm
+            return {"playing": bool(self._doc.is_playing), "tempo": float(self._doc.tempo)}
+
+        if op == "set_tempo":
+            bpm = self._ai_float(action.get("bpm", action.get("tempo")), "bpm")
+            self._doc.tempo = bpm
+            return {"tempo": float(self._doc.tempo)}
+
+        if op == "create_track":
+            idx = self._ai_insert_index(action.get("index", action.get("idx")),
+                                        len(self._doc.tracks))
+            kind = action.get("kind", "audio")
+            if kind == "midi":
+                self._doc.create_midi_track(idx)
+            elif kind == "audio":
+                self._doc.create_audio_track(idx)
+            else:
+                raise ValueError("track kind must be audio or midi")
+            track = self._doc.tracks[idx]
+            self._ai_set_optional_name_color(track, action)
+            return self._ai_serialize(track)
+
+        if op == "delete_track":
+            track, idx = self._ai_target_track(action)
+            if not isinstance(idx, int):
+                raise ValueError("only ordinary tracks can be deleted")
+            self._doc.delete_track(idx)
+            return {"deleted_track_index": idx}
+
+        if op == "rename_track":
+            track, _idx = self._ai_target_track(action)
+            name = action.get("name")
+            if not isinstance(name, str):
+                raise ValueError("name must be a string")
+            track.name = name
+            return self._ai_serialize(track)
+
+        if op == "set_track_color":
+            track, _idx = self._ai_target_track(action)
+            track.color = self._ai_color(action.get("color"))
+            return self._ai_serialize(track)
+
+        if op == "set_track_toggle":
+            track, _idx = self._ai_target_track(action)
+            prop = action.get("param", action.get("property"))
+            if prop not in self._toggle_props(track):
+                raise ValueError("unknown or unsupported track toggle %r" % (prop,))
+            setattr(track, prop, bool(action.get("value")))
+            return {prop: bool(getattr(track, prop))}
+
+        if op == "set_mixer":
+            track, _idx = self._ai_target_track(action)
+            param = action.get("param")
+            send_idx = action.get("send_index", action.get("index"))
+            if param != "send":
+                send_idx = None
+            else:
+                send_idx = self._ai_int(send_idx, "send index")
+            p = self._mix_param(track, param, send_idx)
+            if p is None:
+                raise ValueError("mixer parameter not found")
+            value = self._ai_float(action.get("value"), "value")
+            p.value = max(float(p.min), min(float(p.max), value))
+            return self._ai_parameter_summary(p)
+
+        if op == "create_scene":
+            idx = self._ai_insert_index(action.get("index", action.get("idx")),
+                                        len(self._doc.scenes))
+            self._doc.create_scene(idx)
+            scene = self._doc.scenes[idx]
+            self._ai_set_optional_name_color(scene, action)
+            return self._ai_serialize(scene)
+
+        if op == "delete_scene":
+            scene, idx = self._ai_target_scene(action)
+            self._doc.delete_scene(idx)
+            return {"deleted_scene_index": idx, "name": self._safe_name(scene)}
+
+        if op == "rename_scene":
+            scene, _idx = self._ai_target_scene(action)
+            name = action.get("name")
+            if not isinstance(name, str):
+                raise ValueError("name must be a string")
+            scene.name = name
+            return self._ai_serialize(scene)
+
+        if op == "launch_scene":
+            scene, idx = self._ai_target_scene(action)
+            scene.fire()
+            return {"launched_scene_index": idx}
+
+        if op == "launch_clip":
+            _track, _scene, slot = self._ai_target_clip_slot(action)
+            slot.fire()
+            return {"launched": True}
+
+        if op == "stop_clip":
+            track, idx = self._ai_target_track(action)
+            track.stop_all_clips()
+            return {"stopped_track_index": idx}
+
+        if op == "stop_all_clips":
+            self._doc.stop_all_clips()
+            return {"stopped": True}
+
+        if op == "create_midi_clip":
+            track, scene, slot = self._ai_target_clip_slot(action)
+            try:
+                if slot.has_clip and not slot.clip.is_midi_clip:
+                    raise ValueError("target slot contains an audio clip")
+            except AttributeError:
+                pass
+            length = self._ai_clip_length(action)
+            if not slot.has_clip:
+                slot.create_clip(length)
+            clip = slot.clip
+            if not clip.is_midi_clip:
+                raise ValueError("target slot is not a MIDI clip")
+            self._ai_set_optional_name_color(clip, action)
+            return self._ai_serialize(clip)
+
+        if op == "delete_clip":
+            _track, _scene, slot = self._ai_target_clip_slot(action)
+            if slot.has_clip:
+                slot.delete_clip()
+            return {"deleted": True}
+
+        if op == "replace_clip_notes":
+            return self._ai_replace_clip_notes(action)
+
+        if op == "set_device_parameter":
+            return self._ai_set_device_parameter(action)
+
+        if op == "lom_get":
+            return self._ai_serialize(self._ai_resolve_path(action.get("path")))
+
+        if op == "lom_set":
+            obj = self._ai_resolve_path(action.get("path"))
+            prop = action.get("property", action.get("prop"))
+            if not isinstance(prop, str) or not prop or prop.startswith("_"):
+                raise ValueError("property must be a public string")
+            setattr(obj, prop, action.get("value"))
+            return self._ai_serialize(obj)
+
+        if op == "lom_call":
+            obj = self._ai_resolve_path(action.get("path"))
+            method_name = action.get("method")
+            if not isinstance(method_name, str) or not method_name or method_name.startswith("_"):
+                raise ValueError("method must be a public string")
+            method = getattr(obj, method_name)
+            args = action.get("args") or []
+            kwargs = action.get("kwargs") or {}
+            if not isinstance(args, list) or not isinstance(kwargs, dict):
+                raise ValueError("args must be a list and kwargs must be an object")
+            for key in kwargs:
+                if not isinstance(key, str) or key.startswith("_"):
+                    raise ValueError("kwargs keys must be public strings")
+            return self._ai_serialize(method(*args, **kwargs))
+
+        raise ValueError("unknown op %r" % (op,))
+
+    def _next_ai_seq(self):
+        self._ai_seq += 1
+        return "ai-%d" % self._ai_seq
+
+    def _ai_target_track(self, action):
+        ref = action.get("track")
+        if isinstance(ref, dict):
+            if "index" in ref:
+                return self._track_by_index(ref.get("index"))
+            if ref.get("kind") in ("return", "master"):
+                track, _track_ref = self._resolve_device_track(ref)
+                if track is None:
+                    raise ValueError("track target not found")
+                return track, None
+            if ref.get("id"):
+                return self._resolve_track(ref)
+        for key in ("track_index", "track_idx"):
+            if key in action:
+                return self._track_by_index(action.get(key))
+        if "track_id" in action:
+            return self._resolve_track({"id": action.get("track_id")})
+        kind = action.get("track_kind", action.get("aux_kind"))
+        if kind in ("return", "master"):
+            idx = self._ai_int(action.get("track_index", action.get("track_idx", 0)),
+                               "track index")
+            for aux_kind, aux_idx, track in self._iter_aux_tracks():
+                if aux_kind == kind and aux_idx == idx:
+                    return track, None
+            raise ValueError("%s track %d not found" % (kind, idx))
+        try:
+            selected = self._doc.view.selected_track
+            idx = self._track_index(selected)
+            return selected, idx
+        except Exception:
+            pass
+        raise ValueError("track target is required")
+
+    def _track_by_index(self, raw):
+        idx = self._ai_int(raw, "track index")
+        if idx < 0 or idx >= len(self._doc.tracks):
+            raise ValueError("track index out of range")
+        return self._doc.tracks[idx], idx
+
+    def _ai_target_scene(self, action):
+        ref = action.get("scene")
+        if isinstance(ref, dict):
+            if "index" in ref:
+                return self._scene_by_index(ref.get("index"))
+            if ref.get("id"):
+                idx = self._resolve_scene(ref)
+                if idx is None:
+                    raise ValueError("scene id not found")
+                return self._doc.scenes[idx], idx
+        for key in ("scene_index", "scene_idx", "index"):
+            if key in action:
+                return self._scene_by_index(action.get(key))
+        if "scene_id" in action:
+            idx = self._resolve_scene({"id": action.get("scene_id")})
+            if idx is None:
+                raise ValueError("scene id not found")
+            return self._doc.scenes[idx], idx
+        try:
+            selected = self._doc.view.selected_scene
+            for idx, scene in enumerate(self._doc.scenes):
+                if scene == selected:
+                    return scene, idx
+        except Exception:
+            pass
+        raise ValueError("scene target is required")
+
+    def _scene_by_index(self, raw):
+        idx = self._ai_int(raw, "scene index")
+        if idx < 0 or idx >= len(self._doc.scenes):
+            raise ValueError("scene index out of range")
+        return self._doc.scenes[idx], idx
+
+    def _ai_target_clip_slot(self, action):
+        track, _track_idx = self._ai_target_track(action)
+        scene, scene_idx = self._ai_target_scene(action)
+        try:
+            slots = track.clip_slots
+            if scene_idx >= len(slots):
+                raise ValueError("scene is outside the track slots")
+            return track, scene, slots[scene_idx]
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError("clip slot could not be resolved: %r" % (e,))
+
+    def _ai_replace_clip_notes(self, action):
+        track, scene, slot = self._ai_target_clip_slot(action)
+        notes = action.get("notes")
+        if not isinstance(notes, list):
+            raise ValueError("notes must be a list")
+        length = self._ai_clip_length(action)
+        if not slot.has_clip:
+            slot.create_clip(length)
+        clip = slot.clip
+        if not clip.is_midi_clip:
+            raise ValueError("target slot is not a MIDI clip")
+        self._ai_set_optional_name_color(clip, action)
+        normal = []
+        end_time = length
+        for raw in notes:
+            note = self._normal_note(raw)
+            if note is None:
+                raise ValueError("invalid note %r" % (raw,))
+            normal.append(note)
+            end_time = max(end_time, note["start_time"] + note["duration"])
+        current_records = self._clip_note_records(clip)
+        for note, _note_id in current_records:
+            end_time = max(end_time, note["start_time"] + note["duration"])
+        specs = tuple(self._make_note_spec(note) for note in normal)
+        ids = tuple(note_id for _note, note_id in current_records if note_id is not None)
+        if ids:
+            clip.remove_notes_by_id(ids)
+        elif current_records:
+            clip.remove_notes_extended(0, 128, 0.0, max(end_time, 0.001))
+        if specs:
+            clip.add_new_notes(specs)
+        return {"notes": len(normal), "length": length}
+
+    def _ai_set_device_parameter(self, action):
+        if isinstance(action.get("path"), list):
+            parameter = self._ai_resolve_path(action.get("path"))
+        else:
+            track, _idx = self._ai_target_track(action)
+            try:
+                devices = list(track.devices)
+            except Exception:
+                devices = []
+            device_idx = self._ai_int(action.get("device_index", action.get("device_idx", 0)),
+                                      "device index")
+            if device_idx < 0 or device_idx >= len(devices):
+                raise ValueError("device index out of range")
+            device = devices[device_idx]
+            parameter = self._ai_find_parameter(device, action)
+        value = self._ai_float(action.get("value"), "value")
+        try:
+            value = max(float(parameter.min), min(float(parameter.max), value))
+        except Exception:
+            pass
+        parameter.value = value
+        return self._ai_parameter_summary(parameter)
+
+    def _ai_find_parameter(self, device, action):
+        try:
+            parameters = list(device.parameters)
+        except Exception:
+            parameters = []
+        if "parameter_index" in action or "parameter_idx" in action:
+            idx = self._ai_int(action.get("parameter_index", action.get("parameter_idx")),
+                               "parameter index")
+            if idx < 0 or idx >= len(parameters):
+                raise ValueError("parameter index out of range")
+            return parameters[idx]
+        name = action.get("parameter", action.get("parameter_name"))
+        if not isinstance(name, str):
+            raise ValueError("parameter or parameter_index is required")
+        ordinal = self._ai_int(action.get("parameter_ordinal", 0), "parameter ordinal")
+        seen = 0
+        for parameter in parameters:
+            if self._device_parameter_name(parameter) == name or self._safe_name(parameter) == name:
+                if seen == ordinal:
+                    return parameter
+                seen += 1
+        raise ValueError("parameter %r not found" % (name,))
+
+    def _ai_resolve_path(self, path):
+        if not isinstance(path, list) or len(path) > 32:
+            raise ValueError("path must be a list with at most 32 tokens")
+        obj = self._doc
+        tokens = list(path)
+        if tokens and tokens[0] == "song":
+            tokens = tokens[1:]
+        elif tokens and tokens[0] == "app":
+            obj = Live.Application.get_application()
+            tokens = tokens[1:]
+        for token in tokens:
+            if isinstance(token, bool):
+                raise ValueError("boolean path token is not allowed")
+            if isinstance(token, int):
+                obj = obj[token]
+                continue
+            if isinstance(token, str):
+                if not token or token.startswith("_"):
+                    raise ValueError("private LOM attributes are not allowed")
+                obj = getattr(obj, token)
+                continue
+            raise ValueError("path token %r is not supported" % (token,))
+        return obj
+
+    def _ai_serialize(self, value, depth=0):
+        if depth > 3:
+            return repr(type(value))
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:1000]
+        if isinstance(value, (list, tuple)):
+            out = [self._ai_serialize(v, depth + 1) for v in list(value)[:64]]
+            if len(value) > 64:
+                out.append({"truncated": len(value) - 64})
+            return out
+        if isinstance(value, dict):
+            out = {}
+            for idx, key in enumerate(value):
+                if idx >= 64:
+                    out["truncated"] = len(value) - 64
+                    break
+                if isinstance(key, str):
+                    out[key] = self._ai_serialize(value[key], depth + 1)
+            return out
+        out = {"lom_type": value.__class__.__name__}
+        name = self._safe_name(value)
+        if name:
+            out["name"] = name
+        color = self._safe_color(value)
+        if color is not None:
+            out["color"] = color
+        for attr in ("class_name", "class_display_name"):
+            try:
+                out[attr] = str(getattr(value, attr))
+            except Exception:
+                pass
+        try:
+            out.update(self._ai_parameter_summary(value))
+        except Exception:
+            pass
+        return out
+
+    def _ai_set_optional_name_color(self, obj, action):
+        if isinstance(action.get("name"), str):
+            obj.name = action["name"]
+        if "color" in action:
+            obj.color = self._ai_color(action.get("color"))
+
+    def _ai_clip_length(self, action):
+        length = self._ai_float(action.get("length", action.get("duration", NOTE_TIME_SPAN)),
+                                "length")
+        if not math.isfinite(length) or length <= 0:
+            raise ValueError("length must be a positive finite number")
+        return min(length, 1073741824.0)
+
+    def _ai_color(self, value):
+        color = self._ai_int(value, "color")
+        if color < 0 or color > 0xFFFFFF:
+            raise ValueError("color must be 0x000000..0xFFFFFF")
+        return color
+
+    def _ai_insert_index(self, value, size):
+        if value is None:
+            return size
+        idx = self._ai_int(value, "index")
+        return max(0, min(size, idx))
+
+    def _ai_int(self, value, label):
+        if isinstance(value, bool):
+            raise ValueError("%s must be an integer" % label)
+        try:
+            return int(value)
+        except Exception:
+            raise ValueError("%s must be an integer" % label)
+
+    def _ai_float(self, value, label):
+        if isinstance(value, bool):
+            raise ValueError("%s must be a number" % label)
+        try:
+            number = float(value)
+        except Exception:
+            raise ValueError("%s must be a number" % label)
+        if math.isnan(number) or math.isinf(number):
+            raise ValueError("%s must be finite" % label)
+        return number
 
     # ------------------------------------------------------------- snapshots
 
@@ -2375,6 +3036,12 @@ class AbletonMP(ControlSurface):
         }
 
     # -------------------------------------------------------------- plumbing
+
+    def _show_message(self, text):
+        try:
+            self.show_message(text)
+        except Exception:
+            pass
 
     def _emit(self, etype, payload):
         self._lseq += 1
