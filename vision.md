@@ -162,3 +162,11 @@
 2. Freeze-лок на об'єкт (soft-lock, без timeout-логіки на старті).
 3. Sample sync: file watcher + rsync over SSH (Tailscale тунель), без git-annex поки що.
 4. Audio monitor: відкладено на другу ітерацію.
+
+## 11. Roadmap
+
+- **Staged AI planner / черга LOM-блоків.** Складний natural-language запит
+  класифікувати за шарами LOM і контекстом, розкладати на 3–10 залежних
+  блоків і планувати/виконувати їх послідовно з оновленим snapshot між кроками.
+  Черга має зупинятися на confirmation/помилці, повертати прогрес по кожному блоку
+  та уникати трьох послідовних 45-секундних fallback-timeout для одного великого prompt.
