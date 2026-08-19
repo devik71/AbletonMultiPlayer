@@ -286,7 +286,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 43 unit/hardening + 46 E2E-перевірки
+npm test                   # 43 unit/hardening + 47 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
@@ -331,7 +331,11 @@ bridge і кладе в `daemon/state/<author>.<session>.state.json`, а в ло
 це локальне вирівнювання, а не дія користувача.
 
 Daemon приймає команди прямо з терміналу: `state` (підсумок знімка з digest),
-`apply [файл]` (вирівняти по знімку) і `refresh` (перезняти стан).
+`pull <author>` (забрати свіжий знімок у партнера через relay і застосувати),
+`apply [файл]` (вирівняти по знімку з файлу) і `refresh` (перезняти стан).
+
+Саме `pull` закриває сценарій «приєднався до сету, який бачу вперше»: партнер
+віддає свіжий стан, ти вирівнюєшся по ньому, і в журнал при цьому нічого не йде.
 
 **MIDI-синхронізація поки охоплює лише Session View.** Arrangement-кліпи,
 audio clip creation, clip envelopes, loop/start markers і довжина вже

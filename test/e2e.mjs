@@ -559,6 +559,39 @@ try {
     }
   });
 
+  await check('знімок їде до партнера через relay і вирівнює його сет', async () => {
+    // Попередня перевірка навмисно розвела машини: p1 застосував чужі значення
+    // локально, і p2 про них не знає -- бо вирівнювання не породжує подій
+    const headBefore = (relay.out.match(/#\d+ /g) || []).length;
+    const from = d2.out.length;
+    d2.stdin.write('pull p1\n');
+
+    await waitFor(d1, /p2 просить знімок стану/, 8000);
+    await waitFor(d2, /знімок p1 отримано/, 15000, from);
+    await waitFor(d2, /знімок застосовано: \d+ з \d+$/m, 15000, from);
+    if (/знімок застосовано.*помилок/.test(d2.out.slice(from))) {
+      throw new Error(d2.out.slice(from).split('\n').find((l) => /застосовано/.test(l)));
+    }
+
+    const stateFrom = d2.out.length;
+    l2.stdin.write('fullstate\n');
+    await waitFor(d2, /state: знімок \d+ зібрано/, 10000, stateFrom);
+    const after = JSON.parse(readFileSync(join(tmp, 'p2.e2e.state.json'), 'utf8'));
+
+    const master = after.aux_tracks.find((t) => t.kind === 'master');
+    if (master.mixer.volume !== 0.33) {
+      throw new Error(`p2 не підхопив гучність Master: ${master.mixer.volume}`);
+    }
+    if (!after.tracks.some((t) => t.name === 'Adopted')) {
+      throw new Error('p2 не підхопив назву треку зі знімка');
+    }
+
+    const headAfter = (relay.out.match(/#\d+ /g) || []).length;
+    if (headAfter !== headBefore) {
+      throw new Error(`обмін знімками породив ${headAfter - headBefore} подій у журналі`);
+    }
+  });
+
   await check('журнал: 47 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);

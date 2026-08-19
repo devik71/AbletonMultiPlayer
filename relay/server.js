@@ -842,7 +842,12 @@ wss.on('connection', (ws, req) => {
       // тупа труба між учасниками, нічого не комітить і нічого не пам'ятає.
       case 'files_manifest':
       case 'file_request':
-      case 'file_chunk': {
+      case 'file_chunk':
+      // Знімок стану ходить тією самою трубою, що й файли: relay його не
+      // журналює й не розуміє -- це не подія, а вирівнювання між учасниками.
+      case 'peer_state_request':
+      case 'peer_state_error':
+      case 'peer_state_chunk': {
         if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
         const relayed = { ...msg, from: client.author };
         // to -- адресат: чанк потрібен тому, хто просив, а не всій кімнаті.

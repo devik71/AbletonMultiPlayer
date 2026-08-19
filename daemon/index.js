@@ -142,6 +142,7 @@ const stateCollector = new StateCollector({
       return log(`state: не вдалось записати ${fullStatePath}: ${error.message}`);
     }
     lastState = state;
+    sendStateToPeer(state);
     const counts = summarize(state);
     log(`state: знімок ${info.id} зібрано, ${info.chars} символів, digest ${stateDigest(state)} — ` +
         `${counts.tracks} треків, ${counts.aux_tracks} Return/Master, ${counts.scenes} сцен, ` +
@@ -174,9 +175,77 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     log(`застосовую знімок ${path}`);
     return toBridge({ m: 'state_apply', path, id: applyId });
   }
+  if (cmd === 'pull') return pullFromPeer(rest[0]);
   if (cmd === 'refresh') return requestFullState();
-  log('команди: state | apply [файл] | refresh');
+  log('команди: state | apply [файл] | pull <author> | refresh');
 });
+
+// Обмін знімками між учасниками. Relay тут труба: знімок не подія, у журнал
+// він не потрапляє (docs/PROTOCOL.md, «Обмін знімками»).
+const PEER_CHUNK_CHARS = 200_000;
+const PULL_TIMEOUT_MS = 20_000;
+let peerStateFor = null;   // кому ми винні свій знімок
+let pullFrom = null;       // у кого просимо чужий
+let pullTimer = null;
+
+const peerStatePath = (author) => join(STATE_DIR, `${SLUG}.from-${author.replace(/[^\w.-]+/g, '_')}.json`);
+
+const peerCollector = new StateCollector({
+  log,
+  onComplete: (state, info) => {
+    const author = pullFrom;
+    if (!author) return;
+    clearTimeout(pullTimer);
+    pullFrom = null;
+    const path = peerStatePath(author);
+    try {
+      writeFileSync(path, JSON.stringify(state, null, 2));
+    } catch (error) {
+      return log(`знімок ${author} не записався: ${error.message}`);
+    }
+    const counts = summarize(state);
+    log(`знімок ${author} отримано (${info.chars} символів, digest ${stateDigest(state)}): ` +
+        `${counts.tracks} треків, ${counts.parameters} параметрів, ${counts.notes} нот`);
+    if (!bridgeInfo?.features?.includes('state_apply')) {
+      return log(`bridge не вміє state_apply — знімок лежить у ${path}`);
+    }
+    applyId += 1;
+    toBridge({ m: 'state_apply', path, id: applyId });
+  },
+});
+
+/** Наш знімок готовий -- віддаємо тому, хто просив. */
+function sendStateToPeer(state) {
+  const author = peerStateFor;
+  peerStateFor = null;
+  if (!author || !connected) return;
+  const blob = JSON.stringify(state);
+  const chunks = [];
+  for (let i = 0; i < blob.length; i += PEER_CHUNK_CHARS) {
+    chunks.push(blob.slice(i, i + PEER_CHUNK_CHARS));
+  }
+  if (!chunks.length) chunks.push('');
+  const id = Date.now() % 1_000_000;
+  chunks.forEach((data, seq) => ws.send(JSON.stringify({
+    m: 'peer_state_chunk', to: author, id, seq, total: chunks.length, chars: blob.length, data,
+  })));
+  log(`віддав знімок ${author}: ${blob.length} символів у ${chunks.length} чанках`);
+}
+
+function pullFromPeer(author) {
+  if (!connected) return log('немає звʼязку з relay');
+  if (!author) return log('кого просити? pull <author>');
+  peerCollector.reset();
+  pullFrom = author;
+  clearTimeout(pullTimer);
+  pullTimer = setTimeout(() => {
+    if (!pullFrom) return;
+    log(`${pullFrom} не віддав знімок за ${PULL_TIMEOUT_MS / 1000} с`);
+    pullFrom = null;
+  }, PULL_TIMEOUT_MS);
+  ws.send(JSON.stringify({ m: 'peer_state_request', to: author }));
+  log(`прошу знімок у ${author}`);
+}
 
 const PROJECT = arg('project', null);
 
@@ -372,6 +441,28 @@ function connect() {
         break;
       case 'lock_denied':
         locks.onDenied(msg);
+        break;
+      case 'peer_state_request':
+        // Партнер просить наш стан: беремо свіжий у bridge, а не лежалий
+        peerStateFor = msg.from;
+        if (!bridgeInfo?.features?.includes('full_state')) {
+          peerStateFor = null;
+          ws.send(JSON.stringify({ m: 'peer_state_error', to: msg.from, text: 'bridge не вміє віддати стан' }));
+          break;
+        }
+        log(`${msg.from} просить знімок стану`);
+        requestFullState();
+        break;
+      case 'peer_state_chunk':
+        // Незапитаний знімок ігноруємо: вирівнювання -- завжди свідома дія
+        if (msg.from === pullFrom) peerCollector.chunk(msg);
+        break;
+      case 'peer_state_error':
+        if (msg.from === pullFrom) {
+          clearTimeout(pullTimer);
+          pullFrom = null;
+          log(`${msg.from} не може віддати стан: ${msg.text}`);
+        }
         break;
       case 'compat':
         log(`НЕСУМІСНІСТЬ: ${msg.text}`);
