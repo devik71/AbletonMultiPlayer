@@ -73,6 +73,8 @@ STATE_CHUNKS_PER_TICK = 6
 STATE_APPLY_PER_TICK = 12
 STATE_APPLY_MAX_BYTES = 64 * 1024 * 1024
 NOTES_PER_REGION = 1024
+# Скільки різних прогалин несе звіт: далі йде лише лічильник.
+MISSING_LIMIT = 50
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -3246,7 +3248,8 @@ class AbletonMP(ControlSurface):
         ops = self._state_to_ops(state)
         self._apply_queue = ops
         self._apply_report = {"id": request_id, "total": len(ops), "ok": 0,
-                              "failed": 0, "errors": []}
+                              "skipped": 0, "failed": 0, "errors": [],
+                              "missing": {}, "missing_more": 0}
         self._log("state apply: %d ops queued" % len(ops))
         if not ops:
             self._finish_state_apply()
@@ -3260,6 +3263,11 @@ class AbletonMP(ControlSurface):
             if not self._apply_queue:
                 break
             etype, payload = self._apply_queue.pop(0)
+            gap = self._safe(self._op_gap, etype, payload)
+            if gap is not None:
+                self._apply_report["skipped"] += 1
+                self._note_gap(gap)
+                continue
             try:
                 self._apply(etype, payload, "state")
                 self._apply_report["ok"] += 1
@@ -3275,16 +3283,77 @@ class AbletonMP(ControlSurface):
         self._apply_report = None
         if report is None:
             return
-        self._log("state apply: done %d/%d (%d failed)"
-                  % (report["ok"], report["total"], report["failed"]))
+        missing = sorted(report["missing"].values(), key=lambda item: -item["count"])
+        self._log("state apply: done %d/%d (%d skipped, %d failed)"
+                  % (report["ok"], report["total"], report["skipped"], report["failed"]))
         self._link.send({
             "m": "state_applied",
             "id": report["id"],
             "total": report["total"],
             "ok": report["ok"],
+            "skipped": report["skipped"],
             "failed": report["failed"],
+            "missing": missing,
+            "missing_more": report["missing_more"],
             "errors": report["errors"],
         })
+
+    def _op_gap(self, etype, payload):
+        """Чого бракує для цієї операції. None -- усе на місці.
+
+        Перевірка окремою прохідкою навмисно: _apply на нерозвʼязану адресу
+        мовчки виходить (це tombstone-семантика журналу, і вона правильна), тож
+        без цього звіт рахував би пропущене як застосоване.
+        """
+        if etype in ("TempoSet", "TransportSet", "StopAllClips"):
+            return None
+
+        track = None
+        track_ref = payload.get("track")
+        if isinstance(track_ref, dict) and track_ref.get("id"):
+            track, _ref = self._resolve_device_track(track_ref)
+            if track is None:
+                return {"what": "track", "id": track_ref.get("id"),
+                        "kind": track_ref.get("kind")}
+
+        if etype == "DeviceParamSet":
+            device, parameter = self._resolve_device_parameter(
+                track, payload.get("chain_path"), payload.get("device"),
+                payload.get("parameter"))
+            display = (payload.get("device") or {}).get("class_display_name")
+            if device is None:
+                return {"what": "device", "track": self._safe_name(track), "device": display}
+            if parameter is None:
+                return {"what": "parameter", "track": self._safe_name(track),
+                        "device": display,
+                        "name": (payload.get("parameter") or {}).get("name")}
+            return None
+
+        scene_ref = payload.get("scene")
+        if isinstance(scene_ref, dict) and scene_ref.get("id"):
+            if self._resolve_scene(scene_ref) is None:
+                return {"what": "scene", "id": scene_ref.get("id")}
+            if etype in ("ClipCreate", "ClipNotesSet") or payload.get("object") == "clip":
+                _track, _scene, slot = self._resolve_clip_slot(payload, "state")
+                if slot is None:
+                    return {"what": "clip", "track": self._safe_name(track),
+                            "scene": scene_ref.get("id")}
+        return None
+
+    def _note_gap(self, gap):
+        """Однакові прогалини склеюються: 60 параметрів відсутнього девайса --
+        це один рядок звіту, а не шістдесят."""
+        report = self._apply_report
+        key = json.dumps(gap, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        known = report["missing"].get(key)
+        if known is None:
+            if len(report["missing"]) >= MISSING_LIMIT:
+                report["missing_more"] += 1
+                return
+            known = dict(gap)
+            known["count"] = 0
+            report["missing"][key] = known
+        known["count"] += 1
 
     def _state_to_ops(self, state):
         """Знімок -> послідовність звичайних подій.

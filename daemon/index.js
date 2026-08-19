@@ -131,6 +131,7 @@ const locks = new LockKeeper({
 // Повний стан сету: bridge шле його чанками, ми збираємо і кладемо на диск.
 // Це діагностика й основа для майбутнього застосування знімка -- у журнал
 // стан не потрапляє, бо це не подія.
+const missingPath = join(STATE_DIR, `${SLUG}.missing.json`);
 let lastState = null;  // останній зібраний знімок, для команд state/apply
 const fullStatePath = join(STATE_DIR, `${SLUG}.state.json`);
 const stateCollector = new StateCollector({
@@ -247,6 +248,38 @@ function pullFromPeer(author) {
   log(`прошу знімок у ${author}`);
 }
 
+/** Прогалина у структурі -- людським рядком, а не JSON-ом. */
+function describeGap(gap) {
+  const where = [gap.track, gap.device].filter(Boolean).join(' / ') || '?';
+  if (gap.what === 'track') return `трек ${gap.kind ? `${gap.kind}:` : ''}${gap.id} — такого немає`;
+  if (gap.what === 'scene') return `сцена ${gap.id} — такої немає`;
+  if (gap.what === 'device') return `${where} — немає девайса`;
+  if (gap.what === 'parameter') return `${where} — немає параметра ${gap.name}`;
+  if (gap.what === 'clip') return `${where} — немає слоту під кліп`;
+  return JSON.stringify(gap);
+}
+
+/** Звіт про застосування знімка: що не лягло і чому. */
+function reportApplied(msg) {
+  const missing = msg.missing || [];
+  const head = `знімок застосовано: ${msg.ok} з ${msg.total}` +
+    (msg.skipped ? `, ${msg.skipped} пропущено` : '') +
+    (msg.failed ? `, ${msg.failed} помилок` : '');
+  if (!missing.length) return log(head);
+
+  log(`${head}. Бракує ось чого:`);
+  for (const gap of missing.slice(0, 12)) {
+    log(`  · ${describeGap(gap)}${gap.count > 1 ? ` (${gap.count} значень)` : ''}`);
+  }
+  const rest = missing.length - Math.min(missing.length, 12) + (msg.missing_more || 0);
+  if (rest > 0) log(`  · ще ${rest} — повний список у ${missingPath}`);
+  try {
+    writeFileSync(missingPath, JSON.stringify({ at: Date.now() / 1000, missing }, null, 2));
+  } catch (error) {
+    log(`список прогалин не записався: ${error.message}`);
+  }
+}
+
 const PROJECT = arg('project', null);
 
 // ---------------------------------------------------------------------- UDP
@@ -306,15 +339,11 @@ udp.on('message', (buf) => {
     case 'event':
       submit(msg.type, msg.payload);
       break;
-    case 'state_applied': {
-      // Знімок застосовується мовчки: власні listeners заглушені, тож
-      // у журнал нічого не йде і партнер нічого не бачить. Це локальне
-      // вирівнювання, а не подія.
-      const errors = (msg.errors || []).slice(0, 3).join('; ');
-      log(`знімок застосовано: ${msg.ok} з ${msg.total}` +
-          (msg.failed ? `, ${msg.failed} помилок${errors ? ` (${errors})` : ''}` : ''));
+    case 'state_applied':
+      // Знімок застосовується мовчки: власні listeners заглушені, тож у журнал
+      // нічого не йде і партнер нічого не бачить. Це локальне вирівнювання.
+      reportApplied(msg);
       break;
-    }
     case 'state_chunk':
       stateCollector.chunk(msg);
       break;

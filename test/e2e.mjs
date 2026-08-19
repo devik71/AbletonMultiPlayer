@@ -559,6 +559,37 @@ try {
     }
   });
 
+  await check('знімок із чужою структурою каже, чого саме бракує', async () => {
+    // Так виглядає партнер, у якого інший набір девайсів: адреси є, обʼєктів немає
+    const source = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    source.tracks.push({
+      id: 'deadbeefcafe', idx: 9, name: 'Ghost', color: 0, kind: 'midi',
+      mixer: { volume: 0.5 }, devices: [], clips: [],
+    });
+    const victim = source.tracks[0];
+    victim.devices.push({
+      device: { class_name: 'Serum', class_display_name: 'Serum', ordinal: 0 },
+      parameters: [{ name: 'Cutoff', ordinal: 0, value: 0.4 }, { name: 'Res', ordinal: 0, value: 0.2 }],
+    });
+    victim.devices[0].parameters.push({ name: 'НемаТакого', ordinal: 0, value: 0.1 });
+    const foreign = join(tmp, 'gappy-state.json');
+    writeFileSync(foreign, JSON.stringify(source));
+
+    const from = d1.out.length;
+    d1.stdin.write(`apply ${foreign}\n`);
+    await waitFor(d1, /знімок застосовано: \d+ з \d+, \d+ пропущено\. Бракує ось чого:/, 15000, from);
+    const said = d1.out.slice(from);
+
+    if (!/трек deadbeefcafe — такого немає/.test(said)) throw new Error('не назвав відсутній трек');
+    if (!/Serum — немає девайса \(2 значень\)/.test(said)) throw new Error('не назвав відсутній девайс');
+    if (!/немає параметра НемаТакого/.test(said)) throw new Error('не назвав відсутній параметр');
+
+    const listed = JSON.parse(readFileSync(join(tmp, 'p1.e2e.missing.json'), 'utf8'));
+    if (!listed.missing.some((g) => g.what === 'device' && g.count === 2)) {
+      throw new Error('у файлі прогалин немає згорнутого девайса');
+    }
+  });
+
   await check('знімок їде до партнера через relay і вирівнює його сет', async () => {
     // Попередня перевірка навмисно розвела машини: p1 застосував чужі значення
     // локально, і p2 про них не знає -- бо вирівнювання не породжує подій

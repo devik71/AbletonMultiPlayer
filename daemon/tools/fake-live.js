@@ -447,6 +447,42 @@ setInterval(() => {
 }, 100).unref();
 
 
+// Дзеркало _op_gap: apply на нерозвʼязану адресу мовчки виходить, тож без
+// окремої перевірки звіт рахував би пропущене як застосоване.
+const MISSING_LIMIT = 50;
+
+function opGap(type, payload) {
+  if (['TempoSet', 'TransportSet', 'StopAllClips'].includes(type)) return null;
+
+  let track = null;
+  if (payload.track?.id) {
+    track = deviceTrackByRef(payload.track);
+    if (!track) return { what: 'track', id: payload.track.id, kind: payload.track.kind };
+  }
+
+  if (type === 'DeviceParamSet') {
+    const { device, parameter } = resolveDeviceParameter(
+      track, payload.chain_path, payload.device, payload.parameter);
+    const display = payload.device?.class_display_name;
+    if (!device) return { what: 'device', track: track?.name, device: display };
+    if (!parameter) {
+      return { what: 'parameter', track: track?.name, device: display, name: payload.parameter?.name };
+    }
+    return null;
+  }
+
+  if (payload.scene?.id) {
+    const sidx = sceneIdx(payload.scene.id);
+    if (sidx < 0) return { what: 'scene', id: payload.scene.id };
+    if (['ClipCreate', 'ClipNotesSet'].includes(type) || payload.object === 'clip') {
+      if (!track || sidx >= track.clips.length) {
+        return { what: 'clip', track: track?.name, scene: payload.scene.id };
+      }
+    }
+  }
+  return null;
+}
+
 function startStateApply(path, id) {
   let state;
   try {
@@ -455,8 +491,19 @@ function startStateApply(path, id) {
     return console.log(`state apply: не читається ${path}: ${error.message}`);
   }
   const ops = stateToOps(state);
-  const report = { m: 'state_applied', id, total: ops.length, ok: 0, failed: 0, errors: [] };
+  const report = { m: 'state_applied', id, total: ops.length, ok: 0, skipped: 0, failed: 0, errors: [] };
+  const missing = new Map();
+  let missingMore = 0;
   for (const [type, payload] of ops) {
+    const gap = opGap(type, payload);
+    if (gap) {
+      report.skipped += 1;
+      const key = JSON.stringify(gap);
+      if (missing.has(key)) missing.get(key).count += 1;
+      else if (missing.size < MISSING_LIMIT) missing.set(key, { ...gap, count: 1 });
+      else missingMore += 1;
+      continue;
+    }
     try {
       apply(type, payload, 'state');
       report.ok += 1;
@@ -465,7 +512,9 @@ function startStateApply(path, id) {
       if (report.errors.length < 20) report.errors.push(`${type}: ${error.message}`);
     }
   }
-  console.log(`state apply: ${report.ok} з ${report.total} (${report.failed} помилок)`);
+  report.missing = [...missing.values()].sort((a, b) => b.count - a.count);
+  report.missing_more = missingMore;
+  console.log(`state apply: ${report.ok} з ${report.total} (${report.skipped} пропущено, ${report.failed} помилок)`);
   send(report);
 }
 
