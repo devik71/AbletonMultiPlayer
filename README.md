@@ -47,7 +47,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python, у процесі Live)
 |---|---|
 | `remote-script/AbletonMP` | LOM-listeners → події; застосування чужих подій до LOM. Максимально тонкий: виняток тут може завалити Live |
 | `daemon` | UDP ⇄ WebSocket, реконект, буферизація, clock sync, синхронізація файлів |
-| `relay` | єдине джерело порядку: `global_seq`, hash-chain, журнал, broadcast |
+| `relay` | єдине джерело порядку: `global_seq`, hash-chain, журнал, broadcast, стиснення хвоста на join |
 
 Порядок подій визначає сервер-секвенсор, а не годинники машин. Стан проєкту —
 результат послідовного застосування журналу, а не «живий» стан якогось клієнта.
@@ -117,6 +117,12 @@ npm start
 після 45 с тиші (`MP_STALE_SEC`), тож гравець, у якого зник Wi-Fi, зникає
 з `peers` одразу, а не за системним таймаутом TCP. На `Ctrl+C` relay прощається
 з клієнтами штатно — вони йдуть у звичайний реконект.
+
+Хвіст журналу, який relay віддає гравцю на join, стискається: із серії подій на
+одну адресу (те саме положення фейдера, той самий параметр девайса, той самий
+регіон нот) доїжджає остання. Журнал на диску лишається повним, а `MP_COMPACT_JOIN=0`
+вимикає стиснення. Скільки подій зекономлено, видно в `/health`
+(`served_events`, `dropped_events`).
 
 ### 3. Daemon — на кожній машині
 
@@ -252,7 +258,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 6 hardening/recovery + 42 E2E-перевірки
+npm test                   # 6 hardening/recovery + 9 compact + 43 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 

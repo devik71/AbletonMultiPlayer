@@ -11,6 +11,7 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { compactTail } from './compact.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.MP_RELAY_PORT || 19870);
@@ -22,6 +23,9 @@ const MAX_WS_PAYLOAD = 2 * 1024 * 1024;
 // Пінг тримає з'єднання живим, тиша довша за STALE_SEC вважається смертю.
 const HEARTBEAT_SEC = Number(process.env.MP_HEARTBEAT_SEC || 15);
 const STALE_SEC = Number(process.env.MP_STALE_SEC || 45);
+// Хвіст на join стискається (compact.js). MP_COMPACT_JOIN=0 -- аварійний вимикач:
+// клієнт тоді отримує повну історію, як до появи стиснення.
+const COMPACT_JOIN = process.env.MP_COMPACT_JOIN !== '0';
 
 function validSessionName(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 128 &&
@@ -56,6 +60,8 @@ class Session {
     this.registry = null;  // payload першого RegistryInit; далі він незмінний
     this.seen = new Map(); // "author:lseq" -> commit для idempotent ack ре-сабмітів
     this.clients = new Set();
+    this.servedEvents = 0;
+    this.droppedEvents = 0;
     this.loadError = null;
     this.checkpointError = null;
     this.path = join(JOURNAL_DIR, `${name}.jsonl`);
@@ -282,6 +288,8 @@ class Session {
       peers: this.peers(),
       clients: this.onlineClients(),
       authors: this.authorStats(),
+      served_events: this.servedEvents,
+      dropped_events: this.droppedEvents,
       journal_error: this.loadError,
       checkpoint_error: this.checkpointError,
     };
@@ -426,9 +434,17 @@ wss.on('connection', (ws, req) => {
           peers: session.peers(),
           registry: session.registry,
         });
-        for (const ev of session.tailSince(Number(msg.since) || 0)) send({ m: 'commit', event: ev });
+        const since = Number(msg.since) || 0;
+        const tail = session.tailSince(since);
+        const served = COMPACT_JOIN ? compactTail(tail) : { events: tail, dropped: 0 };
+        session.servedEvents += served.events.length;
+        session.droppedEvents += served.dropped;
+        for (const ev of served.events) send({ m: 'commit', event: ev });
         session.broadcast({ m: 'peers', peers: session.peers() });
-        log(`[${session.name}] + ${client.author} (${session.clients.size} онлайн, since=${msg.since || 0})`);
+        const tailText = served.dropped
+          ? `хвіст ${tail.length} -> ${served.events.length}`
+          : `хвіст ${tail.length}`;
+        log(`[${session.name}] + ${client.author} (${session.clients.size} онлайн, since=${since}, ${tailText})`);
         break;
       }
 

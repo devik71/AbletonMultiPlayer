@@ -487,6 +487,7 @@ try {
     await waitFor(lOther, /реєстр прийнято/, 15000);
   });
 
+  let lLater = null;
   await check('хвіст журналу не втрачається, поки bridge мовчить', async () => {
     // daemon стартує в сесію з готовим журналом, а fake-live підіймається пізніше:
     // події мають дочекатись його, а не зникнути разом із просунутим lastGseq
@@ -498,9 +499,22 @@ try {
     ], { cwd: join(root, 'daemon') });
     await waitFor(dLater, /relay: head=/, 10000);
 
-    const lLater = mkLive(5, 19953, 19954);
+    lLater = mkLive(5, 19953, 19954);
     await waitFor(dLater, /застосовую \d+ відкладених подій/, 15000);
     await waitFor(lLater, /<- #\d+ TempoSet/, 10000);
+  });
+
+  await check('стиснутий хвіст доводить пізнього гравця до того ж стану', async () => {
+    // p4 приєднався з since=0, тож relay віддав йому весь журнал -- але вже
+    // без подій, які перекриті пізнішими (relay/compact.js)
+    await waitFor(relay, /\+ p4 .*хвіст \d+ -> \d+/, 5000);
+
+    const stateFrom = lLater.out.length;
+    lLater.stdin.write('state\n');
+    await waitFor(lLater, /"tempo": 128/, 10000, stateFrom);
+    if (!/"name": "Bass Lead"/.test(lLater.out.slice(stateFrom))) {
+      throw new Error('назва треку не доїхала стиснутим хвостом');
+    }
   });
 
   await check('подія на невідомий uuid відхиляється, а не застосовується не туди', async () => {
