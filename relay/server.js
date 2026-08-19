@@ -6,7 +6,8 @@
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
+  statSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +43,10 @@ const TOKEN = process.env.MP_RELAY_TOKEN || '';
 // звичайна робота (жест = сотні дрібних подій) його не бачила.
 const SUBMIT_RATE = Number(process.env.MP_SUBMIT_RATE || 100);
 const SUBMIT_BURST = Number(process.env.MP_SUBMIT_BURST || 300);
+// Порожня сесія тримає в памʼяті весь свій журнал і мапу дедуплікації. Після
+// такого простою вона нікому не потрібна: журнал лишається на диску, а наступний
+// join підніме її наново разом із перевіркою hash-chain.
+const SESSION_IDLE_SEC = Number(process.env.MP_SESSION_IDLE_SEC || 900);
 
 function tokenOk(given) {
   if (!TOKEN) return true;
@@ -95,6 +100,7 @@ class Session {
     this.seen = new Map(); // "author:lseq" -> commit для idempotent ack ре-сабмітів
     this.clients = new Set();
     this.locks = new Map(); // object -> {object, label, author, since, expires}
+    this.emptySince = null;
     this.servedEvents = 0;
     this.droppedEvents = 0;
     this.loadError = null;
@@ -420,6 +426,26 @@ class Session {
   }
 }
 
+/** Журнали на диску: сесія могла бути вивантажена з памʼяті, а історія лишилась. */
+function journalsOnDisk() {
+  try {
+    return readdirSync(JOURNAL_DIR)
+      .filter((name) => name.endsWith('.jsonl'))
+      .map((name) => {
+        const stat = statSync(join(JOURNAL_DIR, name));
+        return {
+          session: name.slice(0, -'.jsonl'.length),
+          bytes: stat.size,
+          updated_at: stat.mtimeMs / 1000,
+          in_memory: sessions.has(name.slice(0, -'.jsonl'.length)),
+        };
+      });
+  } catch (error) {
+    log(`не читається ${JOURNAL_DIR}: ${error.message}`);
+    return [];
+  }
+}
+
 const sessions = new Map();
 function getSession(name) {
   if (!sessions.has(name)) sessions.set(name, new Session(name));
@@ -447,6 +473,7 @@ const http = createServer((req, res) => {
       proto: PROTO,
       now: Date.now() / 1000,
       sessions: body,
+      journals: journalsOnDisk(),
     }, null, 2));
     return;
   }
@@ -482,11 +509,23 @@ const heartbeat = setInterval(() => {
 }, HEARTBEAT_SEC * 1000);
 
 // Окремий цикл від heartbeat: TTL лока міряється хвилинами, а не секундами,
-// і чистити його треба навіть у кімнаті, де всі мовчать.
-const lockSweep = setInterval(() => {
+// і чистити його треба навіть у кімнаті, де всі мовчать. Тут же вивантажуються
+// сесії, які давно спорожніли.
+const sweep = setInterval(() => {
   const now = Date.now() / 1000;
-  for (const session of sessions.values()) {
+  for (const [name, session] of sessions) {
     if (session.expireLocks(now)) session.broadcast({ m: 'locks', locks: session.lockList() });
+    if (session.clients.size) {
+      session.emptySince = null;
+      continue;
+    }
+    if (session.emptySince === null) {
+      session.emptySince = now;
+      continue;
+    }
+    if (now - session.emptySince < SESSION_IDLE_SEC) continue;
+    sessions.delete(name);
+    log(`[${name}] порожня ${Math.round(now - session.emptySince)} с — вивантажую з памʼяті`);
   }
 }, Math.max(1, Math.min(HEARTBEAT_SEC, 15)) * 1000);
 
@@ -746,7 +785,7 @@ function shutdown(signal) {
   shuttingDown = true;
   log(`${signal}: закриваю relay, head сесій уже в checkpoint`);
   clearInterval(heartbeat);
-  clearInterval(lockSweep);
+  clearInterval(sweep);
   for (const client of clients) {
     try { client.ws.close(1001, 'relay зупиняється'); } catch {}
   }

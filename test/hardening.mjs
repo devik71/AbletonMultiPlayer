@@ -513,3 +513,36 @@ test('файловий чанк іде адресату, а не всій кім
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('порожня сесія вивантажується з памʼяті, журнал і head лишаються', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-evict-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port, { MP_HEARTBEAT_SEC: '1', MP_SESSION_IDLE_SEC: '1' });
+  try {
+    await waitForOutput(relay, /relay слухає/);
+
+    const first = await relayClient(port, 'ephemeral', 'p1');
+    first.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 124 }, lseq: 1 } });
+    const commit = await first.take((m) => m.m === 'commit');
+    assert.equal(commit.event.gseq, 1);
+    first.ws.close();
+
+    await waitForOutput(relay, /ephemeral. порожня \d+ с/, 8000);
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+    assert.equal(health.sessions.some((s) => s.session === 'ephemeral'), false, 'сесія лишилась у памʼяті');
+    const onDisk = health.journals.find((j) => j.session === 'ephemeral');
+    assert.ok(onDisk && onDisk.bytes > 0, 'журнал зник із диска');
+    assert.equal(onDisk.in_memory, false);
+
+    // Наступний join піднімає сесію з диска: gseq триває, дедуплікація ціла.
+    const second = await relayClient(port, 'ephemeral', 'p2');
+    second.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 126 }, lseq: 1 } });
+    const next = await second.take((m) => m.m === 'commit' && m.event.author === 'p2');
+    assert.equal(next.event.gseq, 2);
+    assert.equal(next.event.prev_hash, commit.event.hash);
+    second.ws.close();
+  } finally {
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

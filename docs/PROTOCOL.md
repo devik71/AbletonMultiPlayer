@@ -325,6 +325,13 @@ Live/script/features, статистику дій по author і breakdown за 
 endpoint читає Max for Live device `AbletonMP Multiplayer Status.maxpat`; він не
 змінює журнал і не є частиною realtime-протоколу синхронізації.
 
+Сесія, у якій нікого немає довше за `MP_SESSION_IDLE_SEC` (900 с), вивантажується
+з памʼяті разом зі своїм журналом і мапою дедуплікації. Наступний `join` підіймає
+її з диска — з повною перевіркою hash-chain, як при старті relay. Тому в
+`/health` є ще й `journals`: сесії, що лежать на диску, з розміром і ознакою
+`in_memory`. Лічильники `served_events`/`dropped_events` при вивантаженні
+обнуляються — вони про роботу процесу, а не про історію сесії.
+
 ## 4. Типи подій (фаза 1)
 
 | Type | Payload | Apply у LOM |

@@ -129,6 +129,10 @@ MP_RELAY_TOKEN=довгий-випадковий-рядок npm start
 node index.js --author p1 --session Untitled --relay ws://127.0.0.1:19870 --token довгий-випадковий-рядок
 ```
 
+Сесія без жодного гравця довше за `MP_SESSION_IDLE_SEC` (900 с) вивантажується
+з памʼяті; журнал лишається на диску, і наступний join підіймає її назад.
+Список журналів на диску видно в `/health` полем `journals`.
+
 Темп подій обмежений: `MP_SUBMIT_RATE` подій/с (100) зі сплеском `MP_SUBMIT_BURST`
 (300) на з'єднання. Це страховка від клієнта, що зациклився; відхилена подія не
 губиться — daemon тримає її в буфері й повторює через секунду.
@@ -275,7 +279,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 25 unit/hardening + 44 E2E-перевірки
+npm test                   # 26 unit/hardening + 44 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
