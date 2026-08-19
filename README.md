@@ -109,7 +109,8 @@ npm start
 ```
 
 За замовчуванням він слухає `ws://0.0.0.0:19870`. Стан сесій:
-`http://<relay-host>:19870/health`. Endpoint показує кімнати, head журналу,
+`http://<relay-host>:19870/health` (під токеном, якщо relay його вимагає).
+Endpoint показує кімнати, head журналу,
 онлайн-гравців, їхні IP, Live/script версії, кількість дій по авторах і breakdown
 за типами подій. Журнали лежать у `relay/journals/<session>.jsonl`.
 
@@ -132,6 +133,10 @@ node index.js --author p1 --session Untitled --relay ws://127.0.0.1:19870 --toke
 Сесія без жодного гравця довше за `MP_SESSION_IDLE_SEC` (900 с) вивантажується
 з памʼяті; журнал лишається на диску, і наступний join підіймає її назад.
 Список журналів на диску видно в `/health` полем `journals`.
+
+З `MP_FSYNC=1` relay чекає диска на кожній події -- страховка від зникнення
+живлення ціною мілісекунд на подію. Цілісність сесії будь-коли перевіряється
+окремо: `node relay/verify.js <session>`.
 
 Темп подій обмежений: `MP_SUBMIT_RATE` подій/с (100) зі сплеском `MP_SUBMIT_BURST`
 (300) на з'єднання. Це страховка від клієнта, що зациклився; відхилена подія не
@@ -281,7 +286,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 28 unit/hardening + 44 E2E-перевірки
+npm test                   # 31 unit/hardening + 44 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 

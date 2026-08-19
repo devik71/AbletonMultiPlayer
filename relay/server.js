@@ -6,8 +6,8 @@
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
-  statSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync,
+  readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +53,13 @@ const SUBMIT_BURST = Number(process.env.MP_SUBMIT_BURST || 300);
 // такого простою вона нікому не потрібна: журнал лишається на диску, а наступний
 // join підніме її наново разом із перевіркою hash-chain.
 const SESSION_IDLE_SEC = Number(process.env.MP_SESSION_IDLE_SEC || 900);
+// Довговічність запису. Без fsync commit, який клієнт уже побачив, може зникнути
+// при зникненні живлення: appendFileSync повертається, коли дані в кеші ОС, а не
+// на диску. Вмикається окремо, бо коштує мілісекунди на кожну подію.
+const FSYNC = process.env.MP_FSYNC === '1';
+// Клієнт, який не читає (заснув ноутбук, зависла машина), інакше роздуває буфер
+// сокета файловими чанками, поки heartbeat не помітить тишу.
+const MAX_BUFFERED = Number(process.env.MP_MAX_BUFFERED || 16 * 1024 * 1024);
 
 function tokenOk(given) {
   if (!TOKEN) return true;
@@ -216,6 +223,21 @@ class Session {
         (compacted ? `, стиснутий (архів до #${this.archivedThrough})` : ''));
   }
 
+  /** Запис події в журнал; із MP_FSYNC=1 -- аж до диска. */
+  #append(line) {
+    if (!FSYNC) {
+      appendFileSync(this.path, line);
+      return;
+    }
+    const fd = openSync(this.path, 'a');
+    try {
+      writeSync(fd, line);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   #rememberLseq(author, lseq) {
     const known = this.lastLseq.get(author);
     if (known === undefined || lseq > known) this.lastLseq.set(author, lseq);
@@ -314,7 +336,7 @@ class Session {
 
     // Commit існує лише після успішного запису. Інакше клієнти побачили б подію,
     // якої вже не буде в журналі після рестарту relay.
-    appendFileSync(this.path, JSON.stringify(ev) + '\n');
+    this.#append(JSON.stringify(ev) + '\n');
     this.journal.push(ev);
     this.seen.set(dedupeKey, ev);
     if (type === 'RegistryInit') this.registry = ev.payload;
@@ -528,9 +550,8 @@ class Session {
     const raw = JSON.stringify(msg);
     let delivered = 0;
     for (const c of this.clients) {
-      if (c.author !== author || c.ws.readyState !== 1) continue;
-      c.ws.send(raw);
-      delivered += 1;
+      if (c.author !== author) continue;
+      if (deliver(c, raw)) delivered += 1;
     }
     return delivered;
   }
@@ -539,7 +560,7 @@ class Session {
     const raw = JSON.stringify(msg);
     for (const c of this.clients) {
       if (c === except) continue;
-      if (c.ws.readyState === 1) c.ws.send(raw);
+      deliver(c, raw);
     }
   }
 }
@@ -579,8 +600,39 @@ function log(...args) {
 
 mkdirSync(JOURNAL_DIR, { recursive: true });
 
+/** Відправка з контролем буфера: хто не читає, той більше не учасник. */
+function deliver(client, raw) {
+  const { ws } = client;
+  if (ws.readyState !== 1) return false;
+  if (ws.bufferedAmount > MAX_BUFFERED) {
+    log(`${client.author || '(без join)'} не встигає читати: ${ws.bufferedAmount} Б у буфері — розриваю`);
+    ws.terminate();
+    return false;
+  }
+  ws.send(raw);
+  return true;
+}
+
+/** /health показує IP, авторів і статистику -- за наявності токена він теж
+ *  під токеном. Приймається і заголовок, і ?token= для браузера й M4L. */
+function healthAllowed(req) {
+  if (!TOKEN) return true;
+  const header = req.headers['x-relay-token'];
+  if (typeof header === 'string' && tokenOk(header)) return true;
+  try {
+    return tokenOk(new URL(req.url, 'http://relay').searchParams.get('token') ?? '');
+  } catch {
+    return false;
+  }
+}
+
 const http = createServer((req, res) => {
-  if (req.url === '/health') {
+  if (req.url === '/health' || req.url.startsWith('/health?')) {
+    if (!healthAllowed(req)) {
+      res.writeHead(401, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+      res.end(JSON.stringify({ ok: false, error: 'потрібен токен relay' }));
+      return;
+    }
     const body = [...sessions.values()].map((s) => s.status());
     res.writeHead(200, {
       'content-type': 'application/json',

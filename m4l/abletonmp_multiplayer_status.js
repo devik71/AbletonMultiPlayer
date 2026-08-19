@@ -4,6 +4,7 @@ outlets = 3;
 
 var relayUrl = "http://127.0.0.1:19870";
 var sessionFilter = "";
+var relayToken = "";
 var pollMs = 2000;
 var timer = null;
 var busy = 0;
@@ -19,6 +20,14 @@ function seturl() {
         relayUrl = "http://127.0.0.1:19870";
     }
     setstatus("Relay " + relayUrl);
+    refresh();
+}
+
+function token() {
+    // Потрібен лише якщо relay піднятий із MP_RELAY_TOKEN: без нього /health
+    // віддає 401. Порожній рядок прибирає токен назад.
+    relayToken = trim(arrayfromargs(arguments).join(" "));
+    setstatus(relayToken ? "Token set" : "Token cleared");
     refresh();
 }
 
@@ -70,6 +79,11 @@ function refresh() {
                 return;
             }
             busy = 0;
+            if (xhr.status === 401) {
+                setstatus("Token required");
+                setbody("relay піднятий із MP_RELAY_TOKEN: надішли той самий рядок повідомленням token");
+                return;
+            }
             if (xhr.status < 200 || xhr.status >= 300) {
                 setstatus("Relay offline");
                 setbody("HTTP " + xhr.status + "\n" + (xhr.responseText || ""));
@@ -85,7 +99,11 @@ function refresh() {
             }
             render(data);
         };
-        xhr.open("GET", relayUrl + "/health", true);
+        var url = relayUrl + "/health";
+        if (relayToken) {
+            url += "?token=" + encodeURIComponent(relayToken);
+        }
+        xhr.open("GET", url, true);
         xhr.send();
     } catch (e) {
         busy = 0;

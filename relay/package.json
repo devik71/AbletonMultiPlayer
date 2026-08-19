@@ -6,7 +6,8 @@
   "description": "Sequencer/relay: єдине джерело порядку подій",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "verify": "node verify.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -663,3 +663,105 @@ test('зниклий рядок у стиснутому журналі помі�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('verify.js підтверджує цілісність і ловить підміну в архіві', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-verify-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port, { MP_COMPACT_AT: '10' });
+  const open = [];
+
+  const verify = (args = []) => new Promise((resolve) => {
+    const proc = spawn(process.execPath, [join(root, 'relay/verify.js'), 'audit', '--dir', dir, ...args],
+      { cwd: join(root, 'relay') });
+    let out = '';
+    proc.stdout.on('data', (b) => { out += b.toString(); });
+    proc.stderr.on('data', (b) => { out += b.toString(); });
+    proc.on('close', (code) => resolve({ code, out }));
+  });
+
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    const p1 = await relayClient(port, 'audit', 'p1');
+    open.push(p1);
+    for (let lseq = 1; lseq <= 30; lseq += 1) {
+      p1.send({
+        m: 'submit',
+        event: { type: 'MixerSet', payload: { track: { id: 't1' }, param: 'volume', value: lseq / 100 }, lseq },
+      });
+    }
+    await p1.take((m) => m.m === 'commit' && m.event.gseq === 30, 8000);
+    await waitForOutput(relay, /журнал стиснуто/, 8000);
+    for (const client of open.splice(0)) client.ws.close();
+    relay.kill();
+    await new Promise((resolve) => relay.once('exit', resolve));
+
+    const ok = await verify();
+    assert.equal(ok.code, 0, ok.out);
+    assert.match(ok.out, /цілісність підтверджена/);
+    assert.match(ok.out, /стиснутий/);
+
+    // Підміна значення в холодному архіві: подія перестає збігатися з хешем
+    const archivePath = join(dir, 'audit.archive.jsonl');
+    const cold = readFileSync(archivePath, 'utf8').split('\n').filter(Boolean);
+    const forged = JSON.parse(cold[4]);
+    forged.payload.value = 0.999;
+    cold[4] = JSON.stringify(forged);
+    writeFileSync(archivePath, cold.join('\n') + '\n');
+
+    const broken = await verify();
+    assert.equal(broken.code, 1);
+    assert.match(broken.out, /не збігається зі своїм хешем/);
+  } finally {
+    for (const client of open) client.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('/health під токеном не віддає нічого без токена', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-health-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port, { MP_RELAY_TOKEN: 'sekret' });
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    const bare = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(bare.status, 401);
+
+    const wrong = await fetch(`http://127.0.0.1:${port}/health?token=inshyi`);
+    assert.equal(wrong.status, 401);
+
+    const byQuery = await fetch(`http://127.0.0.1:${port}/health?token=sekret`);
+    assert.equal(byQuery.status, 200);
+    assert.equal((await byQuery.json()).ok, true);
+
+    const byHeader = await fetch(`http://127.0.0.1:${port}/health`, { headers: { 'x-relay-token': 'sekret' } });
+    assert.equal(byHeader.status, 200);
+  } finally {
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MP_FSYNC=1 не змінює вміст журналу, лише шлях запису', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-fsync-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port, { MP_FSYNC: '1' });
+  let p1 = null;
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    p1 = await relayClient(port, 'durable', 'p1');
+    p1.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 128 }, lseq: 1 } });
+    p1.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 129 }, lseq: 2 } });
+    const second = await p1.take((m) => m.m === 'commit' && m.event.gseq === 2);
+
+    const lines = readFileSync(join(dir, 'durable.jsonl'), 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines.length, 2);
+    const written = JSON.parse(lines[1]);
+    assert.deepEqual(written, second.event, 'подія на диску має збігатись із розісланою');
+    assert.equal(written.prev_hash, JSON.parse(lines[0]).hash);
+  } finally {
+    if (p1) p1.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
