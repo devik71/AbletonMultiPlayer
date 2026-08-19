@@ -4,7 +4,7 @@
 // монотонний global_seq, зшиває їх у hash-chain, пише в журнал, роздає всім.
 
 import { createServer } from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -33,6 +33,33 @@ const COMPACT_JOIN = process.env.MP_COMPACT_JOIN !== '0';
 const LOCK_TTL_SEC = Number(process.env.MP_LOCK_TTL_SEC || 300);
 const LOCK_TTL_MAX = 900;
 const LOCKS_PER_AUTHOR = 64;
+
+// Токен кімнати. Порожній MP_RELAY_TOKEN -- відкритий relay, як було досі:
+// у домашній мережі це нормально, а от у спільному Wi-Fi чи через тунель
+// будь-хто інакше може зайти в сесію і писати в журнал.
+const TOKEN = process.env.MP_RELAY_TOKEN || '';
+// Захист журналу від клієнта, що зациклився: ліміт великий настільки, щоб
+// звичайна робота (жест = сотні дрібних подій) його не бачила.
+const SUBMIT_RATE = Number(process.env.MP_SUBMIT_RATE || 100);
+const SUBMIT_BURST = Number(process.env.MP_SUBMIT_BURST || 300);
+
+function tokenOk(given) {
+  if (!TOKEN) return true;
+  // Порівнюємо хеші: однакова довжина для timingSafeEqual і жодного
+  // натяку на довжину справжнього токена.
+  const mine = createHash('sha256').update(TOKEN).digest();
+  const theirs = createHash('sha256').update(String(given ?? '')).digest();
+  return timingSafeEqual(mine, theirs);
+}
+
+/** Token bucket на зʼєднання: сплеск дозволений, усталений темп -- ні. */
+function allowSubmit(client, now) {
+  client.budget = Math.min(SUBMIT_BURST, client.budget + (now - client.refilledAt) * SUBMIT_RATE);
+  client.refilledAt = now;
+  if (client.budget < 1) return false;
+  client.budget -= 1;
+  return true;
+}
 
 function validSessionName(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 128 &&
@@ -372,6 +399,18 @@ class Session {
     };
   }
 
+  /** Адресна доставка: файлові чанки не потрібні всій кімнаті. */
+  sendTo(author, msg) {
+    const raw = JSON.stringify(msg);
+    let delivered = 0;
+    for (const c of this.clients) {
+      if (c.author !== author || c.ws.readyState !== 1) continue;
+      c.ws.send(raw);
+      delivered += 1;
+    }
+    return delivered;
+  }
+
   broadcast(msg, except = null) {
     const raw = JSON.stringify(msg);
     for (const c of this.clients) {
@@ -463,6 +502,10 @@ wss.on('connection', (ws, req) => {
     port: socket.remotePort ?? null,
     connectedAt: Date.now() / 1000,
     lastSeen: Date.now() / 1000,
+    budget: SUBMIT_BURST,
+    refilledAt: Date.now() / 1000,
+    limitedEvents: 0,
+    limitedLoggedAt: 0,
     info: null,
   };
   clients.add(client);
@@ -493,6 +536,11 @@ wss.on('connection', (ws, req) => {
         }
         if (msg.proto !== PROTO) {
           send({ m: 'error', code: 'proto_mismatch', text: `relay говорить proto ${PROTO}` });
+          return ws.close();
+        }
+        if (!tokenOk(msg.token)) {
+          send({ m: 'error', code: 'bad_token', text: 'потрібен токен relay' });
+          log(`join відхилено: невірний токен з ${client.ip}`);
           return ws.close();
         }
         const author = String(msg.author ?? '');
@@ -537,6 +585,18 @@ wss.on('connection', (ws, req) => {
 
       case 'submit': {
         if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
+        if (!allowSubmit(client, t1)) {
+          client.limitedEvents += 1;
+          // Один рядок на сплеск, а не на кожну подію: інакше лог сам стане
+          // другим потоком навантаження.
+          if (t1 - client.limitedLoggedAt > 5) {
+            client.limitedLoggedAt = t1;
+            log(`[${client.session.name}] ${client.author} перевищив ${SUBMIT_RATE} подій/с ` +
+                `(відхилено ${client.limitedEvents})`);
+          }
+          // Подія не втрачається: у daemon вона лишається в outbox до commit.
+          return send({ m: 'error', code: 'rate_limited', text: `не більше ${SUBMIT_RATE} подій/с` });
+        }
         const e = msg.event || {};
         if (typeof e.type !== 'string' || !e.type || e.type.length > 64 ||
             !Number.isSafeInteger(e.lseq) || e.lseq < 0) {
@@ -569,7 +629,11 @@ wss.on('connection', (ws, req) => {
       case 'file_request':
       case 'file_chunk': {
         if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
-        client.session.broadcast({ ...msg, from: client.author }, client);
+        const relayed = { ...msg, from: client.author };
+        // to -- адресат: чанк потрібен тому, хто просив, а не всій кімнаті.
+        // Без to (старий клієнт) лишається broadcast, як було.
+        if (typeof msg.to === 'string' && msg.to) client.session.sendTo(msg.to, relayed);
+        else client.session.broadcast(relayed, client);
         break;
       }
 

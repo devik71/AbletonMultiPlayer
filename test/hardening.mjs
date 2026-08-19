@@ -305,7 +305,7 @@ test('relay віддає features і прибирає мовчазного кл�
 
 // Клієнт з чергою: локи прилітають broadcast-ом, тож чекати треба конкретне
 // повідомлення, а не наступне.
-function relayClient(port, session, author) {
+function relayClient(port, session, author, token) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   const queue = [];
   let waiters = [];
@@ -313,6 +313,7 @@ function relayClient(port, session, author) {
     ws,
     send: (msg) => ws.send(JSON.stringify(msg)),
     drain: () => { queue.length = 0; },
+    all: () => [...queue],
     take(pred, ms = 5000) {
       return new Promise((resolve, reject) => {
         const scan = () => {
@@ -339,7 +340,7 @@ function relayClient(port, session, author) {
   return new Promise((resolve, reject) => {
     ws.on('error', reject);
     ws.on('open', () => {
-      client.send({ m: 'join', session, author, since: 0, proto: 1 });
+      client.send({ m: 'join', session, author, since: 0, proto: 1, token });
       client.take((m) => m.m === 'welcome').then(() => resolve(client), reject);
     });
   });
@@ -411,6 +412,103 @@ test('relay арбітрує локи: чужий не візьме, свій з
   } finally {
     if (p1) p1.ws.close();
     if (p2) p2.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function spawnRelay(dir, port, env = {}) {
+  const relay = spawn(process.execPath, [join(root, 'relay/server.js')], {
+    cwd: join(root, 'relay'),
+    env: { ...process.env, MP_RELAY_PORT: String(port), MP_JOURNAL_DIR: dir, ...env },
+  });
+  relay.out = '';
+  relay.stdout.on('data', (b) => { relay.out += b.toString(); });
+  relay.stderr.on('data', (b) => { relay.out += b.toString(); });
+  return relay;
+}
+
+test('relay з токеном пускає лише своїх', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-token-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port, { MP_RELAY_TOKEN: 'sekret' });
+  let allowed = null;
+  try {
+    await waitForOutput(relay, /relay слухає/);
+
+    const bare = await exchange(port, { m: 'join', session: 'guarded', author: 'p1', since: 0, proto: 1 });
+    assert.equal(bare.error.code, 'bad_token');
+    const wrong = await exchange(port,
+      { m: 'join', session: 'guarded', author: 'p1', since: 0, proto: 1, token: 'inshyi' });
+    assert.equal(wrong.error.code, 'bad_token');
+
+    allowed = await relayClient(port, 'guarded', 'p1', 'sekret');
+    assert.equal(allowed.all().length, 0, 'після welcome більше нічого не прилетіло');
+    assert.match(relay.out, /join відхилено: невірний токен/);
+    assert.equal(/sekret/.test(relay.out), false, 'токен не має світитись у лозі');
+  } finally {
+    if (allowed) allowed.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relay гальмує флуд, але подія не губиться', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-flood-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port, { MP_SUBMIT_RATE: '5', MP_SUBMIT_BURST: '5' });
+  let p1 = null;
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    p1 = await relayClient(port, 'flood', 'p1');
+
+    for (let lseq = 1; lseq <= 20; lseq += 1) {
+      p1.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 100 + lseq }, lseq } });
+    }
+    const limited = await p1.take((m) => m.m === 'error' && m.code === 'rate_limited');
+    assert.match(limited.text, /5 подій\/с/);
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const lines = readFileSync(join(dir, 'flood.jsonl'), 'utf8').split('\n').filter(Boolean);
+    assert.ok(lines.length >= 5 && lines.length <= 7, `у журналі ${lines.length} подій замість ~5`);
+
+    // Відхилена подія не вважається побаченою: після паузи вона проходить
+    // тим самим lseq, а не залипає як дублікат.
+    p1.drain();
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    p1.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 200 }, lseq: 20 } });
+    const commit = await p1.take((m) => m.m === 'commit' && m.event.lseq === 20);
+    assert.equal(commit.event.payload.bpm, 200);
+  } finally {
+    if (p1) p1.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('файловий чанк іде адресату, а не всій кімнаті', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-files-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port);
+  const room = [];
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    for (const author of ['a', 'b', 'c']) room.push(await relayClient(port, 'files', author, undefined));
+    const [a, b, c] = room;
+    b.drain();
+    c.drain();
+
+    a.send({ m: 'file_chunk', to: 'b', path: 'Samples/kick.wav', seq: 0, total: 1, data: 'AA==' });
+    // Маніфест адресата не має -- він лишається broadcast-ом і доїде до всіх.
+    a.send({ m: 'files_manifest', files: [{ path: 'Samples/kick.wav', size: 1, hash: 'ab' }] });
+
+    const chunk = await b.take((m) => m.m === 'file_chunk');
+    assert.equal(chunk.from, 'a');
+    const manifest = await c.take((m) => m.m === 'files_manifest');
+    assert.equal(manifest.from, 'a');
+    assert.equal(c.all().some((m) => m.m === 'file_chunk'), false, 'чужий чанк долетів до третього');
+  } finally {
+    for (const client of room) client.ws.close();
     relay.kill();
     rmSync(dir, { recursive: true, force: true });
   }

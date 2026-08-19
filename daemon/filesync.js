@@ -165,7 +165,7 @@ export class FileSync {
   }
 
   /** Партнер розповів, що має. Просимо те, чого бракує. */
-  onManifest(files) {
+  onManifest(files, from = null) {
     if (!this.root) return;
     const missing = [];
     for (const f of files || []) {
@@ -183,12 +183,13 @@ export class FileSync {
     this.log(`filesync: бракує ${missing.length} файлів, запитую`);
     for (const expected of missing) {
       this.wanted.set(expected.path, expected);
-      this.send({ m: 'file_request', path: expected.path });
+      // to -- той, хто оголосив маніфест: решті кімнати запит не потрібен
+      this.send({ m: 'file_request', path: expected.path, to: from ?? undefined });
     }
   }
 
   /** Партнер попросив файл -- шлемо чанками. */
-  onRequest(path) {
+  onRequest(path, from = null) {
     path = safeRelPath(path);
     if (!this.root || !path || !this.manifest.has(path)) return;
     const full = fullInside(this.root, path);
@@ -209,6 +210,7 @@ export class FileSync {
     for (let i = 0; i < total; i++) {
       this.send({
         m: 'file_chunk',
+        to: from ?? undefined,
         path,
         seq: i,
         total,

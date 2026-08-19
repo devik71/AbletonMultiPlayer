@@ -27,6 +27,8 @@ const RELAY = arg('relay', 'ws://127.0.0.1:19870');
 const PORT_IN = Number(arg('udp-in', 19845)); // сюди пише bridge
 const PORT_OUT = Number(arg('udp-out', 19846)); // сюди слухає bridge
 const STATE_DIR = arg('state-dir', join(__dirname, 'state'));
+// Порожній токен -- відкритий relay (так само, як у нього самого за замовчуванням)
+const TOKEN = arg('token', process.env.MP_RELAY_TOKEN || '');
 
 const PROTO = 1;
 const RECONNECT_MIN = 500;
@@ -241,7 +243,9 @@ function connect() {
   ws.on('open', () => {
     connected = true;
     backoff = RECONNECT_MIN;
-    ws.send(JSON.stringify({ m: 'join', session: SESSION, author: AUTHOR, since: state.lastGseq, proto: PROTO }));
+    ws.send(JSON.stringify({
+      m: 'join', session: SESSION, author: AUTHOR, since: state.lastGseq, proto: PROTO, token: TOKEN,
+    }));
   });
 
   ws.on('message', (raw) => {
@@ -279,10 +283,10 @@ function connect() {
         break;
       }
       case 'files_manifest':
-        filesync.onManifest(msg.files);
+        filesync.onManifest(msg.files, msg.from);
         break;
       case 'file_request':
-        filesync.onRequest(msg.path);
+        filesync.onRequest(msg.path, msg.from);
         break;
       case 'file_chunk':
         filesync.onChunk(msg);
@@ -298,6 +302,10 @@ function connect() {
         break;
       case 'error':
         log(`relay error [${msg.code}]: ${msg.text}`);
+        if (msg.code === 'bad_token') log('перевір --token (або MP_RELAY_TOKEN) -- relay захищений');
+        // Подія лишилась в outbox: relay її не закомітив, тож просто пробуємо
+        // ще раз трохи пізніше, а не втрачаємо.
+        if (msg.code === 'rate_limited') scheduleFlush();
         break;
     }
   });
@@ -305,6 +313,10 @@ function connect() {
   ws.on('close', () => {
     connected = false;
     locks.reset();
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
     if (clockTimer) clearInterval(clockTimer);
     log(`звʼязок з relay втрачено; локальна робота триває, буфер: ${outbox.length}`);
     setTimeout(connect, backoff);
@@ -406,6 +418,17 @@ function submit(type, payload) {
   saveOutbox();
   if (connected) flushOutbox();
   else log(`офлайн, у буфер: ${type} (lseq=${event.lseq})`);
+}
+
+/** Повторний flush після rate_limited: outbox цілий, потрібна лише пауза. */
+let flushTimer = null;
+function scheduleFlush(ms = 1000) {
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushOutbox();
+  }, ms);
+  if (flushTimer.unref) flushTimer.unref();
 }
 
 function flushOutbox() {

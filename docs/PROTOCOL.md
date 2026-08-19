@@ -58,7 +58,7 @@ Daemon спочатку персистить чужий commit у `<author>.<ses
 ### Client → Relay
 
 ```jsonc
-{"m":"join","session":"default","author":"p1","since":0,"proto":1}
+{"m":"join","session":"default","author":"p1","since":0,"proto":1,"token":"…"}
 {"m":"submit","event":{"type":"TempoSet","payload":{"bpm":128},"author":"p1","lseq":7,"ts":1723000000.0}}
 {"m":"ping","t0":1723000000.0}
 {"m":"lock","object":"track:8fa1…","label":"Bass","ttl":30}
@@ -88,6 +88,33 @@ Daemon спочатку персистить чужий commit у `<author>.<ses
 offset = ((t1 - t0) + (t2 - t3)) / 2
 rtt    =  (t3 - t0) - (t2 - t1)
 ```
+
+### Токен і темп подій
+
+`MP_RELAY_TOKEN` на relay вмикає перевірку токена в `join`; daemon передає його
+через `--token` або ту саму змінну оточення. Порожній токен -- відкритий relay,
+як було досі: у домашній мережі це нормально, а в спільному Wi-Fi чи через
+тунель будь-хто інакше може зайти в сесію і писати в журнал. Токени
+порівнюються за SHA-256 через `timingSafeEqual` і не потрапляють у лог.
+
+```jsonc
+{"m":"join","session":"default","author":"p1","since":0,"proto":1,"token":"…"}
+{"m":"error","code":"bad_token","text":"потрібен токен relay"}
+```
+
+Кожне зʼєднання має token bucket на `submit`: `MP_SUBMIT_RATE` подій/с
+(100 за замовчуванням) зі сплеском `MP_SUBMIT_BURST` (300). Це захист журналу
+від клієнта, що зациклився, -- звичайна робота цих меж не бачить, бо навіть
+довгий жест дає сотні подій за секунди, а не тисячі за мить.
+
+```jsonc
+{"m":"error","code":"rate_limited","text":"не більше 100 подій/с"}
+```
+
+Відхилена подія **не втрачається і не вважається побаченою**: relay її не
+комітить і не запамʼятовує пару `(author, lseq)`, а daemon тримає її в outbox
+і повторює flush через секунду. Тому після паузи вона проходить тим самим
+`lseq`, а не залипає як дублікат.
 
 ### Heartbeat і мертві зʼєднання
 
@@ -168,11 +195,13 @@ close замість обриву — далі звичайний реконек
 
 ```jsonc
 {"m":"files_manifest","files":[{"path":"Samples/Imported/kick.wav","size":40312,"hash":"a1b2…"}]}
-{"m":"file_request","path":"Samples/Imported/kick.wav"}
-{"m":"file_chunk","path":"…","seq":0,"total":3,"data":"<base64>"}
+{"m":"file_request","path":"Samples/Imported/kick.wav","to":"p2"}
+{"m":"file_chunk","to":"p1","path":"…","seq":0,"total":3,"data":"<base64>"}
 ```
 
-Relay додає до пересланого `from: <author>`.
+Relay додає до пересланого `from: <author>`. Якщо в повідомленні є `to`, воно йде
+тільки цьому учаснику: маніфест потрібен усій кімнаті, а запит і чанки -- ні.
+Повідомлення без `to` (старий клієнт) і далі йде broadcast-ом.
 
 ### Що синхронізується і чому саме так
 
