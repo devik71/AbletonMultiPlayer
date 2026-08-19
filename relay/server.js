@@ -26,6 +26,13 @@ const STALE_SEC = Number(process.env.MP_STALE_SEC || 45);
 // Хвіст на join стискається (compact.js). MP_COMPACT_JOIN=0 -- аварійний вимикач:
 // клієнт тоді отримує повну історію, як до появи стиснення.
 const COMPACT_JOIN = process.env.MP_COMPACT_JOIN !== '0';
+// Лок -- сесійний стан, а не історія: у журнал він не потрапляє (vision.md §5 п.5).
+// І це порада, а не заборона: relay нікому не відмовляє в commit, бо автор уже
+// застосував зміну у своєму Live, і відкат вимагав би replay, якого ще немає.
+// Лок каже партнеру "цей обʼєкт зараз редагують", не більше.
+const LOCK_TTL_SEC = Number(process.env.MP_LOCK_TTL_SEC || 300);
+const LOCK_TTL_MAX = 900;
+const LOCKS_PER_AUTHOR = 64;
 
 function validSessionName(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 128 &&
@@ -60,6 +67,7 @@ class Session {
     this.registry = null;  // payload першого RegistryInit; далі він незмінний
     this.seen = new Map(); // "author:lseq" -> commit для idempotent ack ре-сабмітів
     this.clients = new Set();
+    this.locks = new Map(); // object -> {object, label, author, since, expires}
     this.servedEvents = 0;
     this.droppedEvents = 0;
     this.loadError = null;
@@ -279,6 +287,74 @@ class Session {
     });
   }
 
+  // ------------------------------------------------------------------ локи
+  //
+  // Лок належить автору, а не зʼєднанню: реконект того самого гравця має
+  // підхопити власний лок, а не впертись у нього як у чужий.
+
+  acquireLock(author, object, label, ttl) {
+    const now = Date.now() / 1000;
+    const held = this.locks.get(object);
+    if (held && held.author !== author && held.expires > now) return { ok: false, lock: held };
+    const mine = held && held.author === author;
+    const lock = {
+      object,
+      label: label ?? (mine ? held.label : null),
+      author,
+      since: mine ? held.since : now,
+      expires: now + ttl,
+    };
+    this.locks.set(object, lock);
+    return { ok: true, lock };
+  }
+
+  releaseLock(author, object) {
+    const held = this.locks.get(object);
+    if (!held || held.author !== author) return false;
+    this.locks.delete(object);
+    return true;
+  }
+
+  releaseLocksOf(author) {
+    let changed = false;
+    for (const [object, lock] of this.locks) {
+      if (lock.author !== author) continue;
+      this.locks.delete(object);
+      changed = true;
+    }
+    return changed;
+  }
+
+  lockCountOf(author) {
+    let count = 0;
+    for (const lock of this.locks.values()) if (lock.author === author) count += 1;
+    return count;
+  }
+
+  /** Гравець вийшов з утриманим локом (vision.md §7) -- TTL знімає його сам. */
+  expireLocks(now = Date.now() / 1000) {
+    let changed = false;
+    for (const [object, lock] of this.locks) {
+      if (lock.expires > now) continue;
+      this.locks.delete(object);
+      log(`[${this.name}] лок ${object} (${lock.author}) звільнено за таймаутом`);
+      changed = true;
+    }
+    return changed;
+  }
+
+  lockList() {
+    const now = Date.now() / 1000;
+    return [...this.locks.values()].map((lock) => ({
+      object: lock.object,
+      label: lock.label,
+      author: lock.author,
+      since: lock.since,
+      held_sec: Math.max(0, Math.round(now - lock.since)),
+      expires_in: Math.max(0, Math.round(lock.expires - now)),
+    }));
+  }
+
   status() {
     return {
       session: this.name,
@@ -288,6 +364,7 @@ class Session {
       peers: this.peers(),
       clients: this.onlineClients(),
       authors: this.authorStats(),
+      locks: this.lockList(),
       served_events: this.servedEvents,
       dropped_events: this.droppedEvents,
       journal_error: this.loadError,
@@ -365,6 +442,15 @@ const heartbeat = setInterval(() => {
   }
 }, HEARTBEAT_SEC * 1000);
 
+// Окремий цикл від heartbeat: TTL лока міряється хвилинами, а не секундами,
+// і чистити його треба навіть у кімнаті, де всі мовчать.
+const lockSweep = setInterval(() => {
+  const now = Date.now() / 1000;
+  for (const session of sessions.values()) {
+    if (session.expireLocks(now)) session.broadcast({ m: 'locks', locks: session.lockList() });
+  }
+}, Math.max(1, Math.min(HEARTBEAT_SEC, 15)) * 1000);
+
 wss.on('connection', (ws, req) => {
   const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   const socket = req.socket || {};
@@ -433,6 +519,7 @@ wss.on('connection', (ws, req) => {
           head: session.head,
           peers: session.peers(),
           registry: session.registry,
+          locks: session.lockList(),
         });
         const since = Number(msg.since) || 0;
         const tail = session.tailSince(since);
@@ -523,6 +610,39 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      // Локи не журналяться і не впливають на порядок подій -- relay тут
+      // арбітр, а не секвенсор. Обʼєкт для relay -- непрозорий рядок: що саме
+      // ним адресовано, знає тільки клієнт (vision.md §4).
+      case 'lock':
+      case 'unlock': {
+        if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
+        const object = String(msg.object ?? '');
+        if (!validAuthor(object)) {
+          return send({ m: 'error', code: 'bad_lock', text: 'object має містити 1–128 друкованих символів' });
+        }
+        const session = client.session;
+        if (msg.m === 'unlock') {
+          if (session.releaseLock(client.author, object)) {
+            session.broadcast({ m: 'locks', locks: session.lockList() });
+            log(`[${session.name}] лок ${object} звільнив ${client.author}`);
+          }
+          break;
+        }
+        if (!session.locks.has(object) && session.lockCountOf(client.author) >= LOCKS_PER_AUTHOR) {
+          return send({ m: 'error', code: 'too_many_locks', text: `максимум ${LOCKS_PER_AUTHOR} локів на гравця` });
+        }
+        const asked = Number(msg.ttl);
+        const ttl = Math.min(asked > 0 ? asked : LOCK_TTL_SEC, LOCK_TTL_MAX);
+        const taken = session.acquireLock(client.author, object, msg.label, ttl);
+        if (!taken.ok) {
+          send({ m: 'lock_denied', object, author: taken.lock.author, label: taken.lock.label });
+          log(`[${session.name}] ${client.author} не отримав лок ${object}: тримає ${taken.lock.author}`);
+          break;
+        }
+        session.broadcast({ m: 'locks', locks: session.lockList() });
+        break;
+      }
+
       case 'ping':
         send({ m: 'pong', t0: msg.t0, t1, t2: Date.now() / 1000 });
         break;
@@ -536,6 +656,13 @@ wss.on('connection', (ws, req) => {
     clients.delete(client);
     if (!client.session) return;
     client.session.clients.delete(client);
+    // Гравець зник -- його локи зникають разом із ним, не чекаючи TTL. Саме
+    // тому це працює швидко: обрив мережі тепер помічає heartbeat, а не
+    // системний таймаут TCP.
+    const stillHere = [...client.session.clients].some((c) => c.author === client.author);
+    if (!stillHere && client.session.releaseLocksOf(client.author)) {
+      client.session.broadcast({ m: 'locks', locks: client.session.lockList() });
+    }
     client.session.broadcast({ m: 'peers', peers: client.session.peers() });
     log(`[${client.session.name}] - ${client.author} (${client.session.clients.size} онлайн)`);
   });
@@ -555,6 +682,7 @@ function shutdown(signal) {
   shuttingDown = true;
   log(`${signal}: закриваю relay, head сесій уже в checkpoint`);
   clearInterval(heartbeat);
+  clearInterval(lockSweep);
   for (const client of clients) {
     try { client.ws.close(1001, 'relay зупиняється'); } catch {}
   }

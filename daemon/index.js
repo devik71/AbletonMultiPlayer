@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { FileSync } from './filesync.js';
+import { LockKeeper } from './locks.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -115,6 +116,14 @@ const filesync = new FileSync({
 // (потрібно, якщо сет ще не збережено -- тоді file_path порожній).
 // Сам виклик -- унизу, після оголошення `connected`: сканування одразу анонсує
 // маніфест, а це чіпає стан з'єднання.
+// Локи бере daemon: bridge про них не знає і нічого не блокує (locks.js).
+const locks = new LockKeeper({
+  send: (msg) => {
+    if (connected) ws.send(JSON.stringify(msg));
+  },
+  log,
+});
+
 const PROJECT = arg('project', null);
 
 // ---------------------------------------------------------------------- UDP
@@ -251,6 +260,7 @@ function connect() {
         flushOutbox();
         pingClock();
         bootstrapRegistry();
+        locks.onLocks(msg.locks, AUTHOR);
         filesync.announce(); // хай партнер одразу знає, що в нас є
         announceCapabilities();
         break;
@@ -277,6 +287,12 @@ function connect() {
       case 'file_chunk':
         filesync.onChunk(msg);
         break;
+      case 'locks':
+        locks.onLocks(msg.locks, AUTHOR);
+        break;
+      case 'lock_denied':
+        locks.onDenied(msg);
+        break;
       case 'compat':
         log(`НЕСУМІСНІСТЬ: ${msg.text}`);
         break;
@@ -288,6 +304,7 @@ function connect() {
 
   ws.on('close', () => {
     connected = false;
+    locks.reset();
     if (clockTimer) clearInterval(clockTimer);
     log(`звʼязок з relay втрачено; локальна робота триває, буфер: ${outbox.length}`);
     setTimeout(connect, backoff);
@@ -384,6 +401,7 @@ function submit(type, payload) {
   state.lseq += 1;
   saveState();
   const event = { type, payload: payload ?? {}, author: AUTHOR, lseq: state.lseq, ts: Date.now() / 1000 };
+  locks.touch(type, event.payload, registry);
   outbox.push(event);
   saveOutbox();
   if (connected) flushOutbox();

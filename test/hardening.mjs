@@ -302,3 +302,116 @@ test('relay віддає features і прибирає мовчазного кл�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Клієнт з чергою: локи прилітають broadcast-ом, тож чекати треба конкретне
+// повідомлення, а не наступне.
+function relayClient(port, session, author) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+  const queue = [];
+  let waiters = [];
+  const client = {
+    ws,
+    send: (msg) => ws.send(JSON.stringify(msg)),
+    drain: () => { queue.length = 0; },
+    take(pred, ms = 5000) {
+      return new Promise((resolve, reject) => {
+        const scan = () => {
+          const i = queue.findIndex(pred);
+          if (i < 0) return false;
+          resolve(queue.splice(i, 1)[0]);
+          return true;
+        };
+        if (scan()) return;
+        const timer = setTimeout(
+          () => reject(new Error(`${author} не дочекався повідомлення: ${JSON.stringify(queue)}`)), ms);
+        waiters.push(() => {
+          if (!scan()) return false;
+          clearTimeout(timer);
+          return true;
+        });
+      });
+    },
+  };
+  ws.on('message', (raw) => {
+    queue.push(JSON.parse(raw));
+    waiters = waiters.filter((w) => !w());
+  });
+  return new Promise((resolve, reject) => {
+    ws.on('error', reject);
+    ws.on('open', () => {
+      client.send({ m: 'join', session, author, since: 0, proto: 1 });
+      client.take((m) => m.m === 'welcome').then(() => resolve(client), reject);
+    });
+  });
+}
+
+test('relay арбітрує локи: чужий не візьме, свій зникає разом із гравцем', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-locks-'));
+  const port = await freePort();
+  const relay = spawn(process.execPath, [join(root, 'relay/server.js')], {
+    cwd: join(root, 'relay'),
+    env: { ...process.env, MP_RELAY_PORT: String(port), MP_JOURNAL_DIR: dir, MP_HEARTBEAT_SEC: '1' },
+  });
+  relay.out = '';
+  relay.stdout.on('data', (b) => { relay.out += b.toString(); });
+  relay.stderr.on('data', (b) => { relay.out += b.toString(); });
+
+  let p1 = null;
+  let p2 = null;
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    p1 = await relayClient(port, 'locks', 'p1');
+    p2 = await relayClient(port, 'locks', 'p2');
+
+    p1.send({ m: 'lock', object: 'track:a', label: 'Bass' });
+    const taken = await p2.take((m) => m.m === 'locks');
+    assert.equal(taken.locks.length, 1);
+    assert.equal(taken.locks[0].author, 'p1');
+    assert.equal(taken.locks[0].label, 'Bass');
+
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+    assert.equal(health.sessions.find((s) => s.session === 'locks').locks[0].object, 'track:a');
+
+    p2.send({ m: 'lock', object: 'track:a' });
+    const denied = await p2.take((m) => m.m === 'lock_denied');
+    assert.equal(denied.author, 'p1');
+    assert.equal(denied.object, 'track:a');
+
+    // Власний лок не впирається сам у себе: жест триває, лок поновлюється.
+    p1.drain();
+    p1.send({ m: 'lock', object: 'track:a' });
+    const renewed = await p1.take((m) => m.m === 'locks' && m.locks[0]?.object === 'track:a');
+    assert.equal(renewed.locks[0].author, 'p1');
+
+    // Лок із коротким TTL знімається сам -- гравець "завис" з ним назавжди.
+    p2.drain();
+    p2.send({ m: 'lock', object: 'track:b', ttl: 1 });
+    await p2.take((m) => m.m === 'locks' && m.locks.some((l) => l.object === 'track:b'));
+    p2.drain();
+    const expired = await p2.take(
+      (m) => m.m === 'locks' && !m.locks.some((l) => l.object === 'track:b'), 8000);
+    assert.deepEqual(expired.locks.map((l) => l.object), ['track:a']);
+
+    // Гравець пішов -- його лок пішов з ним, не чекаючи TTL.
+    p2.drain();
+    p1.ws.close();
+    const afterLeave = await p2.take((m) => m.m === 'locks' && m.locks.length === 0, 5000);
+    assert.deepEqual(afterLeave.locks, []);
+
+    // Чужий лок зняти не можна.
+    p2.drain();
+    p2.send({ m: 'lock', object: 'track:c' });
+    await p2.take((m) => m.m === 'locks' && m.locks.some((l) => l.object === 'track:c'));
+    const alone = await relayClient(port, 'locks', 'p3');
+    alone.send({ m: 'unlock', object: 'track:c' });
+    alone.send({ m: 'lock', object: 'track:d' });
+    const still = await alone.take((m) => m.m === 'locks' && m.locks.some((l) => l.object === 'track:d'));
+    assert.equal(still.locks.some((l) => l.object === 'track:c' && l.author === 'p2'), true);
+    alone.ws.close();
+  } finally {
+    if (p1) p1.ws.close();
+    if (p2) p2.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

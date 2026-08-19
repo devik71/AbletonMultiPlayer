@@ -313,6 +313,20 @@ try {
     await waitFor(l2, /<- #\d+ MixerSet .*"param":"volume","value":0\.62/, 8000, from);
   });
 
+  await check('партнер бачить, хто зараз редагує, і лок сам відпускається', async () => {
+    // Лок бере daemon на першу подію жесту і знімає після паузи в потоці.
+    // Спершу дочекаємось, поки відпустить попередній рух фейдера, інакше
+    // новий жест лише поновить наявний лок і партнер нічого не побачить.
+    const from = d2.out.length;
+    l1.stdin.write('vol 1 0.55\n');
+    await waitFor(d2, /ніхто нічого не редагує/, 8000, from);
+
+    const gesture = d2.out.length;
+    l1.stdin.write('vol 1 0.44\n');
+    await waitFor(d2, /редагують: p1 — /, 8000, gesture);
+    await waitFor(d2, /ніхто нічого не редагує/, 8000, gesture);
+  });
+
   await check('мікшер: send адресується індексом', async () => {
     const from = l2.out.length;
     l1.stdin.write('send 1 0 0.25\n');
@@ -456,10 +470,10 @@ try {
     }
   });
 
-  await check('журнал: 43 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 45 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 43) throw new Error(`очікував 43 події, у журналі ${lines.length}`);
+    if (lines.length !== 45) throw new Error(`очікував 45 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

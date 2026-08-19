@@ -150,6 +150,16 @@ function render(data) {
             }
         }
 
+        var locks = s.locks || [];
+        if (locks.length) {
+            lines.push("  editing now:");
+            for (var kidx = 0; kidx < locks.length; kidx++) {
+                var lk = locks[kidx];
+                lines.push("    " + lk.author + "  " + (lk.label || lk.object) +
+                    "  " + seconds(lk.held_sec || 0));
+            }
+        }
+
         var authors = s.authors || [];
         if (authors.length) {
             lines.push("  action counts:");
