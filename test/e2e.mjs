@@ -511,6 +511,54 @@ try {
     }
   });
 
+  await check('чужий знімок застосовується локально і не породжує подій', async () => {
+    // Беремо знімок p1, правимо в ньому значення -- і згодовуємо назад. Так
+    // виглядає приєднання до сету, який бачиш уперше: адреси ті самі, значення чужі.
+    const source = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const master = source.aux_tracks.find((t) => t.kind === 'master');
+    master.mixer.volume = 0.33;
+    const track = source.tracks.find((t) => t.name === 'Bass Lead');
+    track.name = 'Adopted';
+    const clip = track.clips.find((c) => (c.notes || []).length);
+    clip.notes = [{ pitch: 48, start_time: 0, duration: 0.5, velocity: 77, mute: false }];
+    const foreign = join(tmp, 'foreign-state.json');
+    writeFileSync(foreign, JSON.stringify(source));
+
+    const headBefore = relay.out.match(/#(\d+) /g)?.length ?? 0;
+    const from = d1.out.length;
+    d1.stdin.write(`apply ${foreign}\n`);
+    await waitFor(d1, /знімок застосовано: \d+ з \d+$/m, 15000, from);
+    if (/знімок застосовано.*помилок/.test(d1.out.slice(from))) {
+      throw new Error(`застосування з помилками: ${d1.out.slice(from).split('\n').find((l) => /застосовано/.test(l))}`);
+    }
+
+    const stateFrom = d1.out.length;
+    l1.stdin.write('fullstate\n');
+    await waitFor(d1, /state: знімок \d+ зібрано/, 10000, stateFrom);
+    const after = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+
+    const masterAfter = after.aux_tracks.find((t) => t.kind === 'master');
+    if (masterAfter.mixer.volume !== 0.33) {
+      throw new Error(`гучність Master ${masterAfter.mixer.volume} замість 0.33`);
+    }
+    if (!after.tracks.some((t) => t.name === 'Adopted')) {
+      throw new Error('назва треку зі знімка не застосувалась');
+    }
+    const notesAfter = after.tracks.flatMap((t) => t.clips).flatMap((c) => c.notes || []);
+    if (!notesAfter.some((n) => n.pitch === 48 && n.velocity === 77)) {
+      throw new Error('ноти зі знімка не застосувались');
+    }
+    if (notesAfter.some((n) => n.pitch === 64)) {
+      throw new Error('регіон знімка не прибрав стару ноту');
+    }
+
+    // Найважливіше: локальне вирівнювання не є подією і в журнал не потрапляє
+    const headAfter = relay.out.match(/#(\d+) /g)?.length ?? 0;
+    if (headAfter !== headBefore) {
+      throw new Error(`застосування знімка породило ${headAfter - headBefore} подій у журналі`);
+    }
+  });
+
   await check('журнал: 47 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);

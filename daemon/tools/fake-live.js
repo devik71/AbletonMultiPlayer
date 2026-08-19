@@ -14,6 +14,8 @@
 import { createSocket } from 'node:dgram';
 import { createHash, randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import { readFileSync } from 'node:fs';
+import { stateToOps } from './state-ops.js';
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
@@ -295,7 +297,7 @@ const sendHello = () =>
     live: arg('live', 'fake-12.3.8'),
     script: arg('script', '0.18.0-fake'),
     pid: process.pid,
-    features: ['apply_ack', 'full_state'],
+    features: ['apply_ack', 'full_state', 'state_apply'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
@@ -443,6 +445,29 @@ setInterval(() => {
     send(stateQueue.shift());
   }
 }, 100).unref();
+
+
+function startStateApply(path, id) {
+  let state;
+  try {
+    state = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    return console.log(`state apply: не читається ${path}: ${error.message}`);
+  }
+  const ops = stateToOps(state);
+  const report = { m: 'state_applied', id, total: ops.length, ok: 0, failed: 0, errors: [] };
+  for (const [type, payload] of ops) {
+    try {
+      apply(type, payload, 'state');
+      report.ok += 1;
+    } catch (error) {
+      report.failed += 1;
+      if (report.errors.length < 20) report.errors.push(`${type}: ${error.message}`);
+    }
+  }
+  console.log(`state apply: ${report.ok} з ${report.total} (${report.failed} помилок)`);
+  send(report);
+}
 
 
 function buildRegistry() {
@@ -673,6 +698,7 @@ udp.on('message', (buf) => {
     }
   }
   else if (msg.m === 'state_request') queueState(msg.id);
+  else if (msg.m === 'state_apply') startStateApply(msg.path, msg.id);
   else if (msg.m === 'snapshot_request') send({ m: 'snapshot', state: snapshot() });
   else if (msg.m === 'registry_build') send({ m: 'registry', registry: buildRegistry() });
   else if (msg.m === 'registry_adopt') adoptRegistry(msg.registry || {});

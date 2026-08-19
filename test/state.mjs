@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { StateCollector, stateDigest, summarize } from '../daemon/state.js';
+import { noteRegionsFor, stateToOps } from '../daemon/tools/state-ops.js';
 
 const blobOf = (state) => JSON.stringify(state);
 const chunksOf = (state, id, size = 10) => {
@@ -117,4 +118,86 @@ test('digest порівнює вміст, а не момент зняття', ()
   // Порядок ключів у JSON з Python і з JS різний, digest -- ні
   const reordered = { scenes: sample.scenes, tracks: sample.tracks, aux_tracks: sample.aux_tracks, tempo: sample.tempo, version: 1 };
   assert.equal(stateDigest(sample), stateDigest(reordered));
+});
+
+// --------------------------------------------- переклад знімка в події
+
+test('регіон нот починається з нуля і вкриває кліп цілком', () => {
+  const meta = { length: 4 };
+  const [[region, notes]] = noteRegionsFor(meta, [
+    { pitch: 60, start_time: 1.5 }, { pitch: 62, start_time: 0.5 },
+  ]);
+  assert.equal(region.from_time, 0, 'регіон має чистити слот від нуля');
+  assert.equal(region.from_pitch, 0);
+  assert.equal(region.pitch_span, 128);
+  assert.ok(region.time_span >= 4);
+  assert.deepEqual(notes.map((n) => n.start_time), [0.5, 1.5], 'ноти впорядковані');
+});
+
+test('порожній кліп дає регіон без нот -- він чистить чужі', () => {
+  const [[region, notes]] = noteRegionsFor({ length: 8 }, []);
+  assert.deepEqual(notes, []);
+  assert.equal(region.from_time, 0);
+  assert.equal(region.time_span, 8);
+});
+
+test('великий кліп ріжеться на регіони, що стикуються без дірок', () => {
+  const notes = Array.from({ length: 2500 }, (_, i) => ({ pitch: 60, start_time: i * 0.25 }));
+  const regions = noteRegionsFor({ length: 4 }, notes);
+  assert.ok(regions.length > 1, 'понад 1024 ноти мають розкластись на кілька регіонів');
+
+  let cursor = 0;
+  let seen = 0;
+  for (const [region, part] of regions) {
+    assert.equal(region.from_time, cursor, 'регіони мають стикуватись впритул');
+    assert.ok(part.length <= 1024, `у регіоні ${part.length} нот`);
+    for (const note of part) {
+      assert.ok(note.start_time >= region.from_time
+        && note.start_time < region.from_time + region.time_span, 'нота поза своїм регіоном');
+    }
+    seen += part.length;
+    cursor = region.from_time + region.time_span;
+  }
+  assert.equal(seen, notes.length, 'жодна нота не загубилась');
+  assert.ok(cursor > notes.at(-1).start_time, 'останній регіон має вкривати останню ноту');
+});
+
+test('знімок розкладається на події з тими самими адресами', () => {
+  const ops = stateToOps({
+    tempo: 128,
+    tracks: [{
+      id: 't1', name: 'Bass',
+      mixer: { volume: 0.5, sends: [{ index: 0, value: 0.25 }], mute: true },
+      devices: [{
+        chain_path: [{ id: 'c1' }],
+        device: { class_name: 'Compressor2', class_display_name: 'Compressor', ordinal: 0 },
+        parameters: [{ name: 'Threshold', ordinal: 0, value: 0.7 }],
+      }],
+      clips: [{ scene: { id: 's1' }, clip: { length: 4, name: 'Loop' }, notes: [{ pitch: 60, start_time: 0 }] }],
+    }],
+    aux_tracks: [{ id: 'r1', kind: 'return', mixer: { volume: 0.4 } }],
+    scenes: [{ id: 's1', name: 'Intro' }],
+  });
+  const types = ops.map(([type]) => type);
+  assert.deepEqual(types[0], 'TempoSet');
+  assert.ok(types.indexOf('ClipCreate') < types.indexOf('ClipNotesSet'), 'кліп створюється до нот');
+
+  const device = ops.find(([type]) => type === 'DeviceParamSet')[1];
+  assert.deepEqual(device.chain_path, [{ id: 'c1' }]);
+  assert.equal(device.parameter.name, 'Threshold');
+
+  const aux = ops.find(([type, p]) => type === 'MixerSet' && p.track.kind === 'return')[1];
+  assert.deepEqual(aux.track, { id: 'r1', kind: 'return' });
+
+  const toggle = ops.find(([type]) => type === 'TrackToggle')[1];
+  assert.equal(toggle.param, 'mute');
+  assert.equal(toggle.value, true);
+
+  const scene = ops.find(([type, p]) => type === 'ObjectMetaSet' && p.object === 'scene')[1];
+  assert.deepEqual(scene.scene, { id: 's1' });
+});
+
+test('обʼєкт без uuid у події не перетворюється', () => {
+  const ops = stateToOps({ tracks: [{ name: 'без id' }], aux_tracks: [{ id: 'r1' }], scenes: [{}] });
+  assert.deepEqual(ops, []);
 });

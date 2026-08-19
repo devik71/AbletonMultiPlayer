@@ -64,11 +64,15 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Повний стан не влазить в один датаграм, тож іде чанками з паузами по тіках.
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
-FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state"]
+FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
 STATE_CHUNKS_PER_TICK = 6
+# Застосування знімка: тисячі записів у LOM порціями, щоб не підвісити Live.
+STATE_APPLY_PER_TICK = 12
+STATE_APPLY_MAX_BYTES = 64 * 1024 * 1024
+NOTES_PER_REGION = 1024
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -116,6 +120,8 @@ class AbletonMP(ControlSurface):
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._state_queue = []   # чанки повного стану, віддаються по тіках
         self._state_id = 0
+        self._apply_queue = []   # знімок, розкладений на події
+        self._apply_report = None
         self._tracks_reg = Registry(self._log)
         self._scenes_reg = Registry(self._log)
         self._aux_tracks_reg = Registry(self._log)
@@ -2079,6 +2085,7 @@ class AbletonMP(ControlSurface):
         self._safe(self._flush_notes)
         self._safe(self._flush_pending)
         self._safe(self._flush_state)
+        self._safe(self._flush_state_apply)
         now = time.time()
         if now - self._last_beat >= HEARTBEAT_SEC:
             self._last_beat = now
@@ -2095,6 +2102,8 @@ class AbletonMP(ControlSurface):
                                  "ok": False, "error": repr(e)})
                 raise
             self._link.send({"m": "apply_ack", "gseq": gseq, "ok": True})
+        elif m == "state_apply":
+            self._safe(self._start_state_apply, msg.get("path"), msg.get("id"))
         elif m == "state_request":
             self._safe(self._queue_state, msg.get("id"))
         elif m == "snapshot_request":
@@ -3209,6 +3218,234 @@ class AbletonMP(ControlSurface):
                 pass
             clips.append(entry)
         return clips
+
+    # ----------------------------------------------------------- state apply
+
+    def _start_state_apply(self, path, request_id=None):
+        """Читає знімок із файлу і ставить його в чергу як послідовність подій.
+
+        Файлом, а не датаграмами: daemon і bridge живуть на одній машині, тож
+        другий бік чанкування був би тут зайвою копією коду.
+        """
+        if not isinstance(path, str) or not path:
+            return self._warn("state apply: не вказано шлях")
+        try:
+            size = os.path.getsize(path)
+        except Exception as e:
+            return self._warn("state apply: %r" % (e,))
+        if size > STATE_APPLY_MAX_BYTES:
+            return self._warn("state apply: файл завеликий (%d bytes)" % size)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception as e:
+            return self._warn("state apply: не читається (%r)" % (e,))
+        if not isinstance(state, dict):
+            return self._warn("state apply: очікував JSON-обʼєкт")
+
+        ops = self._state_to_ops(state)
+        self._apply_queue = ops
+        self._apply_report = {"id": request_id, "total": len(ops), "ok": 0,
+                              "failed": 0, "errors": []}
+        self._log("state apply: %d ops queued" % len(ops))
+        if not ops:
+            self._finish_state_apply()
+
+    def _flush_state_apply(self):
+        """Порціями по тіках: знімок великого сету -- це тисячі записів у LOM,
+        і зробити їх одним махом означає підвісити Live."""
+        if not self._apply_queue:
+            return
+        for _ in range(STATE_APPLY_PER_TICK):
+            if not self._apply_queue:
+                break
+            etype, payload = self._apply_queue.pop(0)
+            try:
+                self._apply(etype, payload, "state")
+                self._apply_report["ok"] += 1
+            except Exception as e:
+                self._apply_report["failed"] += 1
+                if len(self._apply_report["errors"]) < 20:
+                    self._apply_report["errors"].append("%s: %r" % (etype, e))
+        if not self._apply_queue:
+            self._finish_state_apply()
+
+    def _finish_state_apply(self):
+        report = self._apply_report
+        self._apply_report = None
+        if report is None:
+            return
+        self._log("state apply: done %d/%d (%d failed)"
+                  % (report["ok"], report["total"], report["failed"]))
+        self._link.send({
+            "m": "state_applied",
+            "id": report["id"],
+            "total": report["total"],
+            "ok": report["ok"],
+            "failed": report["failed"],
+            "errors": report["errors"],
+        })
+
+    def _state_to_ops(self, state):
+        """Знімок -> послідовність звичайних подій.
+
+        Окремого шляху запису в LOM немає навмисно: знімок застосовується тим
+        самим _apply, що й подія з журналу. Тому глушіння власного ехо, перевірка
+        адрес і тиха відмова на неіснуючий обʼєкт працюють без другої копії.
+        """
+        ops = []
+        tempo = state.get("tempo")
+        if isinstance(tempo, (int, float)):
+            ops.append(("TempoSet", {"bpm": float(tempo)}))
+
+        for track in state.get("tracks") or []:
+            ref = {"id": track.get("id")}
+            if not ref["id"]:
+                continue
+            ops.extend(self._meta_ops("track", ref, track))
+            ops.extend(self._mixer_ops(ref, track.get("mixer") or {}))
+            ops.extend(self._device_ops(ref, track.get("devices") or []))
+            ops.extend(self._clip_ops(ref, track.get("clips") or []))
+
+        for aux in state.get("aux_tracks") or []:
+            ref = {"id": aux.get("id"), "kind": aux.get("kind")}
+            if not ref["id"] or not ref["kind"]:
+                continue
+            ops.extend(self._meta_ops("track", ref, aux))
+            ops.extend(self._mixer_ops(ref, aux.get("mixer") or {}))
+            ops.extend(self._device_ops(ref, aux.get("devices") or []))
+
+        for scene in state.get("scenes") or []:
+            if scene.get("id"):
+                ops.extend(self._meta_ops("scene", {"id": scene["id"]}, scene))
+
+        return ops
+
+    def _meta_ops(self, kind, ref, src):
+        ops = []
+        for prop in ("name", "color"):
+            value = src.get(prop)
+            if value is None:
+                continue
+            payload = {"object": kind, "prop": prop, "value": value}
+            payload["scene" if kind == "scene" else "track"] = ref
+            ops.append(("ObjectMetaSet", payload))
+        return ops
+
+    def _mixer_ops(self, ref, mixer):
+        ops = []
+        for param in ("volume", "panning", "crossfader", "cue_volume"):
+            if param in mixer:
+                ops.append(("MixerSet", {"track": ref, "param": param, "value": mixer[param]}))
+        for send in mixer.get("sends") or []:
+            if send.get("value") is None:
+                continue
+            ops.append(("MixerSet", {"track": ref, "param": "send",
+                                     "index": send.get("index"), "value": send.get("value")}))
+        for prop in ("mute", "solo", "arm"):
+            if prop in mixer:
+                ops.append(("TrackToggle", {"track": ref, "param": prop, "value": bool(mixer[prop])}))
+        return ops
+
+    def _device_ops(self, ref, devices):
+        ops = []
+        for entry in devices:
+            device = entry.get("device") or {}
+            chain_path = entry.get("chain_path") or []
+            for parameter in entry.get("parameters") or []:
+                if parameter.get("value") is None:
+                    continue
+                payload = {
+                    "track": ref,
+                    "device": device,
+                    "parameter": {"name": parameter.get("name"),
+                                  "ordinal": parameter.get("ordinal")},
+                    "value": parameter.get("value"),
+                }
+                if chain_path:
+                    payload["chain_path"] = chain_path
+                ops.append(("DeviceParamSet", payload))
+        return ops
+
+    def _clip_ops(self, ref, clips):
+        ops = []
+        for entry in clips:
+            scene = entry.get("scene") or {}
+            if not scene.get("id"):
+                continue
+            meta = entry.get("clip") or {}
+            notes = entry.get("notes")
+            if notes is not None:
+                # Порожній слот заповнюємо: створення кліпу нічого не руйнує,
+                # а без нього ноти нема куди класти.
+                ops.append(("ClipCreate", {"track": ref, "scene": scene, "clip": meta}))
+                for region, part in self._note_regions_for(meta, notes):
+                    ops.append(("ClipNotesSet", {
+                        "track": ref, "scene": scene, "clip": meta,
+                        "region": region, "notes": part,
+                    }))
+            for prop in ("name", "color"):
+                if meta.get(prop) is not None:
+                    ops.append(("ObjectMetaSet", {
+                        "object": "clip", "track": ref, "scene": scene,
+                        "prop": prop, "value": meta[prop],
+                    }))
+        return ops
+
+    @staticmethod
+    def _note_regions_for(meta, notes):
+        """Ріже ноти на регіони, які впритул укривають кліп починаючи з нуля.
+
+        Один регіон на кліп не годиться: приймальний бік відхиляє payload
+        із понад 4096 нотами цілком. А починати треба саме з нуля, бо регіон
+        не лише додає ноти, а й чистить те, що лежало в ньому раніше.
+        """
+        try:
+            length = max(float(meta.get("length") or NOTE_TIME_SPAN), 0.001)
+        except Exception:
+            length = NOTE_TIME_SPAN
+        ordered = sorted(notes, key=lambda n: (n.get("start_time", 0.0), n.get("pitch", 0)))
+        end = length
+        for note in ordered:
+            try:
+                end = max(end, float(note.get("start_time", 0.0)) + 0.001)
+            except Exception:
+                pass
+        whole = {"from_pitch": 0, "pitch_span": 128, "from_time": 0.0,
+                 "time_span": round(end, 6)}
+        if not ordered:
+            return [(whole, [])]
+
+        groups = []
+        current = []
+        for note in ordered:
+            if (len(current) >= NOTES_PER_REGION
+                    and note.get("start_time") != current[-1].get("start_time")):
+                groups.append(current)
+                current = []
+            current.append(note)
+        groups.append(current)
+        if len(groups) == 1:
+            return [(whole, groups[0])]
+
+        regions = []
+        start = 0.0
+        for i, group in enumerate(groups):
+            if i == len(groups) - 1:
+                stop = end
+            else:
+                try:
+                    stop = float(groups[i + 1][0].get("start_time", end))
+                except Exception:
+                    stop = end
+            if stop <= start:
+                stop = start + 0.001
+            regions.append(({
+                "from_pitch": 0, "pitch_span": 128,
+                "from_time": round(start, 6), "time_span": round(stop - start, 6),
+            }, group))
+            start = stop
+        return regions
 
     def _snapshot(self):
         tracks = []

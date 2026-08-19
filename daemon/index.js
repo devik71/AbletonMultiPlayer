@@ -5,6 +5,7 @@
 // локальний журнал, clock sync.
 
 import { createSocket } from 'node:dgram';
+import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -130,6 +131,7 @@ const locks = new LockKeeper({
 // Повний стан сету: bridge шле його чанками, ми збираємо і кладемо на диск.
 // Це діагностика й основа для майбутнього застосування знімка -- у журнал
 // стан не потрапляє, бо це не подія.
+let lastState = null;  // останній зібраний знімок, для команд state/apply
 const fullStatePath = join(STATE_DIR, `${SLUG}.state.json`);
 const stateCollector = new StateCollector({
   log,
@@ -139,12 +141,41 @@ const stateCollector = new StateCollector({
     } catch (error) {
       return log(`state: не вдалось записати ${fullStatePath}: ${error.message}`);
     }
+    lastState = state;
     const counts = summarize(state);
     log(`state: знімок ${info.id} зібрано, ${info.chars} символів, digest ${stateDigest(state)} — ` +
         `${counts.tracks} треків, ${counts.aux_tracks} Return/Master, ${counts.scenes} сцен, ` +
         `${counts.devices} девайсів, ${counts.parameters} параметрів, ` +
         `${counts.clips} кліпів, ${counts.notes} нот`);
   },
+});
+
+// Керування з терміналу: daemon і так живе у відкритому вікні, тож окремий
+// канал керування йому не потрібен.
+let applyId = 0;
+
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const [cmd, ...rest] = line.trim().split(/\s+/);
+  if (!cmd) return;
+  if (cmd === 'state') {
+    if (!lastState) return log('знімка ще немає — bridge його не віддавав');
+    const counts = summarize(lastState);
+    return log(`знімок ${stateDigest(lastState)}: ${counts.tracks} треків, ` +
+      `${counts.devices} девайсів, ${counts.parameters} параметрів, ` +
+      `${counts.clips} кліпів, ${counts.notes} нот — ${fullStatePath}`);
+  }
+  if (cmd === 'apply') {
+    const path = rest.join(' ') || fullStatePath;
+    if (!existsSync(path)) return log(`немає файлу ${path}`);
+    if (!bridgeInfo?.features?.includes('state_apply')) {
+      return log('bridge не вміє state_apply — потрібен новіший Remote Script');
+    }
+    applyId += 1;
+    log(`застосовую знімок ${path}`);
+    return toBridge({ m: 'state_apply', path, id: applyId });
+  }
+  if (cmd === 'refresh') return requestFullState();
+  log('команди: state | apply [файл] | refresh');
 });
 
 const PROJECT = arg('project', null);
@@ -206,6 +237,15 @@ udp.on('message', (buf) => {
     case 'event':
       submit(msg.type, msg.payload);
       break;
+    case 'state_applied': {
+      // Знімок застосовується мовчки: власні listeners заглушені, тож
+      // у журнал нічого не йде і партнер нічого не бачить. Це локальне
+      // вирівнювання, а не подія.
+      const errors = (msg.errors || []).slice(0, 3).join('; ');
+      log(`знімок застосовано: ${msg.ok} з ${msg.total}` +
+          (msg.failed ? `, ${msg.failed} помилок${errors ? ` (${errors})` : ''}` : ''));
+      break;
+    }
     case 'state_chunk':
       stateCollector.chunk(msg);
       break;
