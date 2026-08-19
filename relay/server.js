@@ -26,6 +26,12 @@ const HEARTBEAT_SEC = Number(process.env.MP_HEARTBEAT_SEC || 15);
 const STALE_SEC = Number(process.env.MP_STALE_SEC || 45);
 // Хвіст на join стискається (compact.js). MP_COMPACT_JOIN=0 -- аварійний вимикач:
 // клієнт тоді отримує повну історію, як до появи стиснення.
+// Фізичне стиснення журналу (vision.md §5 п.7). Стиснутий журнал -- це
+// підпослідовність, яка дає той самий стан: базою для нового учасника служить
+// не знімок стану Live, а сам .als, який обидві машини відкрили з копії.
+// Повна історія при цьому не зникає -- вона переїжджає в холодний архів.
+const COMPACT_AT = Number(process.env.MP_COMPACT_AT || 2000);
+const COMPACT_MIN_GAIN = 0.2;
 const COMPACT_JOIN = process.env.MP_COMPACT_JOIN !== '0';
 // Лок -- сесійний стан, а не історія: у журнал він не потрапляє (vision.md §5 п.5).
 // І це порада, а не заборона: relay нікому не відмовляє в commit, бо автор уже
@@ -101,12 +107,19 @@ class Session {
     this.clients = new Set();
     this.locks = new Map(); // object -> {object, label, author, since, expires}
     this.emptySince = null;
+    this.lastLseq = new Map(); // author -> максимальний закомічений lseq
+    this.archivedThrough = 0;
+    this.compacted = false;
+    this.compactError = null;
+    this.nextCompactAt = COMPACT_AT;
     this.servedEvents = 0;
     this.droppedEvents = 0;
     this.loadError = null;
     this.checkpointError = null;
     this.path = join(JOURNAL_DIR, `${name}.jsonl`);
     this.checkpointPath = join(JOURNAL_DIR, `${name}.checkpoint.json`);
+    this.archivePath = join(JOURNAL_DIR, `${name}.archive.jsonl`);
+    this.checkpoint = this.#readCheckpoint();
     this.#load();
     if (!this.loadError) this.#verifyCheckpoint();
   }
@@ -116,8 +129,19 @@ class Session {
     return last ? { gseq: last.gseq, hash: last.hash } : { gseq: 0, hash: '' };
   }
 
+  #readCheckpoint() {
+    if (!existsSync(this.checkpointPath)) return null;
+    try {
+      return JSON.parse(readFileSync(this.checkpointPath, 'utf8'));
+    } catch (error) {
+      this.loadError = `checkpoint не читається: ${error.message}`;
+      log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+      return null;
+    }
+  }
+
   #load() {
-    if (!existsSync(this.path)) return;
+    if (this.loadError || !existsSync(this.path)) return;
     let lines;
     try {
       lines = readFileSync(this.path, 'utf8').split('\n').filter(Boolean);
@@ -126,7 +150,12 @@ class Session {
       log(`[${this.name}] ${this.loadError}`);
       return;
     }
-    let prevHash = '';
+
+    // Суцільний журнал перевіряється строго: пропущений gseq -- це втрачений
+    // рядок. Стиснутий має дірки за побудовою, і там роль контролю бере на себе
+    // кількість подій у checkpoint плюс власний хеш кожної події.
+    const compacted = this.checkpoint?.compacted === true;
+
     for (const line of lines) {
       let ev;
       try {
@@ -137,23 +166,59 @@ class Session {
         break;
       }
       const { hash, prev_hash: prev, ...body } = ev;
-      const expectedGseq = this.journal.length + 1;
-      if (ev.gseq !== expectedGseq) {
-        this.loadError = `gseq=${ev.gseq} замість ${expectedGseq}`;
+      const last = this.journal[this.journal.length - 1];
+      const expected = last ? last.gseq + 1 : 1;
+
+      if (!Number.isSafeInteger(ev.gseq) || (compacted ? ev.gseq < expected : ev.gseq !== expected)) {
+        this.loadError = `gseq=${ev.gseq} замість ${compacted ? `>=${expected}` : expected}`;
         log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
         break;
       }
-      if (prev !== prevHash || hashEvent(prev, body) !== hash) {
+      if (hashEvent(prev, body) !== hash) {
+        this.loadError = `подія gseq=${ev.gseq} не збігається зі своїм хешем`;
+        log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+        break;
+      }
+      // Сусідні за gseq події мають зчеплюватись; через дірку зчеплення
+      // перевіряється тільки за архівом, де історія повна.
+      const linked = last
+        ? (ev.gseq !== last.gseq + 1 || prev === last.hash)
+        : (ev.gseq !== 1 || prev === '');
+      if (!linked) {
         this.loadError = `hash-chain розірвано на gseq=${ev.gseq}`;
         log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
         break;
       }
+
       this.journal.push(ev);
       this.seen.set(`${ev.author}:${ev.lseq}`, ev);
+      this.#rememberLseq(ev.author, ev.lseq);
       if (ev.type === 'RegistryInit' && !this.registry) this.registry = ev.payload;
-      prevHash = hash;
     }
-    log(`[${this.name}] журнал відновлено: ${this.journal.length} подій, head=${this.head.gseq}`);
+
+    // Журнал коротший за той, що описаний у checkpoint -- рядки зникли.
+    // Довший бути може: процес міг упасти між append і записом checkpoint.
+    if (!this.loadError && Number.isSafeInteger(this.checkpoint?.events) &&
+        lines.length < this.checkpoint.events) {
+      this.loadError = `у журналі ${lines.length} подій замість ${this.checkpoint.events}`;
+      log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
+    }
+
+    this.compacted = compacted;
+    this.archivedThrough = Number.isSafeInteger(this.checkpoint?.archived_through)
+      ? this.checkpoint.archived_through : 0;
+    for (const [author, lseq] of Object.entries(this.checkpoint?.authors || {})) {
+      if (Number.isSafeInteger(lseq)) this.#rememberLseq(author, lseq);
+    }
+    this.nextCompactAt = Math.max(COMPACT_AT, this.journal.length + COMPACT_AT);
+
+    log(`[${this.name}] журнал відновлено: ${this.journal.length} подій, head=${this.head.gseq}` +
+        (compacted ? `, стиснутий (архів до #${this.archivedThrough})` : ''));
+  }
+
+  #rememberLseq(author, lseq) {
+    const known = this.lastLseq.get(author);
+    if (known === undefined || lseq > known) this.lastLseq.set(author, lseq);
   }
 
   #verifyCheckpoint() {
@@ -177,7 +242,8 @@ class Session {
         log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
         return;
       }
-      const anchoredHash = checkpoint.gseq === 0 ? '' : this.journal[checkpoint.gseq - 1]?.hash;
+      const anchoredHash = checkpoint.gseq === 0
+        ? '' : this.journal.find((ev) => ev.gseq === checkpoint.gseq)?.hash;
       if (checkpoint.hash !== anchoredHash) {
         this.loadError = `checkpoint не збігається з журналом на gseq=${checkpoint.gseq}`;
         log(`[${this.name}] ${this.loadError}; нові commit заблоковано`);
@@ -195,6 +261,12 @@ class Session {
       session: this.name,
       gseq: this.head.gseq,
       hash: this.head.hash,
+      events: this.journal.length,
+      compacted: this.compacted,
+      archived_through: this.archivedThrough,
+      // Дедуплікація має пережити і рестарт, і стиснення: подія, яку вже
+      // викинули з живого журналу, не сміє закомітитись удруге.
+      authors: Object.fromEntries(this.lastLseq),
       updated_at: Date.now() / 1000,
     };
     const tmp = `${this.checkpointPath}.${process.pid}.tmp`;
@@ -216,6 +288,8 @@ class Session {
     if (this.loadError) throw new Error(this.loadError);
     const dedupeKey = `${author}:${lseq}`;
     if (this.seen.has(dedupeKey)) return { event: this.seen.get(dedupeKey), duplicate: true };
+    const known = this.lastLseq.get(author);
+    if (known !== undefined && lseq <= known) return { acked: true };
 
     // Реєстр ідентичності створюється один раз за сесію. Так вирішується гонка
     // одночасного конекту двох гравців: обидва бачать порожній журнал, обидва
@@ -244,7 +318,9 @@ class Session {
     this.journal.push(ev);
     this.seen.set(dedupeKey, ev);
     if (type === 'RegistryInit') this.registry = ev.payload;
+    this.#rememberLseq(author, lseq);
     this.#writeCheckpoint();
+    this.#maybeCompact();
     return { event: ev, duplicate: false };
   }
 
@@ -388,6 +464,44 @@ class Session {
     }));
   }
 
+  /** Стиснення живого журналу: історія їде в архів, на диску лишається
+   *  підпослідовність, що дає той самий стан. */
+  #maybeCompact() {
+    if (!COMPACT_AT || this.journal.length < this.nextCompactAt) return;
+    const { events: kept, dropped } = compactTail(this.journal);
+    this.nextCompactAt = this.journal.length + COMPACT_AT;
+    if (dropped / this.journal.length < COMPACT_MIN_GAIN) return;
+
+    const before = this.journal.length;
+    try {
+      // Спершу архів: втратити холодну історію гірше, ніж записати в неї двічі.
+      // Повторний діапазон після падіння між кроками читач розрізнить за gseq.
+      const fresh = this.journal.filter((ev) => ev.gseq > this.archivedThrough);
+      if (fresh.length) {
+        appendFileSync(this.archivePath, fresh.map((ev) => JSON.stringify(ev)).join('\n') + '\n');
+      }
+
+      this.journal = kept;
+      this.seen = new Map(kept.map((ev) => [`${ev.author}:${ev.lseq}`, ev]));
+      this.archivedThrough = this.head.gseq;
+      this.compacted = true;
+      this.nextCompactAt = kept.length + COMPACT_AT;
+      if (!this.#writeCheckpoint()) throw new Error(this.checkpointError);
+
+      const tmp = `${this.path}.${process.pid}.tmp`;
+      writeFileSync(tmp, kept.map((ev) => JSON.stringify(ev)).join('\n') + '\n');
+      renameSync(tmp, this.path);
+      this.compactError = null;
+      log(`[${this.name}] журнал стиснуто: ${before} -> ${kept.length} подій, ` +
+          `історія в ${this.name}.archive.jsonl`);
+    } catch (error) {
+      // Журнал у памʼяті вже стиснутий, на диску -- ще ні. Обидва дають той
+      // самий стан, а наступний commit ляже в кінець файлу як завжди.
+      this.compactError = error.message;
+      log(`[${this.name}] стиснення не завершилось: ${error.message}`);
+    }
+  }
+
   status() {
     return {
       session: this.name,
@@ -398,9 +512,13 @@ class Session {
       clients: this.onlineClients(),
       authors: this.authorStats(),
       locks: this.lockList(),
+      journal_events: this.journal.length,
+      compacted: this.compacted,
+      archived_through: this.archivedThrough,
       served_events: this.servedEvents,
       dropped_events: this.droppedEvents,
       journal_error: this.loadError,
+      compact_error: this.compactError,
       checkpoint_error: this.checkpointError,
     };
   }
@@ -649,6 +767,12 @@ wss.on('connection', (ws, req) => {
           return send({ m: 'error', code: 'journal_write_failed', text: 'подію не закомічено' });
         }
         if (!result) break; // повторний RegistryInit відхилено
+        if (result.acked) {
+          // Подія вже в журналі, але після стиснення її там могло не лишитись:
+          // повернути її самою собою не вийде, тож просто підтверджуємо lseq.
+          send({ m: 'ack', lseq: e.lseq });
+          break;
+        }
         const { event: ev, duplicate } = result;
         if (duplicate) {
           // Автор міг отримати commit, записати lastGseq і впасти до очищення outbox.

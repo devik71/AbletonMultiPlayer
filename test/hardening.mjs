@@ -546,3 +546,120 @@ test('порожня сесія вивантажується з памʼяті, 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+const jsonl = (file) => readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+test('журнал стискається, історія лишається в архіві й переживає рестарт', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-compact-'));
+  const port = await freePort();
+  let relay = spawnRelay(dir, port, { MP_COMPACT_AT: '10' });
+  const open = [];
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    const p1 = await relayClient(port, 'big', 'p1');
+    open.push(p1);
+
+    // 30 рухів одного фейдера -- усе, крім останнього, перекрите
+    for (let lseq = 1; lseq <= 30; lseq += 1) {
+      p1.send({
+        m: 'submit',
+        event: { type: 'MixerSet', payload: { track: { id: 't1' }, param: 'volume', value: lseq / 100 }, lseq },
+      });
+    }
+    const head = await p1.take((m) => m.m === 'commit' && m.event.gseq === 30, 8000);
+    await waitForOutput(relay, /журнал стиснуто/, 8000);
+
+    const live = jsonl(join(dir, 'big.jsonl'));
+    assert.ok(live.length < 10, `у живому журналі лишилось ${live.length} подій`);
+    assert.equal(live.at(-1).gseq, 30, 'head має лишатись у живому журналі');
+    assert.equal(live.at(-1).hash, head.event.hash);
+
+    const archived = new Set(jsonl(join(dir, 'big.archive.jsonl')).map((ev) => ev.gseq));
+    for (let gseq = 1; gseq <= 30; gseq += 1) {
+      assert.ok(archived.has(gseq), `холодний архів втратив подію #${gseq}`);
+    }
+
+    // Новий учасник усе одно доходить до фінального значення
+    const fresh = await relayClient(port, 'big', 'p2');
+    open.push(fresh);
+    const arrived = await fresh.take((m) => m.m === 'commit' && m.event.gseq === 30);
+    assert.equal(arrived.event.payload.value, 0.3);
+
+    for (const client of open.splice(0)) client.ws.close();
+    relay.kill();
+    await new Promise((resolve) => relay.once('exit', resolve));
+
+    relay = spawnRelay(dir, port, { MP_COMPACT_AT: '10' });
+    await waitForOutput(relay, /relay слухає/);
+    const p3 = await relayClient(port, 'big', 'p3');
+    open.push(p3);
+    assert.match(relay.out, /стиснутий \(архів до #30\)/);
+
+    p3.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 131 }, lseq: 1 } });
+    const next = await p3.take((m) => m.m === 'commit' && m.event.author === 'p3');
+    assert.equal(next.event.gseq, 31, 'нумерація має тривати');
+    assert.equal(next.event.prev_hash, head.event.hash, 'ланцюг має чіплятись за head');
+
+    // Дедуплікація пережила і стиснення, і рестарт: подія, якої вже немає
+    // в живому журналі, не комітиться вдруге.
+    const revenant = await relayClient(port, 'big', 'p1');
+    open.push(revenant);
+    revenant.drain();
+    revenant.send({
+      m: 'submit',
+      event: { type: 'MixerSet', payload: { track: { id: 't1' }, param: 'volume', value: 0.01 }, lseq: 3 },
+    });
+    const ack = await revenant.take((m) => m.m === 'ack');
+    assert.equal(ack.lseq, 3);
+    const afterAck = jsonl(join(dir, 'big.jsonl'));
+    assert.equal(afterAck.at(-1).gseq, 31, 'стара подія не мала лягти в журнал');
+  } finally {
+    for (const client of open) client.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('зниклий рядок у стиснутому журналі помічається', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-tamper-'));
+  const port = await freePort();
+  let relay = spawnRelay(dir, port, { MP_COMPACT_AT: '10' });
+  const open = [];
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    const p1 = await relayClient(port, 'big', 'p1');
+    open.push(p1);
+    for (let lseq = 1; lseq <= 30; lseq += 1) {
+      p1.send({
+        m: 'submit',
+        event: { type: 'MixerSet', payload: { track: { id: `t${lseq % 3}` }, param: 'volume', value: lseq / 100 }, lseq },
+      });
+    }
+    await p1.take((m) => m.m === 'commit' && m.event.gseq === 30, 8000);
+    await waitForOutput(relay, /журнал стиснуто/, 8000);
+
+    for (const client of open.splice(0)) client.ws.close();
+    relay.kill();
+    await new Promise((resolve) => relay.once('exit', resolve));
+
+    // Прибираємо один рядок: дірки в стиснутому журналі законні, тож ловить
+    // це не gseq, а кількість подій у checkpoint.
+    const kept = readFileSync(join(dir, 'big.jsonl'), 'utf8').split('\n').filter(Boolean);
+    writeFileSync(join(dir, 'big.jsonl'), kept.slice(1).join('\n') + '\n');
+
+    relay = spawnRelay(dir, port, { MP_COMPACT_AT: '10' });
+    await waitForOutput(relay, /relay слухає/);
+    const p2 = await relayClient(port, 'big', 'p2');
+    open.push(p2);
+    p2.send({ m: 'submit', event: { type: 'TempoSet', payload: { bpm: 140 }, lseq: 1 } });
+    const failed = await p2.take((m) => m.m === 'error');
+    assert.equal(failed.code, 'journal_write_failed');
+
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+    assert.match(health.sessions.find((s) => s.session === 'big').journal_error, /подій замість/);
+  } finally {
+    for (const client of open) client.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

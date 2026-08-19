@@ -291,6 +291,18 @@ function connect() {
       case 'file_chunk':
         filesync.onChunk(msg);
         break;
+      case 'ack': {
+        // Подія вже була закомічена раніше -- relay не може повернути її
+        // самою собою, бо стиснення прибрало її з журналу. Але outbox тримати
+        // її більше не треба.
+        const before = outbox.length;
+        outbox = outbox.filter((event) => event.lseq !== msg.lseq);
+        if (outbox.length !== before) {
+          saveOutbox();
+          log(`relay: подія lseq=${msg.lseq} вже була в журналі, прибрано з буфера`);
+        }
+        break;
+      }
       case 'locks':
         locks.onLocks(msg.locks, AUTHOR);
         break;
