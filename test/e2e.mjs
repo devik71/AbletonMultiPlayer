@@ -470,10 +470,51 @@ try {
     }
   });
 
-  await check('журнал: 45 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('bridge віддає повний стан сету, daemon збирає його з чанків', async () => {
+    // Кліп із нотою навмисно створюємо перед знімком: попередні перевірки свій
+    // кліп уже видалили, і без цього нотна гілка серіалізатора лишилась би сліпою
+    const notesFrom = l2.out.length;
+    l1.stdin.write('note 1 1 64 0 1 100\n');
+    await waitFor(l2, /<- #\d+ ClipNotesSet .*"pitch":64/, 8000, notesFrom);
+    const from = d1.out.length;
+    l1.stdin.write('fullstate\n');
+    await waitFor(d1, /state: знімок \d+ зібрано/, 10000, from);
+
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    if (state.version !== 1) throw new Error(`версія знімка ${state.version}`);
+
+    const named = state.tracks.find((t) => t.name === 'Bass Lead');
+    if (!named) throw new Error('у знімку немає перейменованого треку');
+    if (!named.devices.length || !named.devices[0].parameters.length) {
+      throw new Error('девайси треку не потрапили у знімок');
+    }
+
+    // Вкладений Rack: без chain_path девайс усередині chain неадресовний
+    const nested = state.tracks.concat(state.aux_tracks)
+      .flatMap((t) => t.devices).find((d) => d.chain_path?.length);
+    if (!nested) throw new Error('девайси всередині Rack chains не потрапили у знімок');
+
+    const master = state.aux_tracks.find((t) => t.kind === 'master');
+    if (master?.mixer?.volume !== 0.72) {
+      throw new Error(`гучність Master у знімку ${master?.mixer?.volume} замість 0.72`);
+    }
+    const withClip = state.tracks.find((t) => t.clips.length);
+    if (!withClip) throw new Error('Session-кліпи не потрапили у знімок');
+    const noted = withClip.clips.find((c) => (c.notes || []).some((n) => n.pitch === 64));
+    if (!noted) throw new Error('ноти кліпу не потрапили у знімок');
+    if (!noted.scene?.id || !noted.clip?.length) {
+      throw new Error('кліп у знімку без адреси сцени або довжини');
+    }
+
+    if (!state.scenes.length || !state.scenes.every((s) => s.id)) {
+      throw new Error('сцени у знімку без uuid');
+    }
+  });
+
+  await check('журнал: 47 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 45) throw new Error(`очікував 45 подій, у журналі ${lines.length}`);
+    if (lines.length !== 47) throw new Error(`очікував 47 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

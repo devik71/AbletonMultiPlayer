@@ -23,12 +23,13 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ### Bridge → Daemon
 
 ```jsonc
-{"m":"hello","live":"12.3.8","script":"0.18.0","pid":1234,"features":["apply_ack","ai_chat","authenticated_lom"],"events":[...]}
+{"m":"hello","live":"12.3.8","script":"0.18.0","pid":1234,"features":["apply_ack","ai_chat","authenticated_lom","full_state"],"events":[...]}
 {"m":"bye"}
 {"m":"heartbeat","t":1723000000.0}
 {"m":"event","type":"TransportSet","payload":{"playing":true},"lseq":7}
 {"m":"snapshot","state":{"tempo":128.0,"playing":false,"tracks":[...]}}
 {"m":"apply_ack","gseq":42,"ok":true}
+{"m":"state_chunk","id":3,"seq":0,"total":4,"chars":118000,"data":"<фрагмент JSON>"}
 {"m":"log","level":"warn","text":"..."}
 ```
 
@@ -37,6 +38,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python)
 ```jsonc
 {"m":"apply","type":"TransportSet","payload":{"playing":true},"gseq":42}
 {"m":"snapshot_request"}
+{"m":"state_request"}
 {"m":"registry_build"}
 {"m":"registry_adopt","registry":{"tracks":[...],"scenes":[...],"aux_tracks":[...],"chains":[...]}}
 {"m":"ping","t":1723000000.0}
@@ -52,6 +54,62 @@ Daemon спочатку персистить чужий commit у `<author>.<ses
 видаляє його лише після `apply_ack`. Черга не має ліміту в 500 подій і переживає
 рестарт daemon до появи Live. Bridge без feature `apply_ack` підтримується в legacy-
 режимі, але для нього UDP-відправка все ще вважається доставкою без підтвердження.
+
+### Повний стан сету
+
+Журнал -- це дельта поверх `.als`, який обидві машини відкрили з копії. Але
+дельта нічого не каже про те, чи справді два сети зараз однакові, і не допоможе
+тому, хто відкрив проєкт уперше. Для цього bridge уміє віддати **повний знімок**
+усього, що він синхронізує.
+
+Знімок не подія: у журнал він не потрапляє й порядку не має. Запитує його daemon
+одразу після `hello`, якщо bridge оголосив feature `full_state`.
+
+```jsonc
+{"m":"state_request"}
+{"m":"state_chunk","id":3,"seq":0,"total":4,"chars":118000,"data":"<фрагмент JSON>"}
+```
+
+Форма знімка -- ті самі адреси, що й у подіях: uuid треків і сцен, `chain_path`,
+сигнатура девайса плюс `ordinal`. Тому знімок не вводить окремої мови опису
+стану, і читається тими самими шляхами, якими застосовується подія.
+
+```jsonc
+{
+  "version": 1, "script": "0.18.0", "live": "12.3.8", "at": 1723000000.0,
+  "tempo": 128.0, "playing": false,
+  "tracks": [{
+    "id": "8fa1…", "idx": 0, "name": "Bass", "color": 16755200, "kind": "midi",
+    "mixer": {"volume": 0.85, "panning": 0.0, "sends": [{"index": 0, "value": 0.25}],
+              "mute": false, "solo": false, "arm": false},
+    "devices": [{"chain_path": [{"id": "c1…"}],
+                 "device": {"class_name": "Compressor2", "class_display_name": "Compressor", "ordinal": 0},
+                 "parameters": [{"name": "Threshold", "ordinal": 0, "value": 0.5}]}],
+    "clips": [{"scene": {"id": "df9…"}, "clip": {"length": 4.0, "name": "", "color": 16755200},
+               "notes": [{"pitch": 60, "start_time": 0.0, "duration": 1.0, "velocity": 100}]}]
+  }],
+  "aux_tracks": [{"id": "a1…", "kind": "return", "idx": 0, "name": "A-Reverb", "mixer": {…}, "devices": [...]}],
+  "scenes": [{"id": "df9…", "idx": 0, "name": "Intro", "color": 10053171}]
+}
+```
+
+Обʼєкт без uuid у знімок не потрапляє: він однаково неадресовний для партнера.
+
+**Чому чанками.** Знімок реального сету -- сотні кілобайт, а датаграма обмежена
+65507 байтами (`link.py`), і bridge просто викинув би її з `datagram too large`.
+Тому JSON ріжеться по 30000 символів, і чанки йдуть **порціями по тіках** (шість
+на тік, ~10 тіків на секунду). Залп у сотню датаграм переповнив би приймальний
+буфер daemon, і UDP тихо викинув би частину.
+
+**Збірка** (`daemon/state.js`) віддає назовні тільки повний знімок. Порядок
+чанків не має значення; новий `id` скасовує напівзібраний старий (доганяти його
+немає сенсу -- свіжий однаково повніший); напівзібраний протухає за 15 с; довжина
+склеєного JSON звіряється з оголошеною `chars`. Зібраний знімок лягає в
+`<state-dir>/<author>.<session>.state.json`, а в лог іде підсумок із digest --
+по ньому видно, чи розійшлись сети на двох машинах.
+
+Застосування знімка (`snapshot_apply`) ще немає: це наступний крок, і саме він
+дозволить новому учаснику приєднатись до сету, який він бачить уперше.
 
 ## 2. Daemon ⇄ Relay — JSON over WebSocket
 

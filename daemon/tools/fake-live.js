@@ -295,7 +295,7 @@ const sendHello = () =>
     live: arg('live', 'fake-12.3.8'),
     script: arg('script', '0.18.0-fake'),
     pid: process.pid,
-    features: ['apply_ack'],
+    features: ['apply_ack', 'full_state'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
@@ -317,6 +317,133 @@ const snapshot = () => ({
   tracks: song.tracks.map((t, idx) => ({ ...t, idx })),
   scenes: song.scenes.map((s, idx) => ({ ...s, idx })),
 });
+
+// ------------------------------------------------------- повний стан (state)
+//
+// Дзеркало _full_state() з Remote Script: та сама форма й ті самі адреси, щоб
+// серіалізатор можна було ганяти без Live.
+const STATE_CHUNK_CHARS = 30000;
+const STATE_CHUNKS_PER_TICK = 6;
+let stateQueue = [];
+let stateId = 0;
+
+const mixerState = (track) => {
+  const mixer = {};
+  for (const [key, value] of Object.entries(track.mix || {})) {
+    const [param, idx] = key.split(':');
+    if (param === 'send') {
+      mixer.sends = mixer.sends || [];
+      mixer.sends.push({ index: Number(idx), value });
+    } else {
+      mixer[param] = value;
+    }
+  }
+  for (const prop of ['mute', 'solo', 'arm']) {
+    if (prop in track) mixer[prop] = !!track[prop];
+  }
+  return mixer;
+};
+
+const deviceEntries = (track) => {
+  const out = [];
+  const walk = (container, chainPath, depth) => {
+    if (depth > 16) return;
+    const ordinals = new Map();
+    for (const device of container.devices || []) {
+      const signature = `${device.class_name}|${device.class_display_name}`;
+      const ordinal = ordinals.get(signature) || 0;
+      ordinals.set(signature, ordinal + 1);
+      const nameOrdinals = new Map();
+      const parameters = (device.parameters || []).map((parameter) => {
+        const pordinal = nameOrdinals.get(parameter.name) || 0;
+        nameOrdinals.set(parameter.name, pordinal + 1);
+        return { name: parameter.name, ordinal: pordinal, value: parameter.value };
+      });
+      const entry = {
+        device: {
+          class_name: device.class_name,
+          class_display_name: device.class_display_name,
+          ordinal,
+        },
+        parameters,
+      };
+      if (chainPath.length) entry.chain_path = chainPath;
+      out.push(entry);
+      for (const [, chains] of chainGroups(device)) {
+        for (const chain of chains) {
+          if (chain.id) walk(chain, [...chainPath, { id: chain.id }], depth + 1);
+        }
+      }
+    }
+  };
+  walk(track, [], 0);
+  return out;
+};
+
+const clipsState = (track) => (track.clips || []).map((clip, idx) => {
+  const scene = song.scenes[idx];
+  if (!clip || !scene?.id) return null;
+  const entry = {
+    scene: { id: scene.id },
+    clip: { length: clip.length, name: clip.name, color: clip.color },
+  };
+  if (clip.kind === 'midi') entry.notes = clip.notes;
+  return entry;
+}).filter(Boolean);
+
+const fullState = () => ({
+  version: 1,
+  script: arg('script', '0.18.0-fake'),
+  live: arg('live', 'fake-12.3.8'),
+  at: Date.now() / 1000,
+  tempo: song.tempo,
+  playing: song.playing,
+  tracks: song.tracks.filter((t) => t.id).map((t, idx) => ({
+    id: t.id,
+    idx,
+    name: t.name,
+    color: t.color,
+    kind: t.kind || (/MIDI/i.test(t.name) ? 'midi' : 'audio'),
+    mixer: mixerState(t),
+    devices: deviceEntries(t),
+    clips: clipsState(t),
+  })),
+  aux_tracks: auxTracks().filter((t) => t.id).map((t) => ({
+    id: t.id,
+    kind: t.kind,
+    idx: t.kind === 'return' ? song.return_tracks.indexOf(t) : 0,
+    name: t.name,
+    color: t.color,
+    mixer: mixerState(t),
+    devices: deviceEntries(t),
+  })),
+  scenes: song.scenes.filter((s) => s.id).map((s, idx) => ({
+    id: s.id, idx, name: s.name, color: s.color,
+  })),
+});
+
+function queueState(requestId) {
+  const blob = JSON.stringify(fullState());
+  stateId += 1;
+  const id = requestId ?? stateId;
+  const chunks = [];
+  for (let i = 0; i < blob.length; i += STATE_CHUNK_CHARS) {
+    chunks.push(blob.slice(i, i + STATE_CHUNK_CHARS));
+  }
+  if (!chunks.length) chunks.push('');
+  stateQueue = chunks.map((data, seq) => ({
+    m: 'state_chunk', id, seq, total: chunks.length, chars: blob.length, data,
+  }));
+  console.log(`state: ${blob.length} символів у ${chunks.length} чанках (id=${id})`);
+}
+
+// Порціями по тіках, як у bridge: залп датаграм переповнив би приймальний буфер.
+setInterval(() => {
+  for (let i = 0; i < STATE_CHUNKS_PER_TICK && stateQueue.length; i += 1) {
+    send(stateQueue.shift());
+  }
+}, 100).unref();
+
 
 function buildRegistry() {
   song.tracks.forEach((t) => (t.id = newId()));
@@ -545,6 +672,7 @@ udp.on('message', (buf) => {
       send({ m: 'apply_ack', gseq: msg.gseq, ok: false, error: error.message });
     }
   }
+  else if (msg.m === 'state_request') queueState(msg.id);
   else if (msg.m === 'snapshot_request') send({ m: 'snapshot', state: snapshot() });
   else if (msg.m === 'registry_build') send({ m: 'registry', registry: buildRegistry() });
   else if (msg.m === 'registry_adopt') adoptRegistry(msg.registry || {});
@@ -804,6 +932,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log(`трек ${t.name} тепер на позиції ${to}, id незмінний: ${t.id}`);
       break;
     }
+    case 'fullstate':
+      queueState();
+      break;
     case 'state':
       console.log(JSON.stringify(snapshot(), null, 2));
       break;
@@ -812,6 +943,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     default:
       console.log([
         'play | stop | tempo <bpm>',
+        'fullstate -- повний знімок сету чанками',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
         'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',

@@ -286,7 +286,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 31 unit/hardening + 44 E2E-перевірки
+npm test                   # 38 unit/hardening + 45 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 
@@ -319,6 +319,13 @@ node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного �
 
 **Локальний Ctrl+Z у Live не породжує події** — LOM не дає хука на undo-стек.
 Відомий розсинхрон.
+
+Bridge уміє віддати **повний знімок сету** (треки, мікшер, девайси з параметрами,
+сцени, Session-кліпи з нотами). Daemon просить його при кожному підключенні
+bridge і кладе в `daemon/state/<author>.<session>.state.json`, а в лог пише
+підсумок із digest — по ньому видно, чи розійшлись сети на двох машинах.
+Застосування знімка ще немає, тож приєднатись до сету, який бачиш уперше,
+поки не можна.
 
 **MIDI-синхронізація поки охоплює лише Session View.** Arrangement-кліпи,
 audio clip creation, clip envelopes, loop/start markers і довжина вже

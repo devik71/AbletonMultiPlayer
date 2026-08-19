@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { FileSync } from './filesync.js';
 import { LockKeeper } from './locks.js';
+import { StateCollector, stateDigest, summarize } from './state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -126,6 +127,26 @@ const locks = new LockKeeper({
   log,
 });
 
+// Повний стан сету: bridge шле його чанками, ми збираємо і кладемо на диск.
+// Це діагностика й основа для майбутнього застосування знімка -- у журнал
+// стан не потрапляє, бо це не подія.
+const fullStatePath = join(STATE_DIR, `${SLUG}.state.json`);
+const stateCollector = new StateCollector({
+  log,
+  onComplete: (state, info) => {
+    try {
+      writeFileSync(fullStatePath, JSON.stringify(state, null, 2));
+    } catch (error) {
+      return log(`state: не вдалось записати ${fullStatePath}: ${error.message}`);
+    }
+    const counts = summarize(state);
+    log(`state: знімок ${info.id} зібрано, ${info.chars} символів, digest ${stateDigest(state)} — ` +
+        `${counts.tracks} треків, ${counts.aux_tracks} Return/Master, ${counts.scenes} сцен, ` +
+        `${counts.devices} девайсів, ${counts.parameters} параметрів, ` +
+        `${counts.clips} кліпів, ${counts.notes} нот`);
+  },
+});
+
 const PROJECT = arg('project', null);
 
 // ---------------------------------------------------------------------- UDP
@@ -184,6 +205,9 @@ udp.on('message', (buf) => {
       break;
     case 'event':
       submit(msg.type, msg.payload);
+      break;
+    case 'state_chunk':
+      stateCollector.chunk(msg);
       break;
     case 'snapshot':
       // фаза 1: снапшот лише для діагностики, не для реконструкції стану
@@ -386,12 +410,20 @@ function reportSamples(s) {
 }
 
 /** Або віддаємо bridge готовий реєстр сесії, або просимо створити новий. */
+/** Знімок має сенс лише після adopt: до нього обʼєкти ще без uuid, і bridge
+ *  чесно віддав би порожній стан. */
+function requestFullState() {
+  if (!bridgeAlive || !bridgeInfo?.features?.includes('full_state')) return;
+  toBridge({ m: 'state_request' });
+}
+
 function bootstrapRegistry() {
   if (!bridgeAlive || !connected || registryAsked) return;
   registryAsked = true;
   if (registry) {
     log('віддаю bridge реєстр сесії');
     toBridge({ m: 'registry_adopt', registry });
+    requestFullState();
   } else {
     log('сесія без реєстру — прошу bridge створити');
     toBridge({ m: 'registry_build' });
@@ -475,7 +507,10 @@ function onCommit(ev) {
     outbox = outbox.filter((e) => e.type !== 'RegistryInit');
     saveOutbox();
     log(`#${ev.gseq} RegistryInit від ${ev.author} — віддаю bridge`);
-    if (bridgeAlive) toBridge({ m: 'registry_adopt', registry });
+    if (bridgeAlive) {
+      toBridge({ m: 'registry_adopt', registry });
+      requestFullState();
+    }
     return;
   }
 

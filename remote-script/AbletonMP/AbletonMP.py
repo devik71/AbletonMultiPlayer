@@ -61,6 +61,15 @@ DEBOUNCE_MAX_HOLD = 1.0
 # snapshot can exceed the localhost UDP datagram limit; 4 beats x 16 pitches
 # keeps each semantic event bounded while preserving last-global-seq wins for
 # overlapping edits.
+# Повний стан не влазить в один датаграм, тож іде чанками з паузами по тіках.
+# Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
+# щоб не просити того, чого нема.
+FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state"]
+
+STATE_VERSION = 1
+STATE_CHUNK_CHARS = 30000
+STATE_CHUNKS_PER_TICK = 6
+
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
 NOTE_FIELDS = (
@@ -105,6 +114,8 @@ class AbletonMP(ControlSurface):
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
+        self._state_queue = []   # чанки повного стану, віддаються по тіках
+        self._state_id = 0
         self._tracks_reg = Registry(self._log)
         self._scenes_reg = Registry(self._log)
         self._aux_tracks_reg = Registry(self._log)
@@ -147,7 +158,7 @@ class AbletonMP(ControlSurface):
             "script": SCRIPT_VERSION,
             "pid": os.getpid(),
             "events": APPLY_TYPES,
-            "features": ["apply_ack", "ai_chat", "authenticated_lom"],
+            "features": FEATURES,
         })
         self._link.send({"m": "snapshot", "state": self._snapshot()})
         self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
@@ -2067,6 +2078,7 @@ class AbletonMP(ControlSurface):
         self._safe(self._flush_clips)
         self._safe(self._flush_notes)
         self._safe(self._flush_pending)
+        self._safe(self._flush_state)
         now = time.time()
         if now - self._last_beat >= HEARTBEAT_SEC:
             self._last_beat = now
@@ -2083,6 +2095,8 @@ class AbletonMP(ControlSurface):
                                  "ok": False, "error": repr(e)})
                 raise
             self._link.send({"m": "apply_ack", "gseq": gseq, "ok": True})
+        elif m == "state_request":
+            self._safe(self._queue_state, msg.get("id"))
         elif m == "snapshot_request":
             self._link.send({"m": "snapshot", "state": self._snapshot()})
         elif m == "hello_request":
@@ -2093,7 +2107,7 @@ class AbletonMP(ControlSurface):
                 "script": SCRIPT_VERSION,
                 "pid": os.getpid(),
                 "events": APPLY_TYPES,
-                "features": ["apply_ack", "ai_chat", "authenticated_lom"],
+                "features": FEATURES,
             })
         elif m == "registry_build":
             self._link.send({"m": "registry", "registry": self._build_registry()})
@@ -3006,6 +3020,195 @@ class AbletonMP(ControlSurface):
         if kind == "return":
             return ("mute", "solo")
         return ("mute", "solo", "arm")
+
+    # ------------------------------------------------------------ full state
+
+    def _queue_state(self, request_id=None):
+        """Збирає повний стан і ставить його в чергу на відправку чанками."""
+        state = self._full_state()
+        try:
+            blob = json.dumps(state, sort_keys=True, ensure_ascii=True,
+                              separators=(",", ":"))
+        except Exception as e:
+            self._warn("state: не серіалізується (%r)" % (e,))
+            return
+        self._state_id += 1
+        sid = self._state_id if request_id is None else request_id
+        chunks = [blob[i:i + STATE_CHUNK_CHARS]
+                  for i in range(0, len(blob), STATE_CHUNK_CHARS)] or [""]
+        self._state_queue = [
+            {"m": "state_chunk", "id": sid, "seq": i, "total": len(chunks),
+             "chars": len(blob), "data": chunk}
+            for i, chunk in enumerate(chunks)
+        ]
+        self._log("state: %d symbols in %d chunks (id=%s)" % (len(blob), len(chunks), sid))
+
+    def _flush_state(self):
+        """Чанки йдуть порціями по тіках. Залп у сотню датаграм переповнив би
+        приймальний буфер daemon, і UDP тихо викинув би частину, а зібраний
+        наполовину стан гірший за відсутній."""
+        if not self._state_queue:
+            return
+        for _ in range(STATE_CHUNKS_PER_TICK):
+            if not self._state_queue:
+                return
+            if not self._link.send(self._state_queue[0]):
+                return  # daemon мовчить, спробуємо на наступному тіку
+            self._state_queue.pop(0)
+
+    def _full_state(self):
+        """Повний знімок усього, що bridge уміє синхронізувати.
+
+        Адреси ті самі, що й у подіях: uuid треків і сцен, chain_path, сигнатура
+        девайса плюс ordinal. Тому знімок не потребує окремої мови опису стану,
+        він читається тими самими шляхами, якими застосовується подія.
+        """
+        try:
+            doc_scenes = list(self._doc.scenes)
+        except Exception:
+            doc_scenes = []
+        scenes = []
+        for idx, scene in enumerate(doc_scenes):
+            sid = self._scenes_reg.id_of(scene, create=False)
+            if not sid:
+                continue
+            scenes.append({
+                "id": sid,
+                "idx": idx,
+                "name": self._safe_name(scene),
+                "color": self._safe_color(scene),
+            })
+
+        try:
+            doc_tracks = list(self._doc.tracks)
+        except Exception:
+            doc_tracks = []
+        tracks = []
+        for idx, track in enumerate(doc_tracks):
+            tid = self._tracks_reg.id_of(track, create=False)
+            if not tid:
+                continue  # без uuid обʼєкт неадресовний, тож у знімку йому не місце
+            tracks.append({
+                "id": tid,
+                "idx": idx,
+                "name": self._safe_name(track),
+                "color": self._safe_color(track),
+                "kind": self._track_kind(track),
+                "mixer": self._state_mixer(track),
+                "devices": self._state_devices(track),
+                "clips": self._state_clips(track, doc_scenes),
+            })
+
+        aux_tracks = []
+        for kind, idx, track in self._iter_aux_tracks():
+            aid = self._aux_tracks_reg.id_of(track, create=False)
+            if not aid:
+                continue
+            aux_tracks.append({
+                "id": aid,
+                "kind": kind,
+                "idx": idx,
+                "name": self._safe_name(track),
+                "color": self._safe_color(track),
+                "mixer": self._state_mixer(track),
+                "devices": self._state_devices(track),
+            })
+
+        try:
+            tempo = round(float(self._doc.tempo), 6)
+        except Exception:
+            tempo = None
+        try:
+            playing = bool(self._doc.is_playing)
+        except Exception:
+            playing = None
+
+        return {
+            "version": STATE_VERSION,
+            "script": SCRIPT_VERSION,
+            "live": self._live_version(),
+            "at": time.time(),
+            "tempo": tempo,
+            "playing": playing,
+            "tracks": tracks,
+            "aux_tracks": aux_tracks,
+            "scenes": scenes,
+        }
+
+    def _state_mixer(self, track):
+        mixer = {}
+        for param, idx in self._mix_slots(track):
+            parameter = self._mix_param(track, param, idx)
+            if parameter is None:
+                continue
+            try:
+                value = round(float(parameter.value), 6)
+            except Exception:
+                continue
+            if param == "send":
+                mixer.setdefault("sends", []).append({"index": idx, "value": value})
+            else:
+                mixer[param] = value
+        for prop in self._toggle_props(track):
+            try:
+                mixer[prop] = bool(getattr(track, prop))
+            except Exception:
+                pass
+        return mixer
+
+    def _state_devices(self, track):
+        devices = []
+        for container, device, chain_path in self._iter_track_devices(track):
+            ref = self._device_ref(container, device)
+            if ref is None:
+                continue
+            try:
+                items = list(device.parameters)
+            except Exception:
+                items = []
+            parameters = []
+            for parameter in items:
+                pref = self._device_parameter_ref(device, parameter)
+                if pref is None:
+                    continue
+                try:
+                    pref["value"] = round(float(parameter.value), 6)
+                except Exception:
+                    continue
+                parameters.append(pref)
+            entry = {"device": ref, "parameters": parameters}
+            if chain_path:
+                entry["chain_path"] = chain_path
+            devices.append(entry)
+        return devices
+
+    def _state_clips(self, track, scenes):
+        clips = []
+        try:
+            slots = list(track.clip_slots)
+        except Exception:
+            return clips
+        for i, scene in enumerate(scenes):
+            if i >= len(slots):
+                break
+            sid = self._scenes_reg.id_of(scene, create=False)
+            if not sid:
+                continue
+            try:
+                slot = slots[i]
+                if not slot.has_clip:
+                    continue
+                clip = slot.clip
+            except Exception:
+                continue
+            entry = {"scene": {"id": sid}, "clip": self._clip_meta(clip)}
+            try:
+                if clip.is_midi_clip:
+                    entry["notes"] = self._clip_notes(clip)
+            except Exception:
+                pass
+            clips.append(entry)
+        return clips
 
     def _snapshot(self):
         tracks = []
