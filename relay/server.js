@@ -17,6 +17,11 @@ const PORT = Number(process.env.MP_RELAY_PORT || 19870);
 const PROTO = 1;
 const JOURNAL_DIR = process.env.MP_JOURNAL_DIR || join(__dirname, 'journals');
 const MAX_WS_PAYLOAD = 2 * 1024 * 1024;
+// Обрив мережі (вимкнений Wi-Fi, приспана машина) не закриває TCP-сокет: без
+// цього мертвий клієнт лишався б у peers і в /health до системного таймауту.
+// Пінг тримає з'єднання живим, тиша довша за STALE_SEC вважається смертю.
+const HEARTBEAT_SEC = Number(process.env.MP_HEARTBEAT_SEC || 15);
+const STALE_SEC = Number(process.env.MP_STALE_SEC || 45);
 
 function validSessionName(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 128 &&
@@ -212,6 +217,7 @@ class Session {
       port: c.port,
       connected_at: c.connectedAt,
       connected_sec: Math.max(0, Math.round(now - c.connectedAt)),
+      idle_sec: Math.max(0, Math.round(now - c.lastSeen)),
       live: c.info?.live ?? null,
       script: c.info?.script ?? null,
       features: c.info?.features ?? [],
@@ -333,6 +339,24 @@ const http = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: http, maxPayload: MAX_WS_PAYLOAD });
 
+// Усі з'єднання, включно з тими, що ще не зробили join: половинчасто відкритий
+// сокет без join теж треба прибирати, інакше він висітиме вічно.
+const clients = new Set();
+
+const heartbeat = setInterval(() => {
+  const now = Date.now() / 1000;
+  for (const client of clients) {
+    const idle = now - client.lastSeen;
+    if (idle > STALE_SEC) {
+      const who = client.author || '(без join)';
+      log(`${who} мовчить ${Math.round(idle)} с — розриваю зʼєднання`);
+      client.ws.terminate(); // 'close' прибере його з сесії й розішле peers
+      continue;
+    }
+    if (client.ws.readyState === 1) client.ws.ping();
+  }
+}, HEARTBEAT_SEC * 1000);
+
 wss.on('connection', (ws, req) => {
   const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   const socket = req.socket || {};
@@ -344,8 +368,14 @@ wss.on('connection', (ws, req) => {
     ip: ip.replace(/^::ffff:/, ''),
     port: socket.remotePort ?? null,
     connectedAt: Date.now() / 1000,
+    lastSeen: Date.now() / 1000,
     info: null,
   };
+  clients.add(client);
+
+  // Будь-який трафік від клієнта -- ознака життя: і app-level ping daemon'а
+  // (кожні 15 с, clock sync), і автоматичний pong на наш ws-ping.
+  ws.on('pong', () => { client.lastSeen = Date.now() / 1000; });
 
   const send = (msg) => {
     if (ws.readyState === 1) ws.send(JSON.stringify(msg));
@@ -353,6 +383,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (raw) => {
     const t1 = Date.now() / 1000;
+    client.lastSeen = t1;
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -444,7 +475,12 @@ wss.on('connection', (ws, req) => {
       // Тут це стає видимим одразу при конекті, а не після звірки двох логів.
       case 'client_info': {
         if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
-        client.info = { live: msg.live, script: msg.script, events: msg.events || [] };
+        client.info = {
+          live: msg.live,
+          script: msg.script,
+          features: msg.features || [],
+          events: msg.events || [],
+        };
         for (const other of client.session.clients) {
           if (other === client || !other.info) continue;
 
@@ -481,6 +517,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    clients.delete(client);
     if (!client.session) return;
     client.session.clients.delete(client);
     client.session.broadcast({ m: 'peers', peers: client.session.peers() });
@@ -493,3 +530,26 @@ wss.on('connection', (ws, req) => {
 http.listen(PORT, () => {
   log(`relay слухає ws://0.0.0.0:${PORT} (proto ${PROTO}), журнали в ${JOURNAL_DIR}`);
 });
+
+// Checkpoint пишеться після кожного commit, тож тут лишається тільки чесно
+// попрощатися: клієнт має побачити close, а не обрив, і одразу піти в реконект.
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`${signal}: закриваю relay, head сесій уже в checkpoint`);
+  clearInterval(heartbeat);
+  for (const client of clients) {
+    try { client.ws.close(1001, 'relay зупиняється'); } catch {}
+  }
+  http.close(() => {
+    log('relay зупинено');
+    process.exit(0);
+  });
+  setTimeout(() => {
+    log('клієнти не відпустили зʼєднання — вихід примусовий');
+    process.exit(0);
+  }, 3000).unref();
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

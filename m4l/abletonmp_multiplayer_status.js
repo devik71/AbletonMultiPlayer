@@ -145,7 +145,8 @@ function render(data) {
                     (c.port ? (":" + c.port) : "") +
                     "  live " + (c.live || "?") +
                     "  script " + (c.script || "?") +
-                    "  connected " + seconds(c.connected_sec || 0));
+                    "  connected " + seconds(c.connected_sec || 0) +
+                    "  idle " + seconds(c.idle_sec || 0));
             }
         }
 

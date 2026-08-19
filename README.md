@@ -113,6 +113,11 @@ npm start
 онлайн-гравців, їхні IP, Live/script версії, кількість дій по авторах і breakdown
 за типами подій. Журнали лежать у `relay/journals/<session>.jsonl`.
 
+Мовчазні зʼєднання relay пінгує кожні 15 с (`MP_HEARTBEAT_SEC`) і розриває
+після 45 с тиші (`MP_STALE_SEC`), тож гравець, у якого зник Wi-Fi, зникає
+з `peers` одразу, а не за системним таймаутом TCP. На `Ctrl+C` relay прощається
+з клієнтами штатно — вони йдуть у звичайний реконект.
+
 ### 3. Daemon — на кожній машині
 
 Відкрити другий термінал:
@@ -247,7 +252,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 Весь ланцюг ганяється без DAW:
 
 ```powershell
-npm test                   # 5 hardening/recovery + 42 E2E-перевірки
+npm test                   # 6 hardening/recovery + 42 E2E-перевірки
 node test/e2e.mjs          # лише E2E; E2E_VERBOSE=1 для повного виводу
 ```
 

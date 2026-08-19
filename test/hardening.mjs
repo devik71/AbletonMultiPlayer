@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -200,6 +200,104 @@ test('relay відхиляє traversal у назві сесії та не commit
     assert.match(anchoredHealth.sessions.find((s) => s.session === 'anchored').journal_error,
       /checkpoint не збігається/);
   } finally {
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Клієнт, який приймає, але нічого не відповідає -- саме так виглядає машина
+// з вимкненим Wi-Fi: TCP-сокет живий, ws-ping лишається без pong. Справжній
+// ws-клієнт для цього не годиться, бо pong він шле автоматично.
+const CRLF = String.fromCharCode(13, 10);
+
+function maskedFrame(text) {
+  const payload = Buffer.from(text);
+  const mask = randomBytes(4);
+  const masked = Buffer.from(payload);
+  for (let i = 0; i < masked.length; i += 1) masked[i] ^= mask[i % 4];
+  const header = payload.length < 126
+    ? Buffer.from([0x81, 0x80 | payload.length])
+    : Buffer.from([0x81, 0xfe, payload.length >> 8, payload.length & 0xff]);
+  return Buffer.concat([header, mask, masked]);
+}
+
+function deafClient(port, { session, author, features }) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1');
+    let upgraded = false;
+    let head = '';
+    socket.on('error', reject);
+    socket.on('connect', () => socket.write([
+      'GET / HTTP/1.1',
+      `Host: 127.0.0.1:${port}`,
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+      `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`,
+      'Sec-WebSocket-Version: 13',
+      '',
+      '',
+    ].join(CRLF)));
+    socket.on('data', (chunk) => {
+      if (upgraded) return; // welcome і ws-ping свідомо ігноруємо
+      head += chunk.toString('latin1');
+      if (!head.includes('101 Switching Protocols')) return;
+      upgraded = true;
+      socket.write(maskedFrame(JSON.stringify({ m: 'join', session, author, since: 0, proto: 1 })));
+      socket.write(maskedFrame(JSON.stringify({
+        m: 'client_info', live: '12.3.8', script: '0.18.0', features, events: ['TempoSet'],
+      })));
+      resolve(socket);
+    });
+  });
+}
+
+async function waitHealth(port, check, ms = 10000) {
+  const deadline = Date.now() + ms;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+    if (check(last)) return last;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`/health не дочекався потрібного стану: ${JSON.stringify(last)}`);
+}
+
+test('relay віддає features і прибирає мовчазного клієнта', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-heartbeat-'));
+  const port = await freePort();
+  const relay = spawn(process.execPath, [join(root, 'relay/server.js')], {
+    cwd: join(root, 'relay'),
+    env: {
+      ...process.env,
+      MP_RELAY_PORT: String(port),
+      MP_JOURNAL_DIR: dir,
+      MP_HEARTBEAT_SEC: '1',
+      MP_STALE_SEC: '2',
+    },
+  });
+  relay.out = '';
+  relay.stdout.on('data', (b) => { relay.out += b.toString(); });
+  relay.stderr.on('data', (b) => { relay.out += b.toString(); });
+
+  let deaf = null;
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    deaf = await deafClient(port, {
+      session: 'stale', author: 'ghost', features: ['apply_ack', 'ai_chat'],
+    });
+
+    const room = (health) => health.sessions.find((s) => s.session === 'stale');
+    const joined = room(await waitHealth(port, (h) => room(h)?.clients.length === 1));
+    assert.equal(joined.clients[0].author, 'ghost');
+    assert.deepEqual(joined.clients[0].features, ['apply_ack', 'ai_chat']);
+    assert.equal(joined.peers.length, 1);
+
+    const emptied = room(await waitHealth(port, (h) => room(h)?.online === 0));
+    assert.deepEqual(emptied.peers, []);
+    assert.deepEqual(emptied.clients, []);
+    assert.match(relay.out, /ghost мовчить/);
+  } finally {
+    if (deaf) deaf.destroy();
     relay.kill();
     rmSync(dir, { recursive: true, force: true });
   }
