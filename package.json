@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/compact.mjs test/locks.mjs test/state.mjs test/hardening.mjs test/recovery.mjs && node test/e2e.mjs",
+    "test": "node --test --test-concurrency=1 test/compact.mjs test/locks.mjs test/presence.mjs test/state.mjs test/hardening.mjs test/recovery.mjs && node test/e2e.mjs",
     "test:hardening": "node --test test/hardening.mjs",
     "test:recovery": "node --test test/recovery.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:compact": "node --test test/compact.mjs",
     "test:locks": "node --test test/locks.mjs",
-    "test:state": "node --test test/state.mjs"
+    "test:state": "node --test test/state.mjs",
+    "test:presence": "node --test test/presence.mjs"
   }
 }

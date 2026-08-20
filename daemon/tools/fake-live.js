@@ -89,6 +89,7 @@ const song = {
     { id: null, kind: 'return', name: 'A-Return', color: 0xaa55dd, devices: [fakeFilter(0.2), fakeRack()], mix: {}, mute: false, solo: false },
     { id: null, kind: 'return', name: 'B-Return', color: 0xdd5577, devices: [fakeFilter(0.3)], mix: {}, mute: false, solo: false },
   ],
+  view: { track: null, scene: null, screen: 'session' },
   master_track: { id: null, kind: 'master', name: 'Master', color: 0x777777, devices: [fakeFilter(0.7), fakeRack()], mix: {} },
   scenes: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: null, name: `Scene ${i + 1}`, color: 0x444444 + i })),
 };
@@ -297,7 +298,7 @@ const sendHello = () =>
     live: arg('live', 'fake-12.3.8'),
     script: arg('script', '0.18.0-fake'),
     pid: process.pid,
-    features: ['apply_ack', 'full_state', 'state_apply'],
+    features: ['apply_ack', 'full_state', 'state_apply', 'presence', 'view_follow'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
@@ -516,6 +517,52 @@ function startStateApply(path, id) {
   report.missing_more = missingMore;
   console.log(`state apply: ${report.ok} з ${report.total} (${report.skipped} пропущено, ${report.failed} помилок)`);
   send(report);
+}
+
+
+// ------------------------------------------------------------- вид (присутність)
+//
+// Дзеркало view-частини Remote Script: віддаємо, на що дивимось, і вміємо
+// поставити чужий вид. Головне тут -- застосування чужого виду НЕ породжує
+// власного повідомлення: саме це і перевіряє E2E на ping-pong.
+const viewPayload = () => {
+  const track = song.view.track;
+  const scene = song.view.scene;
+  if (!track?.id && !scene?.id) return null;
+  const view = { screen: song.view.screen, names: {} };
+  if (track?.id) {
+    view.track = track.kind ? { id: track.id, kind: track.kind } : { id: track.id };
+    view.names.track = track.name;
+  }
+  if (scene?.id) {
+    view.scene = { id: scene.id };
+    view.names.scene = scene.name;
+  }
+  if (track?.id && scene?.id && !track.kind) {
+    const idx = song.scenes.indexOf(scene);
+    if (idx >= 0 && track.clips?.[idx]) view.clip = { track: track.id, scene: scene.id };
+  }
+  return view;
+};
+
+function sendView() {
+  if (!registryReady) return; // до бутстрапу uuid ще не спільні
+  const view = viewPayload();
+  console.log(`-> view ${JSON.stringify(view)}`);
+  send({ m: 'view', view });
+}
+
+function applyViewSet(msg) {
+  const view = msg.view || {};
+  const track = view.track ? deviceTrackByRef(view.track) : null;
+  const sidx = view.scene?.id ? sceneIdx(view.scene.id) : -1;
+  if (view.track && !track) console.log(`<- view_set: трек ${view.track.id} невідомий`);
+  if (view.scene?.id && sidx < 0) console.log(`<- view_set: сцена ${view.scene.id} невідома`);
+  if (track) song.view.track = track;
+  if (sidx >= 0) song.view.scene = song.scenes[sidx];
+  console.log(`<- view_set від ${msg.from}: ${song.view.track?.name || '—'} / ` +
+    `${song.view.scene?.name || '—'}`);
+  // Назад нічого не шлемо: це чужий вид, а не наш рух.
 }
 
 
@@ -746,6 +793,8 @@ udp.on('message', (buf) => {
       send({ m: 'apply_ack', gseq: msg.gseq, ok: false, error: error.message });
     }
   }
+  else if (msg.m === 'view_set') applyViewSet(msg);
+  else if (msg.m === 'view_request') sendView();
   else if (msg.m === 'state_request') queueState(msg.id);
   else if (msg.m === 'state_apply') startStateApply(msg.path, msg.id);
   else if (msg.m === 'snapshot_request') send({ m: 'snapshot', state: snapshot() });
@@ -1007,6 +1056,18 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log(`трек ${t.name} тепер на позиції ${to}, id незмінний: ${t.id}`);
       break;
     }
+    case 'look': {
+      const target = deviceTrackFromArg(rest[0]);
+      if (!target) return console.log('немає такого треку');
+      song.view.track = target;
+      if (rest[1] !== undefined) song.view.scene = song.scenes[Number(rest[1])] || song.view.scene;
+      console.log(`дивлюсь на ${song.view.track.name} / ${song.view.scene?.name || '—'}`);
+      sendView();
+      break;
+    }
+    case 'view':
+      console.log(JSON.stringify(viewPayload()));
+      break;
     case 'fullstate':
       queueState();
       break;
@@ -1019,6 +1080,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log([
         'play | stop | tempo <bpm>',
         'fullstate -- повний знімок сету чанками',
+        'look <track|return:N|master> [scene] | view',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
         'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',

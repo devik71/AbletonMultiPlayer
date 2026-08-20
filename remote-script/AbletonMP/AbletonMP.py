@@ -64,7 +64,8 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Повний стан не влазить в один датаграм, тож іде чанками з паузами по тіках.
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
-FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply"]
+FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
+            "presence", "view_follow"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -75,6 +76,14 @@ STATE_APPLY_MAX_BYTES = 64 * 1024 * 1024
 NOTES_PER_REGION = 1024
 # Скільки різних прогалин несе звіт: далі йде лише лічильник.
 MISSING_LIMIT = 50
+
+# Присутність: погляд має бути жвавим, тож дебаунс менший за журнальний.
+# VIEW_MAX_HOLD дає стелю у два повідомлення на секунду.
+VIEW_DEBOUNCE_SEC = 0.15
+VIEW_MAX_HOLD = 0.5
+# Скільки після власного запису виду мовчати: Live може доправити виділення
+# асинхронно, якщо цільовий обʼєкт саме зник.
+VIEW_ECHO_WINDOW = 0.5
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -114,12 +123,17 @@ class AbletonMP(ControlSurface):
         self._last_beat = 0.0
         self._mirror = {
             "playing": None, "tempo": None, "psi": {}, "mix": {},
-            "device": {}, "notes": {}, "clips": {}, "meta": {},
+            "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
+        self._view_cbs = []      # підписки на song.view, окремо від _obj_cbs
+        self._view_pending = None
+        self._suppress_view = False
+        self._view_applied_at = 0.0
+        self._view_guard_logged = False
         self._state_queue = []   # чанки повного стану, віддаються по тіках
         self._state_id = 0
         self._apply_queue = []   # знімок, розкладений на події
@@ -158,6 +172,7 @@ class AbletonMP(ControlSurface):
         # Р° С†Рµ РѕРєСЂРµРјС– listener'Рё -- Р±РµР· С†СЊРѕРіРѕ РЅРѕРІС– send-Рё Р»РёС€РёР»РёСЃСЊ Р±Рё РЅС–РјРёРјРё
         self._doc.add_return_tracks_listener(self._cb_tracks)
         self._rewire_tracks()
+        self._wire_view()
         self._prime_mirror()
 
         self._link.send({
@@ -203,6 +218,7 @@ class AbletonMP(ControlSurface):
         self._safe(self._flush_notes, True)
         self._safe(self._flush_pending, True)
         self._unwire_tracks()
+        self._unwire_view()
         if self._doc is not None:
             for name, cb in (("is_playing", self._cb_is_playing),
                              ("tempo", self._cb_tempo),
@@ -224,12 +240,14 @@ class AbletonMP(ControlSurface):
 
     # ------------------------------------------------------------- listeners
 
-    def _listen(self, obj, prop, cb):
+    def _listen(self, obj, prop, cb, store=None):
         """РЈР·Р°РіР°Р»СЊРЅРµРЅР° РїС–РґРїРёСЃРєР°: LOM С‚СЂРёРјР°С” С”РґРёРЅСѓ СЃС…РµРјСѓ add_/remove_/_has_listener,
         С‚РѕР¶ РїРµСЂРµР»С–С‡СѓРІР°С‚Рё РєРѕР¶РµРЅ РїР°СЂР°РјРµС‚СЂ РѕРєСЂРµРјРѕ РЅРµ С‚СЂРµР±Р°."""
+        if store is None:
+            store = self._obj_cbs
         try:
             getattr(obj, "add_%s_listener" % prop)(cb)
-            self._obj_cbs.append((obj, prop, cb))
+            store.append((obj, prop, cb))
         except Exception:
             pass  # РїР°СЂР°РјРµС‚СЂР° С‚СѓС‚ РЅРµРјР°С” (РЅР°РїСЂ. arm РЅР° С‚СЂРµРєСѓ, СЏРєРёР№ РЅРµ РѕР·Р±СЂРѕСЋС”С‚СЊСЃСЏ)
 
@@ -406,6 +424,10 @@ class AbletonMP(ControlSurface):
             self._prime_notes()
             self._prime_metadata()
 
+            # Виділення могло переїхати разом зі структурою: адреса в підписі
+            # уже інша, навіть якщо користувач нічого не чіпав.
+            self._touch_view()
+
     def _on_scenes(self):
         if self._registry_ready:
             self._flush_notes(True)
@@ -416,6 +438,10 @@ class AbletonMP(ControlSurface):
             self._prime_devices()
             self._prime_notes()
             self._prime_metadata()
+
+            # Виділення могло переїхати разом зі структурою: адреса в підписі
+            # уже інша, навіть якщо користувач нічого не чіпав.
+            self._touch_view()
 
     def _on_devices(self):
         """Rebind observers after any Track/Chain/Rack structure change."""
@@ -470,6 +496,7 @@ class AbletonMP(ControlSurface):
         self._refresh_chains()
         reg["chains"] = list(self._chain_records)
         self._registry_ready = True
+        self._safe(self._touch_view, True)  # партнер має одразу побачити, де я
         self._rewire_tracks()
         self._prime_mixer()
         self._prime_devices()
@@ -543,6 +570,7 @@ class AbletonMP(ControlSurface):
                 problems.append("Rack chains unresolved: %d" % len(missing_chains))
 
         self._registry_ready = True
+        self._safe(self._touch_view, True)  # партнер має одразу побачити, де я
         self._rewire_tracks()
         self._prime_mixer()
         self._prime_devices()
@@ -2086,6 +2114,7 @@ class AbletonMP(ControlSurface):
         self._safe(self._flush_clips)
         self._safe(self._flush_notes)
         self._safe(self._flush_pending)
+        self._safe(self._flush_view)
         self._safe(self._flush_state)
         self._safe(self._flush_state_apply)
         now = time.time()
@@ -2106,6 +2135,10 @@ class AbletonMP(ControlSurface):
             self._link.send({"m": "apply_ack", "gseq": gseq, "ok": True})
         elif m == "state_apply":
             self._safe(self._start_state_apply, msg.get("path"), msg.get("id"))
+        elif m == "view_set":
+            self._safe(self._apply_view, msg)
+        elif m == "view_request":
+            self._safe(self._touch_view, True)
         elif m == "state_request":
             self._safe(self._queue_state, msg.get("id"))
         elif m == "snapshot_request":
@@ -3515,6 +3548,223 @@ class AbletonMP(ControlSurface):
             }, group))
             start = stop
         return regions
+
+    # ----------------------------------------------------------- присутність
+
+    def _wire_view(self):
+        """Підписка на вид.
+
+        Ці listener'и НЕ йдуть у self._obj_cbs навмисно: `_unwire_tracks()`
+        знімає звідти геть усе на кожній зміні структури сету, а `song.view` --
+        вічний обʼєкт документа. Інакше вічні підписки перевішувались би дарма,
+        ще й із вікном сліпоти між зняттям і поверненням.
+        """
+        view = getattr(self._doc, "view", None)
+        if view is None:
+            return
+        cb = self._make_view_cb()
+        for prop in ("selected_track", "selected_scene",
+                     "detail_clip", "highlighted_clip_slot"):
+            self._listen(view, prop, cb, store=self._view_cbs)
+        try:
+            app_view = Live.Application.get_application().view
+            self._listen(app_view, "focused_document_view", cb, store=self._view_cbs)
+        except Exception:
+            pass
+
+    def _unwire_view(self):
+        for obj, prop, cb in self._view_cbs:
+            try:
+                if getattr(obj, "%s_has_listener" % prop)(cb):
+                    getattr(obj, "remove_%s_listener" % prop)(cb)
+            except Exception:
+                pass  # обʼєкт міг померти разом із документом
+        self._view_cbs = []
+
+    def _make_view_cb(self):
+        def cb():
+            self._safe(self._on_view_changed)
+        return cb
+
+    def _on_view_changed(self):
+        # До бутстрапу реєстру uuid ще не спільні -- партнер не зрозумів би адреси
+        if not self._registry_ready:
+            return
+        now = time.time()
+        signature = self._view_signature()
+        # Я сам щойно поставив цей вид на прохання партнера. Запис у song.view
+        # кличе цей listener СИНХРОННО, ще всередині _apply_view, тож дзеркало
+        # тут лише доганяє факт -- відправляти назад нема чого.
+        if self._suppress_view or now - self._view_applied_at < VIEW_ECHO_WINDOW:
+            self._mirror["view"] = signature
+            return
+        if signature == self._mirror["view"]:
+            return
+        self._mirror["view"] = signature
+        first = self._view_pending["first"] if self._view_pending else now
+        self._view_pending = {"due": now + VIEW_DEBOUNCE_SEC, "first": first}
+
+    def _touch_view(self, force=False):
+        """Структура змінилась або реєстр щойно готовий: перерахувати підпис."""
+        if not self._registry_ready:
+            return
+        signature = self._view_signature()
+        if not force and signature == self._mirror["view"]:
+            return
+        self._mirror["view"] = signature
+        self._view_pending = {"due": 0.0, "first": time.time()}
+
+    def _flush_view(self):
+        pending = self._view_pending
+        if not pending:
+            return
+        now = time.time()
+        if now < pending["due"] and now - pending["first"] < VIEW_MAX_HOLD:
+            return
+        self._view_pending = None
+        self._link.send({"m": "view", "view": self._view_payload()})
+
+    @staticmethod
+    def _safe_attr(obj, name):
+        try:
+            return getattr(obj, name)
+        except Exception:
+            return None
+
+    def _view_signature(self):
+        payload = self._view_payload()
+        if payload is None:
+            return "none"
+        track = payload.get("track") or {}
+        scene = payload.get("scene") or {}
+        clip = payload.get("clip") or {}
+        return "%s:%s|%s|%s:%s|%s" % (
+            track.get("kind") or "track", track.get("id") or "-",
+            scene.get("id") or "-",
+            clip.get("track") or "-", clip.get("scene") or "-",
+            payload.get("screen") or "-")
+
+    def _view_payload(self):
+        """Адреси -- uuid, назви лише для показу: партнер резолвить у себе."""
+        view = getattr(self._doc, "view", None)
+        if view is None or not self._registry_ready:
+            return None
+        payload = {"names": {}}
+        track = self._safe_attr(view, "selected_track")
+        if track is not None:
+            ref = self._device_track_ref(track)
+            if ref:
+                payload["track"] = ref
+                payload["names"]["track"] = self._safe_name(track)
+        scene = self._safe_attr(view, "selected_scene")
+        if scene is not None:
+            sid = self._scenes_reg.id_of(scene, create=False)
+            if sid:
+                payload["scene"] = {"id": sid}
+                payload["names"]["scene"] = self._safe_name(scene)
+        clip = self._detail_clip_ref(view, track)
+        if clip:
+            payload["clip"] = clip
+        screen = self._focused_screen()
+        if screen:
+            payload["screen"] = screen
+        if "track" not in payload and "scene" not in payload:
+            return None
+        return payload
+
+    def _detail_clip_ref(self, view, track):
+        """Кліп адресується парою (track, scene) -- власного uuid у нього немає.
+        Тому Arrangement-кліп неадресовний, і це чесніше, ніж вигадати адресу."""
+        clip = self._safe_attr(view, "detail_clip")
+        if clip is None or track is None:
+            return None
+        tid = self._tracks_reg.id_of(track, create=False)
+        if not tid:
+            return None
+        try:
+            slots = list(track.clip_slots)
+            scenes = list(self._doc.scenes)
+        except Exception:
+            return None
+        for i, slot in enumerate(slots):
+            if i >= len(scenes):
+                break
+            try:
+                if not slot.has_clip or slot.clip != clip:
+                    continue
+            except Exception:
+                continue
+            sid = self._scenes_reg.id_of(scenes[i], create=False)
+            return {"track": tid, "scene": sid} if sid else None
+        return None
+
+    @staticmethod
+    def _focused_screen():
+        try:
+            focused = str(Live.Application.get_application().view.focused_document_view)
+        except Exception:
+            return None
+        return "arranger" if "Arranger" in focused else "session"
+
+    def _apply_view(self, msg):
+        """Єдине місце, де bridge пише song.view -- на явне прохання партнера.
+
+        Запис виділення нічого в проєкті не змінює, але виділений трек вирішує,
+        куди йде MIDI з клавіатури і що моніториться. Тож під запис чужий вид
+        не сміє смикати його мовчки.
+        """
+        doc_view = getattr(self._doc, "view", None)
+        if doc_view is None:
+            return
+        if self._recording_guard():
+            if not self._view_guard_logged:
+                self._view_guard_logged = True
+                self._warn("follow призупинено: трек озброєний, а транспорт грає")
+            return
+        self._view_guard_logged = False
+
+        view = msg.get("view") or {}
+        track = None
+        if view.get("track"):
+            track, _ref = self._resolve_device_track(view.get("track"))
+        sidx = self._resolve_scene(view.get("scene")) if view.get("scene") else None
+
+        # Прапорець і мітка часу виставляються ДО першого запису: listener
+        # спрацює синхронно, ще всередині цього виклику, і має мовчати навіть
+        # на проміжному стані (трек уже новий, сцена ще стара).
+        self._suppress_view = True
+        self._view_applied_at = time.time()
+        try:
+            if track is not None:
+                doc_view.selected_track = track
+            if sidx is not None:
+                scenes = list(self._doc.scenes)
+                if sidx < len(scenes):
+                    doc_view.selected_scene = scenes[sidx]
+                    try:
+                        slots = list(track.clip_slots) if track is not None else []
+                        if sidx < len(slots):
+                            doc_view.highlighted_clip_slot = slots[sidx]
+                    except Exception:
+                        pass  # у Return/Master слотів немає
+        finally:
+            self._suppress_view = False
+            # Вікно ехо лишається відкритим: Live може "доправити" виділення
+            # асинхронно, якщо цільовий обʼєкт саме зник.
+            self._view_applied_at = time.time()
+            self._mirror["view"] = self._view_signature()
+            self._view_pending = None
+
+    def _recording_guard(self):
+        try:
+            if not self._doc.is_playing:
+                return False
+            for track in self._doc.tracks:
+                if self._safe_attr(track, "arm"):
+                    return True
+        except Exception:
+            return False
+        return False
 
     def _snapshot(self):
         tracks = []

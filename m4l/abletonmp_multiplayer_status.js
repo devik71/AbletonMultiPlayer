@@ -178,6 +178,21 @@ function render(data) {
             }
         }
 
+        var watching = s.presence || [];
+        if (watching.length) {
+            lines.push("  looking at:");
+            for (var widx = 0; widx < watching.length; widx++) {
+                var w = watching[widx];
+                var view = w.view || {};
+                var names = view.names || {};
+                var where = [names.track, names.scene].filter(function (v) { return !!v; }).join(" / ");
+                lines.push("    " + w.author + "  " + (where || "—") +
+                    (view.screen ? ("  [" + view.screen + "]") : "") +
+                    (w.following ? ("  -> follows " + w.following) : "") +
+                    ((w.age_sec || 0) > 30 ? ("  (stale " + seconds(w.age_sec) + ")") : ""));
+            }
+        }
+
         var authors = s.authors || [];
         if (authors.length) {
             lines.push("  action counts:");

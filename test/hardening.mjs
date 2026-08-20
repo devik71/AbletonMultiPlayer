@@ -765,3 +765,62 @@ test('MP_FSYNC=1 не змінює вміст журналу, лише шлях 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('relay тримає присутність по автору і прибирає її разом із гравцем', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-presence-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port);
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const open = [];
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    const p1 = await relayClient(port, 'watch', 'p1');
+    const p2 = await relayClient(port, 'watch', 'p2');
+    open.push(p1, p2);
+    p2.drain();
+
+    p1.send({ m: 'presence', view: { track: { id: 't1' }, names: { track: 'x'.repeat(200) } } });
+    const first = await p2.take((m) => m.m === 'presence');
+    assert.equal(first.list.length, 1);
+    assert.equal(first.list[0].author, 'p1');
+    assert.equal(first.list[0].view.names.track.length, 64, 'назва має обрізатись');
+
+    // Запис автора замінюється, а не накопичується: присутність -- поточний факт
+    await pause(250);
+    p2.drain();
+    p1.send({ m: 'presence', view: { track: { id: 't2' } }, following: 'p2' });
+    const second = await p2.take((m) => m.m === 'presence' && m.list[0]?.view?.track?.id === 't2');
+    assert.equal(second.list.length, 1);
+    assert.equal(second.list[0].following, 'p2');
+
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+    const room = health.sessions.find((s) => s.session === 'watch');
+    assert.equal(room.presence[0].author, 'p1');
+    assert.ok(Number.isSafeInteger(room.presence[0].age_sec));
+
+    // Занадто часті оновлення гасяться мовчки: помилка у відповідь дала б
+    // зламаному клієнту шторм назад
+    p1.drain();
+    p1.send({ m: 'presence', view: { track: { id: 't3' } } });
+    p1.send({ m: 'presence', view: { track: { id: 't4' } } });
+    await pause(200);
+    assert.equal(p1.all().some((m) => m.m === 'error'), false, 'relay не має відповідати помилкою');
+
+    // Друге зʼєднання того самого автора не має стирати його присутність
+    await pause(250);
+    const twin = await relayClient(port, 'watch', 'p1');
+    twin.ws.close();
+    await pause(300);
+    const still = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.json());
+    assert.equal(still.sessions.find((s) => s.session === 'watch').presence.length, 1);
+
+    p2.drain();
+    p1.ws.close();
+    const gone = await p2.take((m) => m.m === 'presence' && m.list.length === 0, 5000);
+    assert.deepEqual(gone.list, []);
+  } finally {
+    for (const client of open) client.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

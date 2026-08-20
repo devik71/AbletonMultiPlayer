@@ -40,6 +40,13 @@ const COMPACT_JOIN = process.env.MP_COMPACT_JOIN !== '0';
 const LOCK_TTL_SEC = Number(process.env.MP_LOCK_TTL_SEC || 300);
 const LOCK_TTL_MAX = 900;
 const LOCKS_PER_AUTHOR = 64;
+// Присутність: хто на що дивиться. Стан сесії, як локи, але з двома
+// відмінностями. Ключ -- автор, а не обʼєкт: конфлікту тут не існує за
+// побудовою, тож і арбітражу немає. І TTL немає: лок поновлюється жестом,
+// а присутність істинна, поки людина мовчки дивиться на трек -- таймаут
+// стер би її посеред роботи. Замість TTL -- смерть разом із зʼєднанням.
+const PRESENCE_RATE = Number(process.env.MP_PRESENCE_RATE || 5);
+const PRESENCE_MAX_LABEL = 64;
 
 // Токен кімнати. Порожній MP_RELAY_TOKEN -- відкритий relay, як було досі:
 // у домашній мережі це нормально, а от у спільному Wi-Fi чи через тунель
@@ -113,6 +120,7 @@ class Session {
     this.seen = new Map(); // "author:lseq" -> commit для idempotent ack ре-сабмітів
     this.clients = new Set();
     this.locks = new Map(); // object -> {object, label, author, since, expires}
+    this.presence = new Map(); // author -> {author, view, following, updated_at}
     this.emptySince = null;
     this.lastLseq = new Map(); // author -> максимальний закомічений lseq
     this.archivedThrough = 0;
@@ -486,6 +494,29 @@ class Session {
     }));
   }
 
+  // ------------------------------------------------------------ присутність
+
+  setPresence(author, view, following) {
+    this.presence.set(author, {
+      author,
+      view: trimNames(view),
+      following: typeof following === 'string' && following ? following : null,
+      updated_at: Date.now() / 1000,
+    });
+  }
+
+  clearPresence(author) {
+    return this.presence.delete(author);
+  }
+
+  presenceList() {
+    const now = Date.now() / 1000;
+    return [...this.presence.values()].map((entry) => ({
+      ...entry,
+      age_sec: Math.max(0, Math.round(now - entry.updated_at)),
+    }));
+  }
+
   /** Стиснення живого журналу: історія їде в архів, на диску лишається
    *  підпослідовність, що дає той самий стан. */
   #maybeCompact() {
@@ -534,6 +565,7 @@ class Session {
       clients: this.onlineClients(),
       authors: this.authorStats(),
       locks: this.lockList(),
+      presence: this.presenceList(),
       journal_events: this.journal.length,
       compacted: this.compacted,
       archived_through: this.archivedThrough,
@@ -601,6 +633,16 @@ function log(...args) {
 mkdirSync(JOURNAL_DIR, { recursive: true });
 
 /** Відправка з контролем буфера: хто не читає, той більше не учасник. */
+/** Назви в присутності -- лише для показу, тож обрізаємо їх на вході. */
+function trimNames(view) {
+  if (view === null || typeof view !== 'object') return null;
+  const names = {};
+  for (const [key, value] of Object.entries(view.names || {})) {
+    if (typeof value === 'string') names[key] = value.slice(0, PRESENCE_MAX_LABEL);
+  }
+  return { ...view, names };
+}
+
 function deliver(client, raw) {
   const { ws } = client;
   if (ws.readyState !== 1) return false;
@@ -711,6 +753,7 @@ wss.on('connection', (ws, req) => {
     port: socket.remotePort ?? null,
     connectedAt: Date.now() / 1000,
     lastSeen: Date.now() / 1000,
+    lastPresenceAt: 0,
     budget: SUBMIT_BURST,
     refilledAt: Date.now() / 1000,
     limitedEvents: 0,
@@ -777,6 +820,7 @@ wss.on('connection', (ws, req) => {
           peers: session.peers(),
           registry: session.registry,
           locks: session.lockList(),
+          presence: session.presenceList(),
         });
         const since = Number(msg.since) || 0;
         const tail = session.tailSince(since);
@@ -927,6 +971,26 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      // Присутність не журналюється і не має порядку: це поточний факт про
+      // гравця, а не подія. Тому стан на сесії, а не труба -- інакше M4L
+      // Status (він читає лише /health) не побачив би нічого, а пізній
+      // учасник чекав би, поки партнер поворухнеться.
+      case 'presence': {
+        if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
+        // Зламаний клієнт гаситься мовчки: відповідь помилкою повернула б
+        // йому шторм назад.
+        if (t1 - client.lastPresenceAt < 1 / PRESENCE_RATE) break;
+        client.lastPresenceAt = t1;
+        const view = msg.view === null || typeof msg.view === 'object' ? msg.view : undefined;
+        if (view === undefined) {
+          return send({ m: 'error', code: 'bad_presence', text: 'view має бути обʼєктом або null' });
+        }
+        if (view === null) client.session.clearPresence(client.author);
+        else client.session.setPresence(client.author, view, msg.following);
+        client.session.broadcast({ m: 'presence', list: client.session.presenceList() });
+        break;
+      }
+
       case 'ping':
         send({ m: 'pong', t0: msg.t0, t1, t2: Date.now() / 1000 });
         break;
@@ -946,6 +1010,9 @@ wss.on('connection', (ws, req) => {
     const stillHere = [...client.session.clients].some((c) => c.author === client.author);
     if (!stillHere && client.session.releaseLocksOf(client.author)) {
       client.session.broadcast({ m: 'locks', locks: client.session.lockList() });
+    }
+    if (!stillHere && client.session.clearPresence(client.author)) {
+      client.session.broadcast({ m: 'presence', list: client.session.presenceList() });
     }
     client.session.broadcast({ m: 'peers', peers: client.session.peers() });
     log(`[${client.session.name}] - ${client.author} (${client.session.clients.size} онлайн)`);

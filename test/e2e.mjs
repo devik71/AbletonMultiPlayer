@@ -623,6 +623,66 @@ try {
     }
   });
 
+  await check('партнер бачить, на що я дивлюсь, і пізній учасник теж', async () => {
+    const from = d2.out.length;
+    l1.stdin.write('look 1 2\n');
+    await waitFor(d2, /дивляться: p1: /, 8000, from);
+
+    // Присутність — стан на relay, а не труба: той, хто прийшов пізніше,
+    // бачить її вже у welcome, не чекаючи наступного руху партнера
+    const welcome = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${RELAY_PORT}`);
+      ws.on('open', () => ws.send(JSON.stringify({
+        m: 'join', session: SESSION, author: 'watcher', since: 1e9, proto: 1,
+      })));
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(raw);
+        if (msg.m !== 'welcome') return;
+        ws.close();
+        resolve(msg);
+      });
+      ws.on('error', reject);
+    });
+    const seen = (welcome.presence || []).find((entry) => entry.author === 'p1');
+    if (!seen?.view?.track?.id) throw new Error('присутності p1 немає у welcome');
+    if (!seen.view.names?.track) throw new Error('присутність без людської назви');
+  });
+
+  await check('follow веде мій вид за партнером і не відбивається назад', async () => {
+    const from = d2.out.length;
+    d2.stdin.write('follow p1\n');
+    await waitFor(d2, /слідую за p1/, 5000, from);
+
+    const liveFrom = l2.out.length;
+    l1.stdin.write('look 2 3\n');
+    await waitFor(l2, /<- view_set від p1/, 8000, liveFrom);
+    if (/-> view/.test(l2.out.slice(liveFrom))) {
+      throw new Error('чужий вид відбився назад — це і є ping-pong');
+    }
+    d2.stdin.write('follow off\n');
+    await waitFor(d2, /більше не слідую/, 5000, from);
+  });
+
+  await check('взаємний follow відхиляється', async () => {
+    l2.stdin.write('look 0 0\n');
+    const from = d2.out.length;
+    d2.stdin.write('follow p1\n');
+    await waitFor(d2, /слідую за p1/, 5000, from);
+
+    const mine = d1.out.length;
+    d1.stdin.write('follow p2\n');
+    await waitFor(d1, /follow: p2 уже слідує за тобою/, 8000, mine);
+    d1.stdin.write('follow off\n');
+    d2.stdin.write('follow off\n');
+  });
+
+  await check('присутність не потрапляє в журнал', async () => {
+    const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8');
+    if (/"presence"|"view"|view_set/.test(lines)) {
+      throw new Error('погляд протік у event log');
+    }
+  });
+
   await check('журнал: 47 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);

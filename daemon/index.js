@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { FileSync } from './filesync.js';
 import { LockKeeper } from './locks.js';
+import { PresenceKeeper, describePresence, shouldFollow } from './presence.js';
 import { StateCollector, stateDigest, summarize } from './state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -177,8 +178,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     return toBridge({ m: 'state_apply', path, id: applyId });
   }
   if (cmd === 'pull') return pullFromPeer(rest[0]);
+  if (cmd === 'follow') return startFollow(rest[0]);
+  if (cmd === 'who') {
+    const line = describePresence(presence.peers, AUTHOR);
+    return log(line ? 'дивляться: ' + line : 'ніхто нікуди не дивиться');
+  }
   if (cmd === 'refresh') return requestFullState();
-  log('команди: state | apply [файл] | pull <author> | refresh');
+  log('команди: state | apply [файл] | pull <author> | follow <author>|off | who | refresh');
 });
 
 // Обмін знімками між учасниками. Relay тут труба: знімок не подія, у журнал
@@ -280,6 +286,54 @@ function reportApplied(msg) {
   }
 }
 
+// Присутність: погляд партнера і режим follow (presence.js). У журнал не йде.
+const FOLLOW_PAUSE_MS = 5000;
+let followTarget = null;
+let followPausedUntil = 0;
+let followSilence = null;   // остання причина відмови, щоб не повторювати її щоразу
+
+const presence = new PresenceKeeper({
+  send: (msg) => {
+    if (connected) ws.send(JSON.stringify(msg));
+  },
+  log,
+});
+
+/** Іду за партнером, якщо він не йде за мною і я щойно не клацав сам. */
+function maybeFollow() {
+  if (!followTarget) return;
+  const verdict = shouldFollow({
+    list: presence.peers, me: AUTHOR, target: followTarget, pausedUntil: followPausedUntil,
+  });
+  if (!verdict.ok) {
+    if (verdict.reason && verdict.reason !== followSilence) {
+      followSilence = verdict.reason;
+      log(`follow: ${verdict.reason}`);
+    }
+    return;
+  }
+  followSilence = null;
+  toBridge({ m: 'view_set', from: followTarget, view: verdict.view });
+}
+
+function startFollow(author) {
+  if (!author || author === 'off') {
+    if (followTarget) log(`більше не слідую за ${followTarget}`);
+    followTarget = null;
+    presence.setFollowing(null);
+    return;
+  }
+  if (author === AUTHOR) return log('за собою слідувати нема сенсу');
+  if (!bridgeInfo?.features?.includes('view_follow')) {
+    return log('bridge не вміє рухати вид — потрібен новіший Remote Script');
+  }
+  followTarget = author;
+  followSilence = null;
+  presence.setFollowing(author);
+  log(`слідую за ${author}`);
+  maybeFollow();
+}
+
 const PROJECT = arg('project', null);
 
 // ---------------------------------------------------------------------- UDP
@@ -322,6 +376,7 @@ udp.on('message', (buf) => {
       pendingSent.clear();
       bridgeInfo = null;
       log('bridge відключився');
+      presence.clear();
       break;
     case 'heartbeat':
       if (!bridgeAlive) {
@@ -338,6 +393,12 @@ udp.on('message', (buf) => {
       break;
     case 'event':
       submit(msg.type, msg.payload);
+      break;
+    case 'view':
+      // Усе, що прийшло від bridge, -- справжня дія людини: після власного
+      // view_set bridge присутності не шле. Тож моя дія ставить follow на паузу.
+      if (followTarget) followPausedUntil = Date.now() + FOLLOW_PAUSE_MS;
+      presence.update(msg.view ?? null);
       break;
     case 'state_applied':
       // Знімок застосовується мовчки: власні listeners заглушені, тож у журнал
@@ -427,6 +488,11 @@ function connect() {
         pingClock();
         bootstrapRegistry();
         locks.onLocks(msg.locks, AUTHOR);
+        if (Array.isArray(msg.presence)) {
+          presence.enable();
+          presence.onPresence(msg.presence, AUTHOR);
+          toBridge({ m: 'view_request' }); // після реконекту relay нас забув
+        }
         filesync.announce(); // хай партнер одразу знає, що в нас є
         announceCapabilities();
         break;
@@ -465,6 +531,10 @@ function connect() {
         }
         break;
       }
+      case 'presence':
+        presence.onPresence(msg.list, AUTHOR);
+        maybeFollow();
+        break;
       case 'locks':
         locks.onLocks(msg.locks, AUTHOR);
         break;
@@ -498,6 +568,12 @@ function connect() {
         break;
       case 'error':
         log(`relay error [${msg.code}]: ${msg.text}`);
+        // Старий relay не знає присутності: перестаємо пробувати, інакше
+        // він отримуватиме її двічі на секунду і відповідатиме помилкою.
+        if (msg.code === 'unknown_msg' && msg.text === 'presence') {
+          presence.disable();
+          log('relay старий: присутність вимкнено');
+        }
         if (msg.code === 'bad_token') log('перевір --token (або MP_RELAY_TOKEN) -- relay захищений');
         // Подія лишилась в outbox: relay її не закомітив, тож просто пробуємо
         // ще раз трохи пізніше, а не втрачаємо.
@@ -509,6 +585,7 @@ function connect() {
   ws.on('close', () => {
     connected = false;
     locks.reset();
+    presence.reset();
     if (flushTimer) {
       clearTimeout(flushTimer);
       flushTimer = null;
