@@ -1,6 +1,6 @@
 {
   "name": "abletonmp-daemon",
-  "version": "0.19.0",
+  "version": "0.19.0-dev",
   "private": true,
   "type": "module",
   "description": "Локальний міст: UDP (bridge у Live) <-> WebSocket (relay)",
