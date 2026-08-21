@@ -34,7 +34,7 @@ except Exception:
 
 AIChatServer = _chat.AIChatServer
 
-SCRIPT_VERSION = "0.18.0"
+SCRIPT_VERSION = "0.19.0"
 
 # Типи, які цей bridge уміє ЗАСТОСУВАТИ. Оголошуються при конекті, щоб розсинхрон
 # версій між учасниками (vision.md §8) виявлявся одразу, а не виглядав як
