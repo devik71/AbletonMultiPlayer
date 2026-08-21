@@ -824,3 +824,87 @@ test('relay тримає присутність по автору і приби�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('undo повертає попереднє значення, а на нездоланне чесно відмовляє', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-undo-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port);
+  const open = [];
+  const mixer = (value, lseq) => ({
+    m: 'submit',
+    event: { type: 'MixerSet', payload: { track: { id: 't1' }, param: 'volume', value }, lseq },
+  });
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    const p1 = await relayClient(port, 'undo', 'p1');
+    const p2 = await relayClient(port, 'undo', 'p2');
+    open.push(p1, p2);
+
+    // Перша зміна адреси відкоту не має: до сесії значення жило в .als
+    p1.send(mixer(0.3, 1));
+    await p1.take((m) => m.m === 'commit' && m.event.lseq === 1);
+    p1.drain();
+    p1.send({ m: 'undo_request' });
+    const virgin = await p1.take((m) => m.m === 'undo_denied');
+    assert.match(virgin.text, /лишилось у самому \.als/);
+
+    p1.send(mixer(0.6, 2));
+    await p1.take((m) => m.m === 'commit' && m.event.lseq === 2);
+
+    // Партнер може відкотити чужу зміну -- у цьому й сенс у мультиплеєрі
+    p2.drain();
+    p2.send({ m: 'undo_request', author: 'p1' });
+    const proposal = await p2.take((m) => m.m === 'undo_proposal');
+    assert.equal(proposal.type, 'MixerSet');
+    assert.equal(proposal.payload.value, 0.3, 'має повернутись значення до останньої зміни');
+    assert.equal(proposal.of.author, 'p1');
+
+    // Запуск кліпу не має що відкочувати: адреси, яку він перезаписує, не існує
+    p1.send({ m: 'submit', event: { type: 'ClipLaunch', payload: { track: { id: 't1' }, scene: { id: 's1' } }, lseq: 3 } });
+    await p1.take((m) => m.m === 'commit' && m.event.lseq === 3);
+    p1.drain();
+    p1.send({ m: 'undo_request' });
+    const playback = await p1.take((m) => m.m === 'undo_denied');
+    assert.match(playback.text, /ClipLaunch/);
+
+    p2.drain();
+    p2.send({ m: 'undo_request', author: 'p3' });
+    const nobody = await p2.take((m) => m.m === 'undo_denied');
+    assert.match(nobody.text, /немає дій у цій сесії/);
+  } finally {
+    for (const client of open) client.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('undo дістає попереднє значення з холодного архіву після стиснення', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-undo-archive-'));
+  const port = await freePort();
+  const relay = spawnRelay(dir, port, { MP_COMPACT_AT: '10' });
+  const open = [];
+  try {
+    await waitForOutput(relay, /relay слухає/);
+    const p1 = await relayClient(port, 'undo', 'p1');
+    open.push(p1);
+
+    // Стиснення викидає саме перекриті події -- тобто рівно ті, які потрібні undo
+    for (let lseq = 1; lseq <= 30; lseq += 1) {
+      p1.send({
+        m: 'submit',
+        event: { type: 'MixerSet', payload: { track: { id: 't1' }, param: 'volume', value: lseq / 100 }, lseq },
+      });
+    }
+    await p1.take((m) => m.m === 'commit' && m.event.gseq === 30, 8000);
+    await waitForOutput(relay, /журнал стиснуто/, 8000);
+
+    p1.drain();
+    p1.send({ m: 'undo_request' });
+    const proposal = await p1.take((m) => m.m === 'undo_proposal');
+    assert.equal(proposal.payload.value, 0.29, 'значення має знайтись в архіві');
+  } finally {
+    for (const client of open) client.ws.close();
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -683,10 +683,30 @@ try {
     }
   });
 
-  await check('журнал: 47 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('партнер відкочує чужу зміну, і це звичайна подія в журналі', async () => {
+    const seen = l2.out.length;
+    l1.stdin.write('vol 1 0.11\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"value":0\.11/, 8000, seen);
+    l1.stdin.write('vol 1 0.77\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"value":0\.77/, 8000, seen);
+
+    // Відкочує ПАРТНЕР, а не автор: у цьому й сенс undo в мультиплеєрі
+    const back = l1.out.length;
+    const from = d2.out.length;
+    d2.stdin.write('undo p1\n');
+    await waitFor(d2, /відкочую MixerSet від p1/, 8000, from);
+    // Значення повертається на машині автора -- як подія від p2
+    await waitFor(l1, /<- #\d+ MixerSet .*"value":0\.11/, 8000, back);
+
+    const from2 = d2.out.length;
+    d2.stdin.write('undo p9\n');
+    await waitFor(d2, /undo неможливий: у p9 немає дій/, 8000, from2);
+  });
+
+  await check('журнал: 50 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 47) throw new Error(`очікував 47 подій, у журналі ${lines.length}`);
+    if (lines.length !== 50) throw new Error(`очікував 50 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

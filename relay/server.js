@@ -12,7 +12,7 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { compactTail } from './compact.js';
+import { compactTail, supersedeKey } from './compact.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.MP_RELAY_PORT || 19870);
@@ -492,6 +492,70 @@ class Session {
       held_sec: Math.max(0, Math.round(now - lock.since)),
       expires_in: Math.max(0, Math.round(lock.expires - now)),
     }));
+  }
+
+  // ------------------------------------------------------------------ undo
+  //
+  // Undo -- це нова подія в журналі, а не викреслювання старої (vision.md §2).
+  // Relay лише знаходить, яким значення було до останньої дії автора, і віддає
+  // пропозицію клієнту: комітити її має сам клієнт своїм lseq, інакше relay
+  // зайняв би чужий номер і справжня подія з ним потім загубилась би як дубль.
+  //
+  // Що вважається відкотним, вирішує та сама supersedeKey, що й стиснення:
+  // подія відкотна рівно тоді, коли вона повністю перезаписує адресу. Тому
+  // структурні дії, запуск кліпів і RegistryInit сюди не потрапляють самі --
+  // для них "попереднього значення" не існує за побудовою.
+
+  undoProposal(author) {
+    for (let i = this.journal.length - 1; i >= 0; i -= 1) {
+      const ev = this.journal[i];
+      if (ev.author !== author) continue;
+      const key = supersedeKey(ev);
+      if (key === null) {
+        return { ok: false, reason: `остання дія ${author} — ${ev.type}, її нема чим замінити` };
+      }
+      const older = this.#previousFor(key, ev.gseq);
+      if (!older) {
+        return {
+          ok: false,
+          reason: `${ev.type} змінив те, чого в цій сесії ще ніхто не чіпав: ` +
+            'попереднє значення лишилось у самому .als',
+        };
+      }
+      return {
+        ok: true,
+        type: older.type,
+        payload: older.payload,
+        of: { gseq: ev.gseq, type: ev.type, author },
+        from: older.gseq,
+      };
+    }
+    return { ok: false, reason: `у ${author} немає дій у цій сесії` };
+  }
+
+  /** Останнє значення тієї самої адреси до gseq. Спершу в памʼяті, потім
+   *  у холодному архіві: стиснення журналу викидає саме перекриті події,
+   *  тобто рівно ті, які потрібні undo. */
+  #previousFor(key, beforeGseq) {
+    for (let i = this.journal.length - 1; i >= 0; i -= 1) {
+      const ev = this.journal[i];
+      if (ev.gseq >= beforeGseq) continue;
+      if (supersedeKey(ev) === key) return ev;
+    }
+    if (!existsSync(this.archivePath)) return null;
+    let found = null;
+    try {
+      for (const line of readFileSync(this.archivePath, 'utf8').split('\n')) {
+        if (!line) continue;
+        const ev = JSON.parse(line);
+        if (ev.gseq >= beforeGseq) continue;
+        if (supersedeKey(ev) === key && (!found || ev.gseq > found.gseq)) found = ev;
+      }
+    } catch (error) {
+      log(`[${this.name}] архів не читається для undo: ${error.message}`);
+      return null;
+    }
+    return found;
   }
 
   // ------------------------------------------------------------ присутність
@@ -988,6 +1052,25 @@ wss.on('connection', (ws, req) => {
         if (view === null) client.session.clearPresence(client.author);
         else client.session.setPresence(client.author, view, msg.following);
         client.session.broadcast({ m: 'presence', list: client.session.presenceList() });
+        break;
+      }
+
+      // Undo не комітить сам: relay лише каже, яким значення було до дії.
+      // Комітить клієнт -- своїм lseq і як звичайну подію.
+      case 'undo_request': {
+        if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
+        const author = typeof msg.author === 'string' && msg.author ? msg.author : client.author;
+        if (!validAuthor(author)) {
+          return send({ m: 'error', code: 'bad_author', text: 'неприпустимий author' });
+        }
+        const proposal = client.session.undoProposal(author);
+        if (!proposal.ok) {
+          send({ m: 'undo_denied', author, text: proposal.reason });
+          break;
+        }
+        log(`[${client.session.name}] ${client.author} відкочує #${proposal.of.gseq} ` +
+            `${proposal.of.type} (${author}) до значення з #${proposal.from}`);
+        send({ m: 'undo_proposal', ...proposal });
         break;
       }
 

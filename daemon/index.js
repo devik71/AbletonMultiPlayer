@@ -179,12 +179,18 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   if (cmd === 'pull') return pullFromPeer(rest[0]);
   if (cmd === 'follow') return startFollow(rest[0]);
+  if (cmd === 'undo') {
+    if (!connected) return log('немає звʼязку з relay');
+    const author = rest[0] || AUTHOR;
+    ws.send(JSON.stringify({ m: 'undo_request', author }));
+    return log(`прошу відкотити останню зміну ${author}`);
+  }
   if (cmd === 'who') {
     const line = describePresence(presence.peers, AUTHOR);
     return log(line ? 'дивляться: ' + line : 'ніхто нікуди не дивиться');
   }
   if (cmd === 'refresh') return requestFullState();
-  log('команди: state | apply [файл] | pull <author> | follow <author>|off | who | refresh');
+  log('команди: state | apply [файл] | pull <author> | follow <author>|off | who | undo [author] | refresh');
 });
 
 // Обмін знімками між учасниками. Relay тут труба: знімок не подія, у журнал
@@ -531,6 +537,18 @@ function connect() {
         }
         break;
       }
+      case 'undo_proposal': {
+        // Undo -- звичайна подія: її комітить той, хто відкочує, своїм lseq.
+        // Тому в журналі видно і саму зміну, і те, хто її скасував.
+        const target = msg.of || {};
+        log(`відкочую ${target.type} від ${target.author} (#${target.gseq}) — ` +
+            `повертаю значення з #${msg.from}`);
+        submit(msg.type, msg.payload);
+        break;
+      }
+      case 'undo_denied':
+        log(`undo неможливий: ${msg.text}`);
+        break;
       case 'presence':
         presence.onPresence(msg.list, AUTHOR);
         maybeFollow();
