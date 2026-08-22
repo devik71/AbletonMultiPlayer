@@ -5,6 +5,7 @@
 легальних точок розширення.
 
 Візія і компроміси — [vision.md](vision.md), протокол — [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Перший прогін на двох машинах — [docs/FIRST-RUN.md](docs/FIRST-RUN.md).
 
 > Проєкт не афілійований з Ableton і не містить їхнього коду. Взаємодія з Live
 > йде виключно через задокументовані точки розширення — Remote Script і
