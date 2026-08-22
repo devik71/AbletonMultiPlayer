@@ -85,6 +85,12 @@ VIEW_MAX_HOLD = 0.5
 # асинхронно, якщо цільовий обʼєкт саме зник.
 VIEW_ECHO_WINDOW = 0.5
 
+# Стеля довжини кліпу. Live під час запису віддає заглушку у два роки секунд
+# (63072000), і без цієї межі партнер створює кліп на 63 мільйони долей.
+# Вісім годин на 999 bpm -- це ~480 тисяч, тож мільйон покриває реальність
+# із запасом і на два порядки менший за заглушку.
+CLIP_LENGTH_MAX = 1e6
+
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
 NOTE_FIELDS = (
@@ -1601,7 +1607,7 @@ class AbletonMP(ControlSurface):
             length = float((payload.get("clip") or {}).get("length", NOTE_TIME_SPAN))
         except Exception:
             length = NOTE_TIME_SPAN
-        if not math.isfinite(length) or length <= 0 or length > 1073741824.0:
+        if not math.isfinite(length) or length <= 0 or length > CLIP_LENGTH_MAX:
             length = NOTE_TIME_SPAN
         return length
 
@@ -1828,9 +1834,16 @@ class AbletonMP(ControlSurface):
             idx = payload.get("idx")
             if not isinstance(idx, int) or idx < 0 or idx > len(self._doc.tracks):
                 idx = len(self._doc.tracks)
+            kind = payload.get("kind")
+            if kind not in ("midi", "audio"):
+                # Невідомий різновид не приводимо до відомого: група, що
+                # приїхала як audio, дала б фантомний порожній трек.
+                self._warn("gseq %s: невідомий різновид треку %r, подію пропущено"
+                           % (gseq, kind))
+                return
             self._suppress_struct = True
             try:
-                if payload.get("kind") == "midi":
+                if kind == "midi":
                     self._doc.create_midi_track(idx)
                 else:
                     self._doc.create_audio_track(idx)
@@ -2910,7 +2923,7 @@ class AbletonMP(ControlSurface):
                                 "length")
         if not math.isfinite(length) or length <= 0:
             raise ValueError("length must be a positive finite number")
-        return min(length, 1073741824.0)
+        return min(length, CLIP_LENGTH_MAX)
 
     def _ai_color(self, value):
         color = self._ai_int(value, "color")
@@ -3505,6 +3518,9 @@ class AbletonMP(ControlSurface):
         try:
             length = max(float(meta.get("length") or NOTE_TIME_SPAN), 0.001)
         except Exception:
+            length = NOTE_TIME_SPAN
+        if length > CLIP_LENGTH_MAX:
+            # Отруєний знімок дав би один регіон на два роки
             length = NOTE_TIME_SPAN
         ordered = sorted(notes, key=lambda n: (n.get("start_time", 0.0), n.get("pitch", 0)))
         end = length

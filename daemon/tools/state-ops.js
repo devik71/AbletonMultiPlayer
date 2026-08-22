@@ -5,6 +5,9 @@
 // інакше довелось би тримати дві реалізації однієї семантики.
 
 const NOTE_TIME_SPAN = 4;
+// Дзеркало CLIP_LENGTH_MAX із bridge: заглушка Live під час запису
+// (два роки в секундах) не сміє стати регіоном на два роки.
+const CLIP_LENGTH_MAX = 1e6;
 const NOTES_PER_REGION = 1024;
 
 export const metaOps = (kind, ref, src) => ['name', 'color']
@@ -41,7 +44,8 @@ const deviceOps = (ref, devices) => devices.flatMap((entry) =>
   }));
 
 export const noteRegionsFor = (meta, notes) => {
-  const length = Math.max(Number(meta.length) || NOTE_TIME_SPAN, 0.001);
+  let length = Math.max(Number(meta.length) || NOTE_TIME_SPAN, 0.001);
+  if (length > CLIP_LENGTH_MAX) length = NOTE_TIME_SPAN;
   const ordered = [...notes].sort((a, b) =>
     (a.start_time - b.start_time) || (a.pitch - b.pitch));
   const end = ordered.reduce((acc, note) => Math.max(acc, (note.start_time || 0) + 0.001), length);
