@@ -90,6 +90,8 @@ VIEW_ECHO_WINDOW = 0.5
 # Вісім годин на 999 bpm -- це ~480 тисяч, тож мільйон покриває реальність
 # із запасом і на два порядки менший за заглушку.
 CLIP_LENGTH_MAX = 1e6
+# Скільки довжина має не мінятись, щоб вважати запис завершеним.
+REC_SETTLE_SEC = 0.3
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -134,6 +136,7 @@ class AbletonMP(ControlSurface):
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
+        self._rec_pending = {}   # clip key -> кліп, що зараз пишеться
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._unshared_tracks = set()  # групи: uuid є, але в мережу не йдуть
         self._group_warned = set()
@@ -1428,6 +1431,13 @@ class AbletonMP(ControlSurface):
         except Exception:
             current = None
 
+        # Кліп, який зараз пишеться, ще не подія: Live віддає заглушкову
+        # довжину, і партнер створив би кліп на два роки.
+        if clip is not None and self._clip_is_recording(slot, clip):
+            self._park_recording(key, track, scene, slot)
+            return
+        self._rec_pending.pop(key, None)
+
         # A note callback may still be waiting in the debounce queue when the
         # clip is deleted or replaced. It must not follow ClipDelete with a
         # stale ClipNotesSet that would recreate the clip on the peer.
@@ -1458,8 +1468,8 @@ class AbletonMP(ControlSurface):
     def _on_notes(self, track, scene, clip):
         """Coalesce a piano-roll gesture before calculating changed regions."""
         key = self._clip_key(track, scene)
-        if key is None:
-            return
+        if key is None or key in self._rec_pending:
+            return  # запис триває: ноти поїдуть разом із готовим кліпом
         now = time.time()
         previous = self._note_pending.get(key)
         self._note_pending[key] = {
@@ -1629,6 +1639,10 @@ class AbletonMP(ControlSurface):
                         self._mirror["clips"][key] = None
                         continue
                     clip = slot.clip
+                    if self._clip_is_recording(slot, clip):
+                        self._park_recording(key, track, scene, slot)
+                        continue
+                    self._rec_pending.pop(key, None)
                     kind = "midi" if clip.is_midi_clip else "audio"
                     self._mirror["clips"][key] = kind
                     if kind == "midi":
@@ -1646,6 +1660,12 @@ class AbletonMP(ControlSurface):
                 self._mirror["notes"].pop(key, None)
                 return
             clip = slot.clip
+            if self._clip_is_recording(slot, clip):
+                # Інакше перепідписка серед запису зробила б кліп базовою
+                # лінією, і подія не пішла б уже ніколи.
+                self._park_recording(key, track, scene, slot)
+                return
+            self._rec_pending.pop(key, None)
             kind = "midi" if clip.is_midi_clip else "audio"
             self._mirror["clips"][key] = kind
             if kind == "midi":
@@ -1654,6 +1674,106 @@ class AbletonMP(ControlSurface):
                 self._mirror["notes"].pop(key, None)
         except Exception:
             pass
+
+    # ------------------------------------------------------- кліп під запис
+
+    def _clip_is_recording(self, slot, clip):
+        """Кліп, який зараз пишеться. Два незалежні критерії навмисно.
+
+        Прапорець може поводитись по-різному в різних збірках Live, а от
+        довжина під час запису -- це завжди заглушка: у журналі живої сесії
+        лежать 63072000 (два роки в секундах) і 63017064.
+        """
+        for obj, prop in ((clip, "is_recording"), (clip, "is_overdubbing"),
+                          (slot, "is_recording")):
+            try:
+                if getattr(obj, prop):
+                    return True
+            except Exception:
+                pass
+        return not self._clip_length_sane(clip)
+
+    @staticmethod
+    def _clip_length_sane(clip):
+        try:
+            length = float(clip.length)
+        except Exception:
+            return False
+        return math.isfinite(length) and 0 < length <= CLIP_LENGTH_MAX
+
+    def _park_recording(self, key, track, scene, slot):
+        """Кліп під запис невидимий для дзеркала: воно лишається None.
+
+        Наслідок, який нам і потрібен: якщо запис перервати, has_clip впаде
+        назад у None, previous == current, і ClipDelete не піде -- ми ж
+        створення не анонсували.
+        """
+        self._mirror["clips"][key] = None
+        self._mirror["notes"].pop(key, None)
+        self._note_pending.pop(key, None)
+        self._rec_pending[key] = {
+            "track": track, "scene": scene, "slot": slot,
+            "length": None, "stable_since": None,
+        }
+
+    def _flush_recording_clips(self):
+        """Завершений запис -> ClipCreate з реальною довжиною.
+
+        Listener'а на clip.length у LOM немає, а прапорець і довжина
+        оновлюються не в один момент -- тому чекаємо, доки довжина
+        не перестане мінятись. Стелі за часом немає навмисно: залупований
+        запис може тривати скільки завгодно, і таймаут означав би віддати
+        партнеру заглушку.
+        """
+        for key in list(self._rec_pending.keys()):
+            pending = self._rec_pending[key]
+            track, scene, slot = pending["track"], pending["scene"], pending["slot"]
+            try:
+                if not slot.has_clip:
+                    del self._rec_pending[key]
+                    continue
+                clip = slot.clip
+            except Exception:
+                del self._rec_pending[key]
+                continue
+
+            if self._clip_is_recording(slot, clip):
+                pending["stable_since"] = None
+                continue
+
+            try:
+                length = round(float(clip.length), 6)
+            except Exception:
+                continue
+            now = time.time()
+            if pending["length"] != length:
+                pending["length"] = length
+                pending["stable_since"] = now
+                continue
+            if now - (pending["stable_since"] or now) < REC_SETTLE_SEC:
+                continue
+
+            del self._rec_pending[key]
+            if not self._registry_ready or self._suppress_struct:
+                continue
+            try:
+                kind = "midi" if clip.is_midi_clip else "audio"
+            except Exception:
+                continue
+            self._mirror["clips"][key] = kind
+            if kind != "midi":
+                # Аудіо-кліп ми не створюємо; попередження -- про готовий
+                # дубль, а не про намір, тож і місце йому саме тут.
+                self._warn("audio clip creation is not synchronized; "
+                           "collect the sample and copy the .als structure")
+                continue
+            payload = self._clip_refs(track, scene)
+            payload["clip"] = self._clip_meta(clip)
+            self._emit("ClipCreate", payload)
+            notes = self._clip_notes(clip)
+            self._mirror["notes"][key] = notes
+            if notes:
+                self._emit_all_note_regions(track, scene, clip, notes)
 
     def _resolve_clip_slot(self, payload, gseq):
         track, _idx = self._resolve_track(payload.get("track"))
@@ -2189,6 +2309,7 @@ class AbletonMP(ControlSurface):
             self._safe(self._dispatch, msg)
         self._safe(self._flush_clips)
         self._safe(self._flush_notes)
+        self._safe(self._flush_recording_clips)
         self._safe(self._flush_pending)
         self._safe(self._flush_view)
         self._safe(self._flush_state)
@@ -3322,6 +3443,8 @@ class AbletonMP(ControlSurface):
                 clip = slot.clip
             except Exception:
                 continue
+            if self._clip_is_recording(slot, clip):
+                continue  # у польоті: довжина ще заглушкова
             entry = {"scene": {"id": sid}, "clip": self._clip_meta(clip)}
             try:
                 if clip.is_midi_clip:
