@@ -7,6 +7,8 @@
 Візія і компроміси — [vision.md](vision.md), протокол — [docs/PROTOCOL.md](docs/PROTOCOL.md).
 Перший прогін на двох машинах — [docs/FIRST-RUN.md](docs/FIRST-RUN.md).
 Що ще не синхронізується — [docs/COVERAGE.md](docs/COVERAGE.md).
+Довідник LOM для розробки — [.claude/skills/ableton-lom](.claude/skills/ableton-lom/LOCAL-NOTES.md)
+(вендорена копія, карта а не ґрунт — межі довіри в LOCAL-NOTES).
 
 > Проєкт не афілійований з Ableton і не містить їхнього коду. Взаємодія з Live
 > йде виключно через задокументовані точки розширення — Remote Script і
