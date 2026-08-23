@@ -25,6 +25,14 @@ function arg(name, fallback) {
 const PORT_DAEMON = Number(arg('udp-in', 19845)); // куди шлемо
 const PORT_SELF = Number(arg('udp-out', 19846)); // де слухаємо
 const NOTE_TIME_SPAN = 4;
+// Дзеркало CLIP_LENGTH_MAX із bridge: партнер на старому скрипті шле довжину
+// кліпу, який ще писався -- 63072000 доль, тобто заглушку Live на два роки.
+const CLIP_LENGTH_MAX = 1e6;
+const KNOWN_TRACK_KINDS = new Set(['midi', 'audio']);
+const saneLength = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 && n <= CLIP_LENGTH_MAX ? n : NOTE_TIME_SPAN;
+};
 const NOTE_PITCH_SPAN = 16;
 
 const emptyClips = (count) => Array.from({ length: count }, () => null);
@@ -720,6 +728,11 @@ function apply(type, payload, gseq) {
     }
     case 'TrackCreate': {
       if (trackById(payload.track?.id)) return reject('такий трек уже є');
+      // Невідомий різновид не приводиться до відомого: Group Track зі старого
+      // скрипта приїжджає як kind:"audio" і породив би фантом
+      if (!KNOWN_TRACK_KINDS.has(payload.kind)) {
+        return reject(`невідомий різновид треку ${payload.kind}`);
+      }
       const idx = Number.isInteger(payload.idx) ? payload.idx : song.tracks.length;
       song.tracks.splice(idx, 0, {
         id: payload.track.id,
@@ -803,7 +816,7 @@ function apply(type, payload, gseq) {
       if (!t.clips[s]) {
         t.clips[s] = {
           kind: 'midi',
-          length: payload.clip?.length || NOTE_TIME_SPAN,
+          length: saneLength(payload.clip?.length),
           name: payload.clip?.name || '',
           color: payload.clip?.color ?? 0x777777,
           notes: [],
