@@ -1066,6 +1066,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, color: 0x777777, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), devices: [], mix: {}, mute: false, solo: false, arm: false };
       song.tracks.splice(idx, 0, t);
       emit('TrackCreate', { track: { id: t.id, name: t.name, color: t.color }, idx, kind });
+      onDevices(true);
       break;
     }
     case 'deltrack': {
@@ -1073,6 +1074,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (!t) return console.log('немає такого треку');
       song.tracks.splice(song.tracks.indexOf(t), 1);
       emit('TrackDelete', { track: { id: t.id } });
+      onDevices(true);
       break;
     }
     case 'addscene': {
@@ -1320,6 +1322,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         idx: song.tracks.indexOf(copy),
         kind: /MIDI/i.test(copy.name) ? 'midi' : 'audio',
       });
+      onDevices(true);
       console.log(`продубльовано ${src.name} -> ${copy.id}`);
       break;
     }

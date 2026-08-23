@@ -3985,16 +3985,44 @@ class AbletonMP(ControlSurface):
             return None
 
     def _device_tree(self):
-        """Знімок структури: контейнер -> сигнатури девайсів у порядку."""
+        """Знімок структури: контейнер -> сигнатури девайсів у порядку.
+
+        Порожній контейнер мусить мати запис, і це не дрібниця. _diff_devices
+        трактує відсутній ключ як «новий контейнер» і мовчки пропускає його --
+        інакше копія треку сипала б подіями на кожен свій девайс. Тож якби
+        дерево будувалось із ітератора девайсів, трек без девайсів не мав би
+        запису взагалі, і ПЕРШИЙ девайс на ньому не породжував би події ніколи.
+        Тому обхід тут по контейнерах, а не по девайсах.
+        """
         tree = {}
         for track in self._iter_device_tracks():
             track_ref = self._device_track_ref(track)
             if not track_ref:
                 continue
             base = (track_ref.get("id"), track_ref.get("kind"))
-            for _container, device, chain_path in self._iter_track_devices(track):
-                key = (base, tuple(c.get("id") for c in chain_path))
-                tree.setdefault(key, []).append(self._device_tree_sig(device))
+
+            def walk(container, chain_path, depth, base=base):
+                if depth > 16:
+                    return
+                sigs = []
+                try:
+                    devices = list(container.devices)
+                except Exception:
+                    devices = []
+                for device in devices:
+                    if self._device_signature(device) is None:
+                        continue
+                    sigs.append(self._device_tree_sig(device))
+                    if not self._device_has_chains(device):
+                        continue
+                    for _kind, chains in self._rack_chain_groups(device):
+                        for chain in chains:
+                            cid = self._chains_reg.id_of(chain, create=False)
+                            if cid:
+                                walk(chain, chain_path + [{"id": cid}], depth + 1)
+                tree[(base, tuple(c.get("id") for c in chain_path))] = sigs
+
+            walk(track, [], 0)
         return tree
 
     def _diff_devices(self):

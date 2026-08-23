@@ -878,10 +878,31 @@ try {
     if (journal() !== before) throw new Error('пресет полетів партнеру як стоковий девайс');
   });
 
-  await check('журнал: 62 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('перший девайс на порожньому треку теж їде', async () => {
+    // Найтонше місце діффу структури: контейнер БЕЗ девайсів мусить мати
+    // запис у знімку. Інакше він не відрізняється від щойно створеного,
+    // а той навмисно пропускається -- і перший девайс на треку мовчав би.
+    const journal = () => readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean).length;
+    const before = journal();
+
+    const made = l2.out.length;
+    l1.stdin.write('addtrack midi 0\n');
+    await waitFor(l2, /<- #\d+ TrackCreate/, 8000, made);
+
+    const from = l2.out.length;
+    l1.stdin.write('adddevice 0 Compressor\n');
+    await waitFor(l2, /<- #\d+ DeviceLoad .*"name":"Compressor"/, 8000, from);
+    if (/DeviceLoad ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер не прийняв подію');
+
+    await new Promise((r) => setTimeout(r, 600));
+    const grew = journal() - before;
+    if (grew !== 2) throw new Error(`очікував TrackCreate + DeviceLoad, отримав ${grew} подій`);
+  });
+
+  await check('журнал: 64 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 62) throw new Error(`очікував 62 події, у журналі ${lines.length}`);
+    if (lines.length !== 64) throw new Error(`очікував 64 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);
