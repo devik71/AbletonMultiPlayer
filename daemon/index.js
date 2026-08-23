@@ -267,6 +267,13 @@ function describeGap(gap) {
   if (gap.what === 'scene') return `сцена ${gap.id} — такої немає`;
   if (gap.what === 'device') return `${where} — немає девайса`;
   if (gap.what === 'parameter') return `${where} — немає параметра ${gap.name}`;
+  if (gap.what === 'group') {
+    // Групування не синхронізується взагалі: LOM не вміє створювати групи.
+    // Тож це не «не застосувалось», а «у нас різна розкладка».
+    return gap.here
+      ? `${gap.track} — у тебе в групі${gap.name ? ` «${gap.name}»` : ''}, у партнера поза нею`
+      : `${gap.track} — у партнера в групі${gap.name ? ` «${gap.name}»` : ''}, у тебе поза нею`;
+  }
   if (gap.what === 'clip') return `${where} — немає слоту під кліп`;
   return JSON.stringify(gap);
 }

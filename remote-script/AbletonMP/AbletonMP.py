@@ -135,6 +135,8 @@ class AbletonMP(ControlSurface):
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
+        self._unshared_tracks = set()  # групи: uuid є, але в мережу не йдуть
+        self._group_warned = set()
         self._view_cbs = []      # підписки на song.view, окремо від _obj_cbs
         self._view_pending = None
         self._suppress_view = False
@@ -803,12 +805,29 @@ class AbletonMP(ControlSurface):
     def _device_track_ref(self, track):
         tid = self._tracks_reg.id_of(track, create=False)
         if tid:
-            return {"id": tid}
+            # Один чокпоїнт замість гарду в кожному емітері: порожня адреса
+            # глушить MixerSet, TrackToggle, DeviceParamSet і ObjectMetaSet.
+            return None if tid in self._unshared_tracks else {"id": tid}
         aid = self._aux_tracks_reg.id_of(track, create=False)
         kind = self._aux_kind_of(track)
         if aid and kind:
             return {"id": aid, "kind": kind}
         return None
+
+    def _group_of(self, track):
+        """Назва групи, у якій лежить трек. None -- трек поза групою.
+
+        Порівнювати uuid груп між машинами немає сенсу: група в партнера
+        не існує як спільний обʼєкт. А от факт «цей трек у групі, а в тебе ні»
+        і її назва -- саме те, що людина впізнає.
+        """
+        try:
+            parent = track.group_track
+        except Exception:
+            return None
+        if parent is None:
+            return None
+        return {"name": self._safe_name(parent)}
 
     def _iter_device_tracks(self):
         for track in self._doc.tracks:
@@ -816,11 +835,29 @@ class AbletonMP(ControlSurface):
         for track in self._device_aux_tracks():
             yield track
 
+    def _is_group_track(self, track):
+        """Group Track. LOM не вміє їх створювати, тож ми їх не анонсуємо."""
+        try:
+            return bool(track.is_foldable)
+        except Exception:
+            return False
+
     def _track_kind(self, track):
+        if self._is_group_track(track):
+            return "group"   # лише для діагностики: у подію це не потрапляє
         try:
             return "midi" if track.has_midi_input else "audio"
         except Exception:
             return "audio"
+
+    def _warn_group_once(self, uid, track):
+        if uid in self._group_warned:
+            return
+        self._group_warned.add(uid)
+        self._warn(
+            "Group Track %r не синхронізується: LOM не вміє групувати треки. "
+            "Створи групу вручну на обох машинах з тими самими треками -- "
+            "значення всередині неї синхронізуються далі." % (self._safe_name(track),))
 
     def _diff_tracks(self, emit=True):
         """Р—РІС–СЂСЏС” СЂРµС”СЃС‚СЂ С–Р· РґРµСЂРµРІРѕРј С‚СЂРµРєС–РІ РїС–СЃР»СЏ Р·РјС–РЅРё СЃС‚СЂСѓРєС‚СѓСЂРё."""
@@ -832,6 +869,13 @@ class AbletonMP(ControlSurface):
         if not emit:
             return
         for uid, idx, track in created:
+            if self._is_group_track(track):
+                # uuid усе одно виданий і збережений: без нього нічим адресувати
+                # навіть діагностику. А от анонсувати нема чого -- у партнера
+                # група не створиться, і TrackCreate дав би йому фантом.
+                self._unshared_tracks.add(uid)
+                self._warn_group_once(uid, track)
+                continue
             ref = {"id": uid, "name": self._safe_name(track)}
             color = self._safe_color(track)
             if color is not None:
@@ -842,6 +886,10 @@ class AbletonMP(ControlSurface):
                 "kind": self._track_kind(track),
             })
         for uid in removed:
+            if uid in self._unshared_tracks:
+                # Не анонсували створення -- не анонсуємо й зникнення
+                self._unshared_tracks.discard(uid)
+                continue
             self._emit("TrackDelete", {"track": {"id": uid}})
 
     def _diff_scenes(self, emit=True):
@@ -3158,14 +3206,15 @@ class AbletonMP(ControlSurface):
         tracks = []
         for idx, track in enumerate(doc_tracks):
             tid = self._tracks_reg.id_of(track, create=False)
-            if not tid:
-                continue  # без uuid обʼєкт неадресовний, тож у знімку йому не місце
+            if not tid or tid in self._unshared_tracks:
+                continue  # без uuid обʼєкт неадресовний, група -- неспільна
             tracks.append({
                 "id": tid,
                 "idx": idx,
                 "name": self._safe_name(track),
                 "color": self._safe_color(track),
                 "kind": self._track_kind(track),
+                "group": self._group_of(track),
                 "mixer": self._state_mixer(track),
                 "devices": self._state_devices(track),
                 "clips": self._state_clips(track, doc_scenes),
@@ -3311,6 +3360,10 @@ class AbletonMP(ControlSurface):
         self._apply_report = {"id": request_id, "total": len(ops), "ok": 0,
                               "skipped": 0, "failed": 0, "errors": [],
                               "missing": {}, "missing_more": 0}
+        # Розбіжність структури -- не пропущена операція, тож іде в missing
+        # окремо від _op_gap і без впливу на лічильники.
+        for gap in (self._safe(self._structural_gaps, state) or []):
+            self._note_gap(gap)
         self._log("state apply: %d ops queued" % len(ops))
         if not ops:
             self._finish_state_apply()
@@ -3358,6 +3411,34 @@ class AbletonMP(ControlSurface):
             "missing_more": report["missing_more"],
             "errors": report["errors"],
         })
+
+    def _structural_gaps(self, state):
+        """Розбіжності структури, які подіями не лікуються.
+
+        Це не пропущені операції, тож лічильники ok/skipped не чіпаємо:
+        тут не «не вдалось застосувати», а «у нас різна розкладка».
+        """
+        gaps = []
+        for track in (state.get("tracks") or []):
+            uid = track.get("id")
+            if not uid:
+                continue
+            local, _ref = self._resolve_device_track({"id": uid})
+            if local is None:
+                continue  # відсутній трек уже опише _op_gap
+            theirs = track.get("group") or None
+            mine = self._group_of(local)
+            if bool(theirs) == bool(mine):
+                continue
+            gaps.append({
+                "what": "group",
+                "track": track.get("names", {}).get("track") or self._safe_name(local),
+                "name": (theirs or mine or {}).get("name"),
+                "here": bool(mine),
+            })
+            if len(gaps) >= MISSING_LIMIT:
+                break
+        return gaps
 
     def _op_gap(self, etype, payload):
         """Чого бракує для цієї операції. None -- усе на місці.

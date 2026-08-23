@@ -407,6 +407,7 @@ const fullState = () => ({
     name: t.name,
     color: t.color,
     kind: t.kind || (/MIDI/i.test(t.name) ? 'midi' : 'audio'),
+    group: t.group || null,
     mixer: mixerState(t),
     devices: deviceEntries(t),
     clips: clipsState(t),
