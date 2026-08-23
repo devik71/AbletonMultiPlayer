@@ -685,6 +685,9 @@ endpoint читає Max for Live device `AbletonMP Multiplayer Status.maxpat`; �
 | `TrackToggle` | `{track: {id, kind?: "return"}, param, value: bool}` | `track.<param> = v` |
 | `ObjectMetaSet` | `{object: "track"\|"scene"\|"clip", track?, scene?, prop: "name"\|"color", value}` | `<object>.<prop> = value` |
 | `DeviceParamSet` | `{track: {id, kind?: "return"|"master"}, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
+| `TrackDuplicate` | `{source: {id}, track: {id, name, color?}, idx, kind}` | `song.duplicate_track(i)` -- копія з девайсами й семплами |
+| `ClipLoopSet` | `{track, scene, looping, loop_start, loop_end, start_marker, end_marker}` | межі й петля кліпу однією подією |
+| `DeviceLoad` | `{track, chain_path?, index?, item: {uri, name, category}}` | `browser.load_item()` у виділений обʼєкт |
 | `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name, color?}}` | `clip_slot.create_clip(length)` |
 | `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
 | `ClipNotesSet` | `{track, scene, clip, region, notes: [...]}` | заміна всіх MIDI-нот у регіоні |
@@ -702,6 +705,44 @@ endpoint читає Max for Live device `AbletonMP Multiplayer Status.maxpat`; �
 
 Для звичайного Track адреса лишається `{id}`; Return/Master використовують
 той самий aux-простір `{id, kind}`, що й `DeviceParamSet`.
+
+### Межі кліпу, дублювання і завантаження девайсів
+
+Три типи, додані після першого прогону на двох машинах.
+
+**`ClipLoopSet`** несе всі пʼять полів однією подією навмисно: Live клампить
+`loop_end` відносно `loop_start`, тож окремі події проходили б через невалідні
+проміжні стани й псували пару. З тієї ж причини на прийомі спершу йде повна
+валідація і лише потім записи, а порядок записів обирається за поточним станом
+кліпу. Слухаються всі кліпи, не лише MIDI: audio-кліп ми не створюємо, але
+якщо він приїхав із `.als`, його петлю синхронізувати корисно.
+
+**`TrackDuplicate`** не передає вміст — партнер **повторює дію**
+`duplicate_track` на тому самому джерелі, і Live сам робить йому копію
+з девайсами й семплами. Дублювання виявляється по колізії uuid: Ctrl+D копіює
+трек разом із `set_data`, тож копія приходить із ідентифікатором джерела, а
+джерело живе. Ланцюги копії дістають однакові uuid на обох машинах через
+детермінований `sha256(locator_key)` — нового протоколу для них не потрібно.
+Джерела в партнера немає → порожній трек і гучне попередження: дія користувача
+була, а відсутній трек ламає все, що на нього адресується.
+
+**`DeviceLoad`** працює лише з дітьми першого рівня категорій `audio_effects`,
+`instruments`, `midi_effects`. Межу задано вимірюванням: дампи браузера з двох
+машин показали, що uri стокових девайсів (`query:AudioFx#Compressor`) ідентичні,
+а вміст (`drums`, пресети) адресується локальними `FileId`, різними на кожній
+машині. Резолв за uri, фолбек — точний збіг назви в тій самій категорії.
+Айтема немає → рядок у звіті «Бракує ось чого», замінник не ставиться ніколи.
+
+`load_item` кладе девайс у **виділений** обʼєкт, тож застосування рухає вид —
+під тим самим глушінням, що й follow, і з тим самим guard'ом: поки транспорт
+грає з озброєним треком, виділення не смикається. Але, на відміну від follow,
+подію не можна пропустити, тож вона чекає в черзі до 60 секунд. Один девайс
+за тік: завантаження важкого інструмента блокує Live на сотні мілісекунд.
+
+Автоемісії `DeviceLoad` поки немає — подія приймається, а надсилається лише
+вручну через `/api/exec` (`op: "load_device"`). Причина: з `Device` не читається
+uri, а пресет має той самий `class_name`, що й голий девайс, тож автоемісія
+тихо віддавала б партнеру дефолт замість пресету.
 
 ### Назви й кольори
 
