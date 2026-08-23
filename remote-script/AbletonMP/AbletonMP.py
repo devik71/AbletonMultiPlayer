@@ -4001,6 +4001,16 @@ class AbletonMP(ControlSurface):
             placed = self._arr_place(track, slot.clip, start, gseq)
             if placed is not None:
                 self._arr_reg.bind(uid, placed)
+                # Назва й колір -- частина події, а не косметика: без них
+                # копія приїжджає безіменною, і люди бачать різні лінійки.
+                for prop in ("name", "color"):
+                    if meta.get(prop) is None:
+                        continue
+                    try:
+                        setattr(placed, prop, meta[prop])
+                    except Exception as e:
+                        self._warn("gseq %s: %s кліпу в Arrangement не встановився: %r"
+                                   % (gseq, prop, e))
             try:
                 slot.delete_clip()
             except Exception as e:

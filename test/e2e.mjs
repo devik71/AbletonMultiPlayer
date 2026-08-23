@@ -904,6 +904,11 @@ try {
     l1.stdin.write('note 2 4 60 0 2 100\n');
     await waitFor(l2, /<- #\d+ ClipNotesSet .*"pitch":60/, 8000, notes);
 
+    // Назва -- частина події, а не косметика: без неї копія приїжджає
+    // безіменною, і люди бачать різні лінійки.
+    l1.stdin.write('meta clip:2:4 name Verse\n');
+    await waitFor(l2, /<- #\d+ ObjectMetaSet .*Verse/, 8000, notes);
+
     const born = l2.out.length;
     l1.stdin.write('arr 2 4 8\n');
     await waitFor(l2, /<- #\d+ ArrangementClipCreate .*"start_time":8/, 8000, born);
@@ -921,6 +926,7 @@ try {
     await waitFor(l2, /"tempo"/, 8000, shown);
     const state = l2.out.slice(shown);
     if (!/"start_time": 16/.test(state)) throw new Error('у партнера кліп не на 16-й долі');
+    if (!/"name": "Verse"/.test(state)) throw new Error('назва кліпу не доїхала в Arrangement');
 
     const gone = l2.out.length;
     l1.stdin.write('delarr 2 0\n');
@@ -950,10 +956,10 @@ try {
     }
   });
 
-  await check('журнал: 70 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 71 подія, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 70) throw new Error(`очікував 70 подій, у журналі ${lines.length}`);
+    if (lines.length !== 71) throw new Error(`очікував 71 подію, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);
