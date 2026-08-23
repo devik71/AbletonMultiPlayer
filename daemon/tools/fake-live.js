@@ -407,6 +407,59 @@ const clipsState = (track) => (track.clips || []).map((clip, idx) => {
   return entry;
 }).filter(Boolean);
 
+// ------------------------------------------------------- Arrangement (мірror)
+//
+// Кліп в Arrangement не може носити власний id (Clip.set_data не існує),
+// тож у bridge ідентичність живе в мапі на Song. Тут ми тримаємо її просто
+// в моделі -- нам важлива не персистенція, а те, що uuid є і він стабільний.
+// Подій для Arrangement поки немає: стадія A -- лише знімок і звіт.
+
+const arrOf = (t) => (t.arrangement || (t.arrangement = []));
+
+const arrState = (t) => arrOf(t).map((c) => ({
+  id: c.id,
+  start_time: c.start_time,
+  end_time: c.start_time + c.length,
+  length: c.length,
+  name: c.name,
+  color: c.color,
+  is_midi: true,
+}));
+
+/** Розбіжності, які подіями не лікуються. Дзеркало _structural_gaps. */
+const structuralGaps = (state) => {
+  const gaps = [];
+  for (const entry of state.tracks || []) {
+    const local = trackById(entry.id);
+    if (!local) continue;
+
+    if (Boolean(entry.group) !== Boolean(local.group)) {
+      gaps.push({
+        what: 'group', track: entry.name || local.name,
+        name: (entry.group || local.group || {}).name, here: Boolean(local.group),
+      });
+    }
+
+    const theirs = new Map((entry.arrangement || []).filter((c) => c.id).map((c) => [c.id, c]));
+    const mine = new Map(arrState(local).map((c) => [c.id, c]));
+    const name = entry.name || local.name;
+    for (const [id, c] of theirs) {
+      if (!mine.has(id)) gaps.push({ what: 'arrangement', track: name, here: false, start: c.start_time, name: c.name });
+    }
+    for (const [id, c] of mine) {
+      if (!theirs.has(id)) gaps.push({ what: 'arrangement', track: name, here: true, start: c.start_time, name: c.name });
+    }
+    for (const [id, c] of mine) {
+      const other = theirs.get(id);
+      // Той самий кліп на різних позиціях -- переїзд, якого ми не бачили
+      if (other && other.start_time !== c.start_time) {
+        gaps.push({ what: 'arrangement', track: name, here: null, start: other.start_time, mine: c.start_time, name: c.name });
+      }
+    }
+  }
+  return gaps;
+};
+
 const fullState = () => ({
   version: 1,
   script: arg('script', '0.19.0-dev-fake'),
@@ -424,6 +477,7 @@ const fullState = () => ({
     mixer: mixerState(t),
     devices: deviceEntries(t),
     clips: clipsState(t),
+    arrangement: arrState(t),
   })),
   aux_tracks: auxTracks().filter((t) => t.id).map((t) => ({
     id: t.id,
@@ -535,7 +589,10 @@ function startStateApply(path, id) {
       if (report.errors.length < 20) report.errors.push(`${type}: ${error.message}`);
     }
   }
-  report.missing = [...missing.values()].sort((a, b) => b.count - a.count);
+  // Структурні розбіжності -- не пропущені операції, тож лічильники
+  // ok/skipped їх не рахують: це "у нас різна розкладка", а не збій.
+  const structural = structuralGaps(state);
+  report.missing = [...missing.values()].sort((a, b) => b.count - a.count).concat(structural);
   report.missing_more = missingMore;
   console.log(`state apply: ${report.ok} з ${report.total} (${report.skipped} пропущено, ${report.failed} помилок)`);
   send(report);
@@ -1324,6 +1381,40 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       });
       onDevices(true);
       console.log(`продубльовано ${src.name} -> ${copy.id}`);
+      break;
+    }
+    case 'arr': {
+      // Кладе копію сесійного кліпу в Arrangement -- як duplicate_clip_to_arrangement.
+      // Подій не шле: для Arrangement їх поки немає, і в цьому вся суть перевірки.
+      const t = song.tracks[Number(rest[0]) || 0];
+      const clip = t && t.clips[Number(rest[1]) || 0];
+      if (!clip) return console.log('немає кліпу в цьому слоті');
+      const start = Number(rest[2]);
+      if (!Number.isFinite(start) || start < 0) return console.log('некоректна позиція');
+      arrOf(t).push({ id: newId(), start_time: start, length: clip.length, name: clip.name, color: clip.color });
+      arrOf(t).sort((a, b) => a.start_time - b.start_time);
+      console.log(`в Arrangement ${t.name}: кліп на ${start}-й долі`);
+      break;
+    }
+    case 'movearr': {
+      // Прямого сеттера start_time немає, тож переїзд -- це копія плюс видалення.
+      // Тут це видно як зміна на місці, але uuid зберігається саме тому,
+      // що в bridge джерелом копії служить сам Arrangement-кліп.
+      const t = song.tracks[Number(rest[0]) || 0];
+      const clip = t && arrOf(t)[Number(rest[1]) || 0];
+      const start = Number(rest[2]);
+      if (!clip || !Number.isFinite(start)) return console.log('немає такого кліпу або позиції');
+      clip.start_time = start;
+      arrOf(t).sort((a, b) => a.start_time - b.start_time);
+      console.log(`переїхав на ${start}-ту долю`);
+      break;
+    }
+    case 'delarr': {
+      const t = song.tracks[Number(rest[0]) || 0];
+      const idx = Number(rest[1]) || 0;
+      if (!t || !arrOf(t)[idx]) return console.log('немає такого кліпу');
+      arrOf(t).splice(idx, 1);
+      console.log('прибрано з Arrangement');
       break;
     }
     case 'adddevice': {

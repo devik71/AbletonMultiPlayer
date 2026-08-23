@@ -277,6 +277,22 @@ function describeGap(gap) {
       ? `${gap.track} — у тебе в групі${gap.name ? ` «${gap.name}»` : ''}, у партнера поза нею`
       : `${gap.track} — у партнера в групі${gap.name ? ` «${gap.name}»` : ''}, у тебе поза нею`;
   }
+  if (gap.what === 'arrangement') {
+    // Arrangement подіями поки не синхронізується, тож це не «не застосувалось»,
+    // а «у нас різні лінійки». Мовчати про це найгірше: порожній слот у Session
+    // видно, а чужу лінійку -- ні.
+    //
+    // Позиція -- у долях, як її віддає LOM. Такти рахувати не можемо чесно:
+    // розмір такту поки не синхронізується (docs/COVERAGE.md, тир 1).
+    const at = (v) => (typeof v === 'number' ? `${+v.toFixed(3)}-й долі` : 'невідомій позиції');
+    const what = gap.name ? `кліп «${gap.name}»` : 'кліп';
+    if (gap.here === null) {
+      return `${gap.track} — ${what} в Arrangement: у тебе на ${at(gap.mine)}, у партнера на ${at(gap.start)}`;
+    }
+    return gap.here
+      ? `${gap.track} — ${what} в Arrangement на ${at(gap.start)} є в тебе, у партнера немає`
+      : `${gap.track} — ${what} в Arrangement на ${at(gap.start)} є в партнера, у тебе немає`;
+  }
   if (gap.what === 'clip') return `${where} — немає слоту під кліп`;
   return JSON.stringify(gap);
 }

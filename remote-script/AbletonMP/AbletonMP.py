@@ -166,9 +166,12 @@ class AbletonMP(ControlSurface):
         self._scenes_reg = Registry(self._log)
         self._aux_tracks_reg = Registry(self._log)
         self._chains_reg = Registry(self._log)
+        self._arr_reg = Registry(self._log)   # кліпи в Arrangement
         self._saved_aux_track_records = []
         self._aux_track_records = []
         self._saved_chain_records = []
+        self._saved_arr_records = []
+        self._arr_records = []
         self._chain_records = []
         # РґРѕ Р±СѓС‚СЃС‚СЂР°РїСѓ uuid С‰Рµ РЅРµ СЃРїС–Р»СЊРЅС– Р· РїР°СЂС‚РЅРµСЂРѕРј, С‚РѕР¶ РїРѕРґС–С— Р· РїРѕСЃРёР»Р°РЅРЅСЏРјРё
         # РЅР° РѕР±'С”РєС‚Рё РЅС–РєСѓРґРё РЅРµ РІС–РґРїСЂР°РІР»СЏС”РјРѕ -- РІРѕРЅРё Р± Сѓ РЅСЊРѕРіРѕ РЅРµ Р·Р°СЂРµР·РѕР»РІРёР»РёСЃСЊ
@@ -283,6 +286,7 @@ class AbletonMP(ControlSurface):
             self._wire_mixer(track)
             self._wire_devices(track)
             self._wire_note_slots(track)
+            self._listen(track, "arrangement_clips", self._make_arrangement_cb())
         for track in self._device_aux_tracks():
             self._wire_metadata("track", track, track=track)
             self._wire_mixer(track)
@@ -385,6 +389,11 @@ class AbletonMP(ControlSurface):
     def _make_metadata_cb(self, kind, obj, prop, track=None, scene=None):
         def cb():
             self._safe(self._on_metadata, kind, obj, prop, track, scene)
+        return cb
+
+    def _make_arrangement_cb(self):
+        def cb():
+            self._safe(self._on_arrangement)
         return cb
 
     def _make_devices_cb(self):
@@ -514,6 +523,7 @@ class AbletonMP(ControlSurface):
         self._scenes_reg.clear()
         self._aux_tracks_reg.clear()
         self._chains_reg.clear()
+        self._arr_reg.clear()
         # СЃРїРµСЂС€Сѓ РїС–РґРЅС–РјР°С”РјРѕ uuid С–Р· СЃР°РјРѕРіРѕ .als: СЏРєС‰Рѕ РѕР±РёРґРІС– РјР°С€РёРЅРё РІС–РґРєСЂРёР»Рё С‚РѕР№
         # СЃР°РјРёР№ С„Р°Р№Р», РІРѕРЅРё РѕС‚СЂРёРјР°СЋС‚СЊ РѕРґРЅР°РєРѕРІС– uuid С‰Рµ РґРѕ Р±СѓРґСЊ-СЏРєРѕРіРѕ РѕР±РјС–РЅСѓ
         restored = self._restore_registry()
@@ -534,6 +544,7 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_arrangement()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
                   % (len(reg["tracks"]), len(reg["scenes"]), len(reg["aux_tracks"]),
@@ -550,6 +561,7 @@ class AbletonMP(ControlSurface):
         self._scenes_reg.clear()
         self._aux_tracks_reg.clear()
         self._chains_reg.clear()
+        self._arr_reg.clear()
         # uuid, Р·Р±РµСЂРµР¶РµРЅС– РІ .als, РіРѕР»РѕРІРЅС–С€С– Р·Р° РїРѕР·РёС†С–СЋ: С–Рј'СЏ С‚СЂРµРєСѓ РІ Live
         # Р·РјС–РЅСЋС”С‚СЊСЃСЏ СЃР°РјРµ СЃРѕР±РѕСЋ РІС–Рґ РєРёРЅСѓС‚РѕРіРѕ РґРµРІР°Р№СЃР°, С‚РѕР¶ Р·РІС–СЂРєР° Р·Р° С–РјРµРЅРµРј
         # РІС–РґРєРёРґР°Р»Р° Р± С†С–Р»РєРѕРј Р»РµРіС–С‚РёРјРЅС– Р·Р±С–РіРё
@@ -609,6 +621,7 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_arrangement()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
         self._persist_registry()
@@ -679,6 +692,7 @@ class AbletonMP(ControlSurface):
         except Exception:
             saved = None
         self._saved_chain_records = list((saved or {}).get("chains") or [])
+        self._saved_arr_records = list((saved or {}).get("arrangement") or [])
         self._saved_aux_track_records = list((saved or {}).get("aux_tracks") or [])
 
         by_map = 0
@@ -735,7 +749,8 @@ class AbletonMP(ControlSurface):
                 self._obj_store_id(chain, rec["id"])
 
         snap = {"tracks": [], "scenes": [], "aux_tracks": list(self._aux_track_records),
-                "chains": list(self._chain_records)}
+                "chains": list(self._chain_records),
+                "arrangement": list(self._arr_records)}
         for key, reg, objects in (("tracks", self._tracks_reg, self._doc.tracks),
                                   ("scenes", self._scenes_reg, self._doc.scenes)):
             for i, obj in enumerate(objects):
@@ -3622,6 +3637,7 @@ class AbletonMP(ControlSurface):
                 "mixer": self._state_mixer(track),
                 "devices": self._state_devices(track),
                 "clips": self._state_clips(track, doc_scenes),
+                "arrangement": self._state_arrangement(track),
             })
 
         aux_tracks = []
@@ -3821,6 +3837,108 @@ class AbletonMP(ControlSurface):
             "errors": report["errors"],
         })
 
+    # ----------------------------------------------------------- Arrangement
+    #
+    # Кліп в Arrangement не може носити власний id: Clip.set_data не існує
+    # (перевірено на живому 12.3), рівно як і в сцени. Тож ідентичність живе
+    # в мапі на Song, а локатором служить пара (uuid треку, start_time):
+    # кліпи на одному треку не перекриваються, отже початок унікальний.
+    #
+    # Пересунути кліп прямо не можна -- Clip.start_time без сеттера. Переїзд
+    # робиться як duplicate_clip_to_arrangement(сам кліп, нова позиція) плюс
+    # delete_clip(старий); обидва виклики перевірені на живому Live.
+
+    def _arr_clips(self, track):
+        try:
+            return list(track.arrangement_clips)
+        except Exception:
+            return []
+
+    def _arr_start(self, clip):
+        try:
+            value = float(clip.start_time)
+        except Exception:
+            return None
+        if not math.isfinite(value) or abs(value) > CLIP_LENGTH_MAX:
+            return None
+        return round(value, 6)
+
+    def _prime_arrangement(self):
+        """Видає uuid усім Arrangement-кліпам, спираючись на збережену мапу.
+
+        Повертає True, якщо розкладка змінилась -- тоді її варто перезаписати
+        в .als. Без цього переїзд кліпу лишив би в мапі стару позицію, і після
+        відкриття файлу кліп дістав би новий uuid замість свого.
+        """
+        wanted = {}
+        for rec in self._saved_arr_records:
+            if rec.get("id"):
+                wanted[(rec.get("track"), rec.get("start"))] = rec["id"]
+
+        records = []
+        for track in self._doc.tracks:
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
+                continue   # група або нерозділюваний трек -- як і всюди
+            tid = track_ref.get("id")
+            for clip in self._arr_clips(track):
+                start = self._arr_start(clip)
+                if start is None:
+                    continue
+                uid = self._arr_reg.id_of(clip, create=False)
+                if not uid:
+                    saved = wanted.get((tid, start))
+                    if saved and not self._arr_reg.taken_by_other(saved, clip):
+                        self._arr_reg.bind(saved, clip)
+                        uid = saved
+                    else:
+                        uid = self._arr_reg.id_of(clip)
+                records.append({"id": uid, "track": tid, "start": start,
+                                "name": self._safe_name(clip)})
+
+        changed = records != self._arr_records
+        self._arr_records = records
+        return changed
+
+    def _state_arrangement(self, track):
+        """Arrangement-кліпи треку для знімка. Лише читання: подій ще немає."""
+        entries = []
+        track_ref = self._device_track_ref(track)
+        if not track_ref:
+            return entries
+        for clip in self._arr_clips(track):
+            start = self._arr_start(clip)
+            uid = self._arr_reg.id_of(clip, create=False)
+            if start is None or not uid:
+                continue
+            entry = {"id": uid, "start_time": start}
+            for prop, cast in (("end_time", float), ("length", float),
+                               ("name", None), ("color", int)):
+                try:
+                    value = getattr(clip, prop)
+                    entry[prop] = round(float(value), 6) if cast is float else (
+                        int(value) if cast is int else self._doc_str(value))
+                except Exception:
+                    pass
+            try:
+                entry["is_midi"] = bool(clip.is_midi_clip)
+            except Exception:
+                pass
+            entries.append(entry)
+        return entries
+
+    def _on_arrangement(self):
+        """Структура Arrangement змінилась.
+
+        Подій ми поки не шлемо -- стадія A дає лише ідентичність і звіт про
+        розбіжність. Але uuid мусять зʼявитись одразу: без них кліп, який
+        приїде в наступній стадії, не буде чим адресувати.
+        """
+        if not self._registry_ready:
+            return
+        if self._prime_arrangement():
+            self._persist_registry()
+
     def _structural_gaps(self, state):
         """Розбіжності структури, які подіями не лікуються.
 
@@ -3847,7 +3965,50 @@ class AbletonMP(ControlSurface):
             })
             if len(gaps) >= MISSING_LIMIT:
                 break
-        return gaps
+
+        gaps.extend(self._arrangement_gaps(state, MISSING_LIMIT - len(gaps)))
+        return gaps[:MISSING_LIMIT]
+
+    def _arrangement_gaps(self, state, budget):
+        """Чим різняться Arrangement у нас і в партнера.
+
+        Подій для Arrangement ще немає, тож розбіжність не лікується нічим,
+        крім рук -- і саме тому її треба назвати вголос. Мовчазний розсинхрон
+        тут найгірший: у Session видно порожній слот, а лінійку партнера
+        не видно взагалі.
+        """
+        gaps = []
+        if budget <= 0:
+            return gaps
+        for track in (state.get("tracks") or []):
+            uid = track.get("id")
+            if not uid:
+                continue
+            local, _ref = self._resolve_device_track({"id": uid})
+            if local is None:
+                continue
+            theirs = dict((c.get("id"), c) for c in (track.get("arrangement") or [])
+                          if c.get("id"))
+            mine = dict((c.get("id"), c) for c in self._state_arrangement(local))
+            name = track.get("name") or self._safe_name(local)
+            for cid in sorted(set(theirs) - set(mine)):
+                gaps.append({"what": "arrangement", "track": name, "here": False,
+                             "start": theirs[cid].get("start_time"),
+                             "name": theirs[cid].get("name")})
+            for cid in sorted(set(mine) - set(theirs)):
+                gaps.append({"what": "arrangement", "track": name, "here": True,
+                             "start": mine[cid].get("start_time"),
+                             "name": mine[cid].get("name")})
+            # Той самий кліп на різних позиціях -- переїзд, якого ми не бачили
+            for cid in sorted(set(mine) & set(theirs)):
+                if theirs[cid].get("start_time") != mine[cid].get("start_time"):
+                    gaps.append({"what": "arrangement", "track": name, "here": None,
+                                 "start": theirs[cid].get("start_time"),
+                                 "mine": mine[cid].get("start_time"),
+                                 "name": mine[cid].get("name")})
+            if len(gaps) >= budget:
+                break
+        return gaps[:budget]
 
     # ------------------------------------------------- завантаження девайсів
 
