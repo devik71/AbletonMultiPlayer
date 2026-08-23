@@ -46,6 +46,8 @@ APPLY_TYPES = [
     "MixerSet", "TrackToggle", "DeviceParamSet", "ObjectMetaSet",
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
     "DeviceLoad",
+    "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
+    "ArrangementClipNotesSet",
 ]
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
@@ -66,7 +68,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load"]
+            "presence", "view_follow", "device_load", "arrangement"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -2400,6 +2402,18 @@ class AbletonMP(ControlSurface):
             # і рухає виділення, а під запис виділений трек чіпати не можна.
             self._queue_device_load(payload, gseq)
 
+        elif etype == "ArrangementClipCreate":
+            self._apply_arr_create(payload, gseq)
+
+        elif etype == "ArrangementClipMove":
+            self._apply_arr_move(payload, gseq)
+
+        elif etype == "ArrangementClipDelete":
+            self._apply_arr_delete(payload, gseq)
+
+        elif etype == "ArrangementClipNotesSet":
+            self._apply_arr_notes(payload, gseq)
+
         elif etype == "ClipLoopSet":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
             if slot is None:
@@ -3908,6 +3922,216 @@ class AbletonMP(ControlSurface):
         self._arr_records = records
         return changed
 
+    # ------------------------------------------- Arrangement: події (стадія B)
+    #
+    # Форма подій задана обмеженнями LOM, виміряними на живому 12.3:
+    #   створити -- лише duplicate_clip_to_arrangement(джерело, час);
+    #   пересунути -- прямого сеттера немає, тож копія плюс видалення старої;
+    #   видалити -- delete_clip(кліп).
+    # Створити кліп "з нічого" не можна ніколи, тому приймальний бік збирає
+    # тимчасове джерело в порожньому слоті Session і одразу його прибирає.
+
+    def _resolve_arr_clip(self, payload):
+        """Трек і Arrangement-кліп за uuid. (None, None) -- адреса не розвʼязалась."""
+        track, _tref = self._resolve_device_track(payload.get("track") or {})
+        if track is None:
+            return None, None
+        uid = (payload.get("clip") or {}).get("id")
+        if not uid:
+            return track, None
+        return track, self._arr_reg.obj_of(uid)
+
+    def _arr_time_from_payload(self, payload):
+        try:
+            value = float(payload.get("start_time"))
+        except Exception:
+            return None
+        if not math.isfinite(value) or value < 0 or value > CLIP_LENGTH_MAX:
+            return None
+        return round(value, 6)
+
+    def _arr_free_slot(self, track):
+        """Порожній слот Session -- єдине місце, де можна зібрати джерело."""
+        try:
+            slots = list(track.clip_slots)
+        except Exception:
+            return None
+        for slot in slots:
+            try:
+                if not slot.has_clip:
+                    return slot
+            except Exception:
+                continue
+        return None
+
+    def _arr_place(self, track, source, start_time, gseq):
+        try:
+            return track.duplicate_clip_to_arrangement(source, float(start_time))
+        except Exception as e:
+            self._warn("gseq %s: кліп не ліг в Arrangement: %r" % (gseq, e))
+            return None
+
+    def _arr_after_write(self):
+        self._suppress_struct = False
+        self._rewire_tracks()
+        self._prime_arrangement()
+        self._persist_registry()
+
+    def _apply_arr_create(self, payload, gseq):
+        track, existing = self._resolve_arr_clip(payload)
+        if track is None or existing is not None:
+            return  # ідемпотентність: подія вже застосована
+        meta = payload.get("clip") or {}
+        uid = meta.get("id")
+        start = self._arr_time_from_payload(payload)
+        if not uid or start is None:
+            return
+        if not bool(meta.get("is_midi", True)):
+            self._warn("gseq %s: audio-кліпи в Arrangement не створюємо" % (gseq,))
+            return
+        slot = self._arr_free_slot(track)
+        if slot is None:
+            self._warn("gseq %s: усі слоти Session зайняті, немає де зібрати "
+                       "джерело для Arrangement" % (gseq,))
+            return
+        length = self._clip_length_from_payload(payload)
+        self._suppress_struct = True
+        try:
+            slot.create_clip(length)
+            placed = self._arr_place(track, slot.clip, start, gseq)
+            if placed is not None:
+                self._arr_reg.bind(uid, placed)
+            try:
+                slot.delete_clip()
+            except Exception as e:
+                self._warn("gseq %s: тимчасовий кліп не прибрався: %r" % (gseq, e))
+        finally:
+            self._arr_after_write()
+
+    def _apply_arr_move(self, payload, gseq):
+        track, clip = self._resolve_arr_clip(payload)
+        if track is None or clip is None:
+            return
+        start = self._arr_time_from_payload(payload)
+        if start is None or self._arr_start(clip) == start:
+            return
+        uid = (payload.get("clip") or {}).get("id")
+        self._suppress_struct = True
+        try:
+            placed = self._arr_place(track, clip, start, gseq)
+            if placed is None:
+                return
+            # Спершу привʼязка, потім видалення: якщо delete впаде, uuid уже
+            # вказує на кліп, який реально лежить на новому місці.
+            self._arr_reg.bind(uid, placed)
+            try:
+                track.delete_clip(clip)
+            except Exception as e:
+                self._warn("gseq %s: старий кліп не прибрався після переїзду: %r"
+                           % (gseq, e))
+        finally:
+            self._arr_after_write()
+
+    def _apply_arr_delete(self, payload, gseq):
+        track, clip = self._resolve_arr_clip(payload)
+        if track is None or clip is None:
+            return
+        self._suppress_struct = True
+        try:
+            track.delete_clip(clip)
+        except Exception as e:
+            self._warn("gseq %s: кліп не видалився з Arrangement: %r" % (gseq, e))
+        finally:
+            self._arr_after_write()
+
+    def _apply_arr_notes(self, payload, gseq):
+        _track, clip = self._resolve_arr_clip(payload)
+        if clip is None:
+            return
+        validated = self._validated_note_region(payload)
+        if validated is None:
+            self._warn("gseq %s: некоректний нотний регіон для Arrangement" % (gseq,))
+            return
+        region, target = validated
+        specs = tuple(self._make_note_spec(note) for note in target)
+        try:
+            clip.remove_notes_extended(region[0], region[1], region[2], region[3])
+            if specs:
+                clip.add_new_notes(specs)
+        except Exception as e:
+            self._warn("gseq %s: ноти в Arrangement не лягли: %r" % (gseq, e))
+
+    def _emit_arr_create(self, track_ref, clip, uid, start):
+        meta = {"id": uid}
+        try:
+            meta["length"] = round(float(clip.length), 6)
+        except Exception:
+            meta["length"] = NOTE_TIME_SPAN
+        name = self._safe_name(clip)
+        if name:
+            meta["name"] = name
+        color = self._safe_color(clip)
+        if color is not None:
+            meta["color"] = color
+        try:
+            meta["is_midi"] = bool(clip.is_midi_clip)
+        except Exception:
+            meta["is_midi"] = True
+        self._emit("ArrangementClipCreate",
+                   {"track": track_ref, "clip": meta, "start_time": start})
+        if not meta["is_midi"]:
+            return
+        # Вміст -- окремими подіями: створення має лишатись маленьким, інакше
+        # один довгий кліп заблокував би чергу партнера на секунди.
+        notes = self._clip_notes(clip)
+        if not notes:
+            return
+        for region, part in self._note_regions_for({"length": meta["length"]}, notes):
+            from_pitch, pitch_span, from_time, time_span = region
+            self._emit("ArrangementClipNotesSet", {
+                "track": track_ref,
+                "clip": {"id": uid},
+                "region": {"from_pitch": from_pitch, "pitch_span": pitch_span,
+                           "from_time": from_time, "time_span": time_span},
+                "notes": part,
+            })
+
+    def _diff_arrangement(self):
+        """Події з різниці лінійок. Викликається ДО _prime_arrangement.
+
+        Переїзд розпізнається за тим, що вижив сам обʼєкт Clip: uuid той
+        самий, змінився лише start_time. Якщо Live обʼєкт перестворив, вийде
+        пара видалення+створення -- партнер усе одно збіжиться, просто кліп
+        дістане новий uuid і ноти поїдуть заново.
+        """
+        previous = dict((rec["id"], rec) for rec in self._arr_records)
+        seen = set()
+        for track in self._doc.tracks:
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
+                continue
+            for clip in self._arr_clips(track):
+                start = self._arr_start(clip)
+                if start is None:
+                    continue
+                uid = self._arr_reg.id_of(clip, create=False)
+                if uid and uid in previous:
+                    seen.add(uid)
+                    if previous[uid].get("start") != start:
+                        self._emit("ArrangementClipMove", {
+                            "track": track_ref, "clip": {"id": uid},
+                            "start_time": start})
+                    continue
+                if not uid:
+                    uid = self._arr_reg.id_of(clip)
+                seen.add(uid)
+                self._emit_arr_create(track_ref, clip, uid, start)
+        for uid, rec in previous.items():
+            if uid in seen:
+                continue
+            self._emit("ArrangementClipDelete",
+                       {"track": {"id": rec.get("track")}, "clip": {"id": uid}})
+
     def _state_arrangement(self, track):
         """Arrangement-кліпи треку для знімка. Лише читання: подій ще немає."""
         entries = []
@@ -3944,6 +4168,8 @@ class AbletonMP(ControlSurface):
         """
         if not self._registry_ready:
             return
+        if not self._suppress_struct:
+            self._safe(self._diff_arrangement)
         if self._prime_arrangement():
             self._persist_registry()
 

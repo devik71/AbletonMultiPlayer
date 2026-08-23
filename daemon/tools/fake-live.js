@@ -15,7 +15,7 @@ import { createSocket } from 'node:dgram';
 import { createHash, randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { readFileSync } from 'node:fs';
-import { stateToOps } from './state-ops.js';
+import { noteRegionsFor, stateToOps } from './state-ops.js';
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
@@ -426,6 +426,63 @@ const arrState = (t) => arrOf(t).map((c) => ({
   is_midi: true,
 }));
 
+// Емісія подій Arrangement. Дзеркало _diff_arrangement: переїзд розпізнається
+// за тим, що вижив сам обʼєкт (тут -- його uuid), а не за схожістю кліпів.
+let arrSnapshot = new Map();
+
+const primeArrangement = () => {
+  arrSnapshot = new Map();
+  for (const t of song.tracks) {
+    if (!t.id) continue;
+    for (const c of arrOf(t)) arrSnapshot.set(c.id, { track: t.id, start: c.start_time });
+  }
+};
+
+const diffArrangement = () => {
+  const seen = new Set();
+  for (const t of song.tracks) {
+    if (!t.id) continue;
+    for (const c of arrOf(t)) {
+      seen.add(c.id);
+      const was = arrSnapshot.get(c.id);
+      if (was) {
+        if (was.start !== c.start_time) {
+          emit('ArrangementClipMove', { track: { id: t.id }, clip: { id: c.id }, start_time: c.start_time });
+        }
+        continue;
+      }
+      emit('ArrangementClipCreate', {
+        track: { id: t.id },
+        clip: { id: c.id, length: c.length, name: c.name, color: c.color, is_midi: true },
+        start_time: c.start_time,
+      });
+      // Вміст -- окремими подіями, щоб створення лишалось маленьким
+      for (const [region, part] of noteRegionsFor({ length: c.length }, c.notes || [])) {
+        if (!part.length) continue;
+        emit('ArrangementClipNotesSet', { track: { id: t.id }, clip: { id: c.id }, region, notes: part });
+      }
+    }
+  }
+  for (const [id, was] of arrSnapshot) {
+    if (!seen.has(id)) emit('ArrangementClipDelete', { track: { id: was.track }, clip: { id } });
+  }
+};
+
+// Дзеркало _on_arrangement: глушіння те саме, що всюди -- застосування чужої
+// події не має повернутись назад власною емісією.
+const onArrangement = (suppressStruct) => {
+  if (!suppressStruct) diffArrangement();
+  primeArrangement();
+};
+
+const arrClipById = (id) => {
+  for (const t of song.tracks) {
+    const clip = arrOf(t).find((c) => c.id === id);
+    if (clip) return { track: t, clip };
+  }
+  return null;
+};
+
 /** Розбіжності, які подіями не лікуються. Дзеркало _structural_gaps. */
 const structuralGaps = (state) => {
   const gaps = [];
@@ -759,6 +816,7 @@ const diffDevices = () => {
 const onDevices = (suppressStruct) => {
   if (!suppressStruct) diffDevices();
   primeDevices();
+  primeArrangement();
 };
 
 function buildRegistry() {
@@ -767,6 +825,7 @@ function buildRegistry() {
   refreshAuxTrackIds([], true);
   refreshChainIds();
   primeDevices();
+  primeArrangement();
   registryReady = true;
   console.log('реєстр створено');
   return {
@@ -801,6 +860,7 @@ function adoptRegistry(reg) {
     if (!knownChains.has(rec.id)) problems.push(`Rack chain ${rec.name}: не зіставився`);
   }
   primeDevices();
+  primeArrangement();
   registryReady = true;
   console.log(`реєстр прийнято${problems.length ? `, незіставлено: ${problems.join('; ')}` : ''}`);
 }
@@ -1015,6 +1075,48 @@ function apply(type, payload, gseq) {
       }
       break;
     }
+    case 'ArrangementClipCreate': {
+      const t = trackById(payload.track?.id);
+      if (!t) return reject('невідомий трек');
+      if (!payload.clip?.id) return reject('кліп без uuid');
+      if (arrOf(t).some((c) => c.id === payload.clip.id)) break;   // ідемпотентність
+      if (payload.clip.is_midi === false) return reject('audio-кліпи в Arrangement не створюємо');
+      // Джерело збирається в порожньому слоті Session: LOM інакше не вміє
+      if (!t.clips.some((c) => !c)) return reject('усі слоти Session зайняті');
+      arrOf(t).push({
+        id: payload.clip.id,
+        start_time: payload.start_time,
+        length: payload.clip.length || NOTE_TIME_SPAN,
+        name: payload.clip.name || '',
+        color: payload.clip.color ?? 0x777777,
+        notes: [],
+      });
+      arrOf(t).sort((a, b) => a.start_time - b.start_time);
+      break;
+    }
+    case 'ArrangementClipMove': {
+      const found = arrClipById(payload.clip?.id);
+      if (!found) return reject('немає такого кліпу в Arrangement');
+      found.clip.start_time = payload.start_time;
+      arrOf(found.track).sort((a, b) => a.start_time - b.start_time);
+      break;
+    }
+    case 'ArrangementClipDelete': {
+      const found = arrClipById(payload.clip?.id);
+      if (!found) return reject('немає такого кліпу в Arrangement');
+      const list = arrOf(found.track);
+      list.splice(list.indexOf(found.clip), 1);
+      break;
+    }
+    case 'ArrangementClipNotesSet': {
+      const found = arrClipById(payload.clip?.id);
+      if (!found) return reject('немає такого кліпу в Arrangement');
+      const clip = found.clip;
+      clip.notes = (clip.notes || []).filter((note) => !noteInRegion(note, payload.region));
+      clip.notes.push(...(payload.notes || []).map((note) => ({ ...note })));
+      clip.notes.sort((a, b) => a.start_time - b.start_time || a.pitch - b.pitch);
+      break;
+    }
     case 'ClipNotesSet': {
       const t = trackById(payload.track?.id);
       const s = sceneIdx(payload.scene?.id);
@@ -1039,6 +1141,7 @@ function apply(type, payload, gseq) {
   // Дзеркало _on_devices після структурної зміни. Глушіння увімкнене:
   // власне застосування не має полетіти назад автоемісією.
   if (['TrackCreate', 'TrackDelete', 'TrackDuplicate', 'DeviceLoad'].includes(type)) onDevices(true);
+  if (type.startsWith('Arrangement')) onArrangement(true);
   console.log(`<- #${gseq} ${type} ${JSON.stringify(payload)}`);
 }
 
@@ -1391,8 +1494,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (!clip) return console.log('немає кліпу в цьому слоті');
       const start = Number(rest[2]);
       if (!Number.isFinite(start) || start < 0) return console.log('некоректна позиція');
-      arrOf(t).push({ id: newId(), start_time: start, length: clip.length, name: clip.name, color: clip.color });
+      arrOf(t).push({ id: newId(), start_time: start, length: clip.length, name: clip.name, color: clip.color,
+        notes: (clip.notes || []).map((n) => ({ ...n })) });
       arrOf(t).sort((a, b) => a.start_time - b.start_time);
+      onArrangement(false);
       console.log(`в Arrangement ${t.name}: кліп на ${start}-й долі`);
       break;
     }
@@ -1406,6 +1511,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (!clip || !Number.isFinite(start)) return console.log('немає такого кліпу або позиції');
       clip.start_time = start;
       arrOf(t).sort((a, b) => a.start_time - b.start_time);
+      onArrangement(false);
       console.log(`переїхав на ${start}-ту долю`);
       break;
     }
@@ -1414,6 +1520,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const idx = Number(rest[1]) || 0;
       if (!t || !arrOf(t)[idx]) return console.log('немає такого кліпу');
       arrOf(t).splice(idx, 1);
+      onArrangement(false);
       console.log('прибрано з Arrangement');
       break;
     }

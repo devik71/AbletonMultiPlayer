@@ -137,8 +137,8 @@ test('структурні й незнайомі події не згортаю�
   gseq = 0;
   // Новий bridge шле тип, якого цей relay не знає: викидати його не можна.
   const unknown = compactTail([
-    ev('ArrangementClipMove', { clip: { id: 'a1' }, at: 1 }),
-    ev('ArrangementClipMove', { clip: { id: 'a1' }, at: 2 }),
+    ev('SomethingFromTheFuture', { clip: { id: 'a1' }, at: 1 }),
+    ev('SomethingFromTheFuture', { clip: { id: 'a1' }, at: 2 }),
   ]);
   assert.equal(unknown.dropped, 0);
 });
@@ -163,4 +163,27 @@ test('межі кліпу згортаються в останні, і лише 
   gseq = 0;
   const two = compactTail([loop('t1', 's1', 4), loop('t1', 's2', 4)]);
   assert.equal(two.dropped, 0, 'різні кліпи не перекривають одне одного');
+});
+
+test('переїзд кліпу в Arrangement згортається, а створення -- ні', () => {
+  gseq = 0;
+  const move = (start) => ev('ArrangementClipMove',
+    { track: { id: 't1' }, clip: { id: 'a1' }, start_time: start });
+  const out = compactTail([move(8), move(16), move(24)]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.start_time, 24);
+
+  gseq = 0;
+  // Різні кліпи не перекривають одне одного
+  const two = compactTail([move(8), ev('ArrangementClipMove',
+    { track: { id: 't1' }, clip: { id: 'a2' }, start_time: 8 })]);
+  assert.equal(two.dropped, 0);
+
+  gseq = 0;
+  // Створення і видалення -- структура, вона не згортається ніколи
+  const structural = compactTail([
+    ev('ArrangementClipCreate', { track: { id: 't1' }, clip: { id: 'a1' }, start_time: 0 }),
+    ev('ArrangementClipDelete', { track: { id: 't1' }, clip: { id: 'a1' } }),
+  ]);
+  assert.equal(structural.dropped, 0);
 });

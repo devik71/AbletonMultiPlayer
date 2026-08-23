@@ -11,7 +11,10 @@
 
 // Дискретні дії (launch, mute, rename) лока не потребують: вони миттєві,
 // і показувати "редагує" на них -- лише блимання в чужому UI.
-const CONTINUOUS = new Set(['TempoSet', 'MixerSet', 'DeviceParamSet', 'ClipNotesSet', 'ClipLoopSet']);
+const CONTINUOUS = new Set([
+  'TempoSet', 'MixerSet', 'DeviceParamSet', 'ClipNotesSet', 'ClipLoopSet',
+  'ArrangementClipMove', 'ArrangementClipNotesSet',
+]);
 
 function trackName(registry, id, kind) {
   if (!registry) return null;
@@ -29,6 +32,14 @@ export function lockTarget(type, payload, registry) {
   const p = payload || {};
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
+
+  if (type === 'ArrangementClipMove' || type === 'ArrangementClipNotesSet') {
+    // Кліп в Arrangement має власний uuid -- ні сцени, ні слоту в нього немає.
+    const clip = p.clip?.id;
+    if (!clip) return null;
+    const track = trackName(registry, p.track?.id);
+    return { object: `arrclip:${clip}`, label: [track, 'Arrangement'].filter(Boolean).join(' / ') };
+  }
 
   if (type === 'ClipNotesSet' || type === 'ClipLoopSet') {
     const track = p.track?.id;

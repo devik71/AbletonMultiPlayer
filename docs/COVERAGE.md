@@ -77,7 +77,12 @@ AbletonOSC — це RPC-поверхня: get/set/listen на властивос
 
 ## Arrangement
 
-**Стан: не синхронізується.** У AbletonOSC для Arrangement є лише getter-и --
+**Стан: синхронізується** -- створення, переїзд, видалення і ноти на момент
+появи. Подробиці в [PROTOCOL.md](PROTOCOL.md#arrangement). Не синхронізуються
+подальші правки нот усередині Arrangement-кліпу і audio-кліпи.
+
+Історія питання варта того, щоб її лишити:
+ У AbletonOSC для Arrangement є лише getter-и --
 `arrangement_clips/name`, `/length`, `/start_time`; жодного створення
 чи пересування.
 

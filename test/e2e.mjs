@@ -899,56 +899,61 @@ try {
     if (grew !== 2) throw new Error(`очікував TrackCreate + DeviceLoad, отримав ${grew} подій`);
   });
 
-  await check('розбіжність в Arrangement називається вголос', async () => {
-    // Arrangement подіями ще не синхронізується, тож єдине, що ми можемо
-    // чесно зробити -- не мовчати про різницю. Порожній слот у Session видно
-    // очима, чужу лінійку -- ні.
+  await check('кліп в Arrangement доїжджає з нотами, переїжджає і зникає', async () => {
     const notes = l1.out.length;
     l1.stdin.write('note 2 4 60 0 2 100\n');
-    await waitFor(l1, /-> ClipCreate|-> ClipNotesSet/, 8000, notes);
+    await waitFor(l2, /<- #\d+ ClipNotesSet .*"pitch":60/, 8000, notes);
+
+    const born = l2.out.length;
     l1.stdin.write('arr 2 4 8\n');
-    await waitFor(l1, /в Arrangement .*: кліп на 8-й долі/, 5000);
+    await waitFor(l2, /<- #\d+ ArrangementClipCreate .*"start_time":8/, 8000, born);
+    // Вміст іде окремою подією -- саме тому створення лишається маленьким
+    await waitFor(l2, /<- #\d+ ArrangementClipNotesSet .*"pitch":60/, 8000, born);
+    if (/Arrangement.* ВІДХИЛЕНО/.test(l2.out.slice(born))) throw new Error('партнер відхилив кліп');
 
-    const from = d1.out.length;
-    l1.stdin.write('fullstate\n');
-    await waitFor(d1, /state: знімок \d+ зібрано/, 10000, from);
+    const moved = l2.out.length;
+    l1.stdin.write('movearr 2 0 16\n');
+    await waitFor(l2, /<- #\d+ ArrangementClipMove .*"start_time":16/, 8000, moved);
 
-    const mine = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
-    const track = mine.tracks.find((t) => (t.arrangement || []).length);
-    if (!track) throw new Error('Arrangement-кліпи не потрапили у знімок');
-    const [clip] = track.arrangement;
-    if (!clip.id) throw new Error('кліп у знімку без uuid');
-    if (clip.start_time !== 8 || clip.end_time !== clip.start_time + clip.length) {
-      throw new Error(`межі кліпу в знімку не сходяться: ${clip.start_time}..${clip.end_time} за довжини ${clip.length}`);
-    }
+    // Стан партнера мусить збігтися: кліп на 16-й долі, з нотою всередині
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    const state = l2.out.slice(shown);
+    if (!/"start_time": 16/.test(state)) throw new Error('у партнера кліп не на 16-й долі');
 
-    // Партнер бачить у знімку кліп, якого в нього немає -- і мусить це сказати
-    const foreign = join(tmp, 'arr-state.json');
-    writeFileSync(foreign, JSON.stringify(mine));
-    const said = d2.out.length;
-    d2.stdin.write(`apply ${foreign}\n`);
-    await waitFor(d2, /Бракує ось чого:/, 15000, said);
-    if (!/кліп в Arrangement на 8-й долі є в партнера, у тебе немає/.test(d2.out.slice(said))) {
-      throw new Error('про чужий Arrangement-кліп не сказано');
-    }
-
-    // Той самий кліп на іншій позиції -- переїзд, якого ніхто не бачив
-    const moved = JSON.parse(JSON.stringify(mine));
-    moved.tracks.find((t) => (t.arrangement || []).length).arrangement[0].start_time = 16;
-    const movedPath = join(tmp, 'arr-moved.json');
-    writeFileSync(movedPath, JSON.stringify(moved));
-    const again = d1.out.length;
-    d1.stdin.write(`apply ${movedPath}\n`);
-    await waitFor(d1, /Бракує ось чого:/, 15000, again);
-    if (!/в Arrangement: у тебе на 8-й долі, у партнера на 16-й долі/.test(d1.out.slice(again))) {
-      throw new Error('переїзд кліпу не названо');
+    const gone = l2.out.length;
+    l1.stdin.write('delarr 2 0\n');
+    await waitFor(l2, /<- #\d+ ArrangementClipDelete/, 8000, gone);
+    if (/ArrangementClipDelete ВІДХИЛЕНО/.test(l2.out.slice(gone))) {
+      throw new Error('видалення не застосувалось');
     }
   });
 
-  await check('журнал: 66 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('чужий кліп в Arrangement, якого в нас немає, називається вголос', async () => {
+    // Подія могла не доїхати -- партнер був офлайн, гілка розійшлась.
+    // Тоді єдине чесне -- не мовчати про різницю.
+    const from = d2.out.length;
+    l2.stdin.write('fullstate\n');
+    await waitFor(d2, /state: знімок \d+ зібрано/, 10000, from);
+    const source = JSON.parse(readFileSync(join(tmp, 'p2.e2e.state.json'), 'utf8'));
+    const victim = source.tracks.find((t) => t.id);
+    victim.arrangement = [{ id: 'aaaabbbbcccc', start_time: 32, end_time: 36, length: 4, name: 'Bridge' }];
+    const foreign = join(tmp, 'arr-gap.json');
+    writeFileSync(foreign, JSON.stringify(source));
+
+    const said = d2.out.length;
+    d2.stdin.write(`apply ${foreign}\n`);
+    await waitFor(d2, /Бракує ось чого:/, 15000, said);
+    if (!/кліп «Bridge» в Arrangement на 32-й долі є в партнера, у тебе немає/.test(d2.out.slice(said))) {
+      throw new Error('про чужий Arrangement-кліп не сказано');
+    }
+  });
+
+  await check('журнал: 70 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 66) throw new Error(`очікував 66 подій, у журналі ${lines.length}`);
+    if (lines.length !== 70) throw new Error(`очікував 70 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

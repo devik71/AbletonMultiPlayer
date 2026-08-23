@@ -56,6 +56,12 @@ export function supersedeKey(ev) {
       // Регіон -- частина ключа: подія замінює ноти лише всередині нього,
       // тож два різні регіони одного кліпу не перекривають одне одного.
       return `notes:${p.track?.id}:${p.scene?.id}:${canonical(p.region)}`;
+    case 'ArrangementClipMove':
+      // Кліп в Arrangement має власний uuid, тож переїзд перезаписує
+      // позицію цілком: із серії рухів доїжджає остання.
+      return `arrmove:${p.clip?.id}`;
+    case 'ArrangementClipNotesSet':
+      return `arrnotes:${p.clip?.id}:${canonical(p.region)}`;
     default:
       return null;
   }
