@@ -3148,7 +3148,10 @@ class AbletonMP(ControlSurface):
             prop = action.get("property", action.get("prop"))
             if not isinstance(prop, str) or not prop or prop.startswith("_"):
                 raise ValueError("property must be a public string")
-            setattr(obj, prop, action.get("value"))
+            # Половина цікавих властивостей приймає обʼєкт, а не число:
+            # selected_drum_pad, selected_track, selected_chain. Через голий
+            # JSON вони недосяжні, тож {"$path": [...]} резолвиться і тут.
+            setattr(obj, prop, self._ai_arg(action.get("value")))
             return self._ai_serialize(obj)
 
         if op == "lom_call":

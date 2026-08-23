@@ -48,6 +48,21 @@ API. Той, хто прийме довідник за повний перелі
 Усе це живе в [docs/COVERAGE.md](../../../docs/COVERAGE.md) і
 [docs/PROTOCOL.md](../../../docs/PROTOCOL.md) -- і має лишатись там.
 
+## Знайдені розбіжності
+
+Ведемо список: довідник помиляється рідко, але помиляється.
+
+| Довідник каже | Насправді | Як перевірено |
+|---|---|---|
+| `Track.set_data` / `get_data` -- немає | є і працюють | uuid переживають `.als` |
+| `DrumGroupDevice.View.selected_drum_pad` -- `R` | **записується** | `lom_set` віддав C++ підпис сеттера `None(TRackDevicePyViewData, TPyHandle<ADrumGroupDevicePad>)`, а не `has no setter` |
+
+Прийом, яким це ловиться: `lom_set` або `lom_call` із завідомо
+неправильним типом. Властивість без сеттера дає
+`AttributeError: property of 'X' object has no setter`; властивість із
+сеттером -- `ArgumentError` із повним C++ підписом, тобто заразом каже,
+що саме вона очікує.
+
 ## Правило
 
 Довідник -- **карта, а не ґрунт**. Ним добре знаходити, що взагалі існує
