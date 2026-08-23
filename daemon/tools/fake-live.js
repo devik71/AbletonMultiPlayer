@@ -302,7 +302,7 @@ const sendHello = () =>
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
-      'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet').split(','),
+      'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad').split(','),
   });
 
 function emit(type, payload) {
@@ -467,6 +467,14 @@ function opGap(type, payload) {
     if (!track) return { what: 'track', id: payload.track.id, kind: payload.track.kind };
   }
 
+  if (type === 'DeviceLoad') {
+    const item = browserItem(payload.item);
+    if (!item) {
+      return { what: 'device_item', name: payload.item?.name, uri: payload.item?.uri };
+    }
+    return null;
+  }
+
   if (type === 'DeviceParamSet') {
     const { device, parameter } = resolveDeviceParameter(
       track, payload.chain_path, payload.device, payload.parameter);
@@ -570,6 +578,30 @@ function applyViewSet(msg) {
     `${song.view.scene?.name || '—'}`);
   // Назад нічого не шлемо: це чужий вид, а не наш рух.
 }
+
+
+// Каталог браузера: ті самі uri, що ми зняли з двох живих машин.
+// Стокові девайси адресуються назвою і збігаються; вміст (drums) -- ні.
+const BROWSER = {
+  audio_effects: [
+    { uri: 'query:AudioFx#Compressor', name: 'Compressor', class_name: 'Compressor2' },
+    { uri: 'query:AudioFx#Auto%20Filter', name: 'Auto Filter', class_name: 'AutoFilter' },
+    { uri: 'query:AudioFx#Audio%20Effect%20Rack', name: 'Audio Effect Rack', class_name: 'AudioEffectGroupDevice' },
+  ],
+  instruments: [
+    { uri: 'query:Synths#Drum%20Rack', name: 'Drum Rack', class_name: 'DrumGroupDevice' },
+    { uri: 'query:Synths#Operator', name: 'Operator', class_name: 'Operator' },
+  ],
+  midi_effects: [],
+};
+
+const browserItem = (ref) => {
+  const list = BROWSER[ref?.category];
+  if (!list) return null;
+  return list.find((i) => i.uri === ref.uri)
+    || list.find((i) => i.name.toLowerCase() === String(ref.name || '').toLowerCase())
+    || null;
+};
 
 
 function buildRegistry() {
@@ -785,6 +817,26 @@ function apply(type, payload, gseq) {
       if (!t) return reject('невідомий трек');
       if (s < 0) return reject('невідома сцена');
       t.clips[s] = null;
+      break;
+    }
+    case 'DeviceLoad': {
+      const item = browserItem(payload.item);
+      if (!item) return reject(`немає девайса ${payload.item?.name || payload.item?.uri}`);
+      const t = deviceTrackByRef(payload.track);
+      if (!t) return reject('невідомий трек');
+      let container = t;
+      for (const cref of payload.chain_path || []) {
+        container = chainInContainer(container, cref?.id);
+        if (!container) return reject('невідомий ланцюг');
+      }
+      const device = {
+        class_name: item.class_name,
+        class_display_name: item.name,
+        parameters: [fakeParam('Device On', 1, true)],
+      };
+      const at = Number.isInteger(payload.index) ? payload.index : container.devices.length;
+      container.devices.splice(Math.max(0, Math.min(at, container.devices.length)), 0, device);
+      refreshChainIds();
       break;
     }
     case 'ClipLoopSet': {
@@ -1161,6 +1213,19 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log(`продубльовано ${src.name} -> ${copy.id}`);
       break;
     }
+    case 'load': {
+      const t = deviceTrackFromArg(rest[0]);
+      if (!t) return console.log('немає такого треку');
+      const category = rest[2] || 'audio_effects';
+      const item = browserItem({ uri: rest[1], category });
+      if (!item) return console.log(`немає девайса ${rest[1]} у ${category}`);
+      emit('DeviceLoad', {
+        track: deviceTrackRef(t),
+        item: { uri: item.uri, name: item.name, category, class_name: item.class_name },
+      });
+      console.log(`просив завантажити ${item.name}`);
+      break;
+    }
     case 'fullstate':
       queueState();
       break;
@@ -1175,6 +1240,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         'fullstate -- повний знімок сету чанками',
         'look <track|return:N|master> [scene] | view',
         'loop <track> <scene> <start> <end> | duptrack <track>',
+        'load <track> <uri> [category]',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
         'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',

@@ -115,6 +115,7 @@ ACTION_HELP = {
         "delete_clip",
         "replace_clip_notes",
         "set_device_parameter",
+        "load_device",
         "lom_get",
         "lom_set",
         "lom_call",

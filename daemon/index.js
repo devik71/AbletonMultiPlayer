@@ -267,6 +267,9 @@ function describeGap(gap) {
   if (gap.what === 'scene') return `сцена ${gap.id} — такої немає`;
   if (gap.what === 'device') return `${where} — немає девайса`;
   if (gap.what === 'parameter') return `${where} — немає параметра ${gap.name}`;
+  if (gap.what === 'device_item') {
+    return `${gap.name || gap.uri} — такого девайса немає у твоїй бібліотеці`;
+  }
   if (gap.what === 'group') {
     // Групування не синхронізується взагалі: LOM не вміє створювати групи.
     // Тож це не «не застосувалось», а «у нас різна розкладка».

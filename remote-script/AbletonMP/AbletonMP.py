@@ -45,6 +45,7 @@ APPLY_TYPES = [
     "TrackCreate", "TrackDelete", "TrackDuplicate", "SceneCreate", "SceneDelete",
     "MixerSet", "TrackToggle", "DeviceParamSet", "ObjectMetaSet",
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
+    "DeviceLoad",
 ]
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
@@ -96,6 +97,11 @@ REC_SETTLE_SEC = 0.3
 # loop_start, тож окремі події проходили б через невалідні проміжні стани.
 CLIP_LOOP_PROPS = ("looping", "loop_start", "loop_end", "start_marker", "end_marker")
 
+# Портативні лише стокові девайси першого рівня: дампи браузера з двох машин
+# показали, що їхні uri ідентичні, а вміст адресується локальними FileId.
+BROWSER_CATEGORIES = ("audio_effects", "instruments", "midi_effects")
+LOAD_QUEUE_MAX_SEC = 60.0
+
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
 NOTE_FIELDS = (
@@ -141,6 +147,8 @@ class AbletonMP(ControlSurface):
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._rec_pending = {}   # clip key -> кліп, що зараз пишеться
+        self._load_queue = []    # DeviceLoad: по одному за тік
+        self._browser_cache = None
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._unshared_tracks = set()  # групи: uuid є, але в мережу не йдуть
         self._group_warned = set()
@@ -2361,6 +2369,11 @@ class AbletonMP(ControlSurface):
                 self._prime_metadata()
                 self._prime_clip_loops()
 
+        elif etype == "DeviceLoad":
+            # У чергу, а не одразу: завантаження блокує Live на сотні мілісекунд
+            # і рухає виділення, а під запис виділений трек чіпати не можна.
+            self._queue_device_load(payload, gseq)
+
         elif etype == "ClipLoopSet":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
             if slot is None:
@@ -2541,6 +2554,7 @@ class AbletonMP(ControlSurface):
         self._safe(self._flush_clips)
         self._safe(self._flush_notes)
         self._safe(self._flush_recording_clips)
+        self._safe(self._flush_device_loads)
         self._safe(self._flush_pending)
         self._safe(self._flush_view)
         self._safe(self._flush_state)
@@ -3067,6 +3081,24 @@ class AbletonMP(ControlSurface):
 
         if op == "set_device_parameter":
             return self._ai_set_device_parameter(action)
+
+        if op == "load_device":
+            track = self._ai_target_track(action)
+            ref = self._device_track_ref(track)
+            if not ref:
+                raise ValueError("track is not addressable")
+            payload = {
+                "track": ref,
+                "item": {
+                    "uri": action.get("uri"),
+                    "name": action.get("name"),
+                    "category": action.get("category", "audio_effects"),
+                },
+            }
+            if action.get("index") is not None:
+                payload["index"] = self._ai_int(action.get("index"), "index")
+            self._queue_device_load(payload, "ai")
+            return {"queued": True}
 
         if op == "lom_get":
             return self._ai_serialize(self._ai_resolve_path(action.get("path")))
@@ -3797,6 +3829,142 @@ class AbletonMP(ControlSurface):
                 break
         return gaps
 
+    # ------------------------------------------------- завантаження девайсів
+
+    def _browser_index(self):
+        """uri -> BrowserItem для стокових девайсів. Будується раз на сесію.
+
+        Лише діти ПЕРШОГО рівня трьох категорій -- і це не спрощення, а межа,
+        задана вимірюванням: дампи з двох машин показали, що audio_effects
+        і instruments мають ідентичні uri виду query:AudioFx#Compressor,
+        а вміст (drums, пресети) адресується локальними FileId, які на кожній
+        машині свої. Тож глибше лізти немає сенсу, а обхід дерева не потрібен.
+        """
+        if self._browser_cache is not None:
+            return self._browser_cache
+        index = {}
+        try:
+            browser = Live.Application.get_application().browser
+        except Exception:
+            self._browser_cache = index
+            return index
+        for category in BROWSER_CATEGORIES:
+            by_uri, by_name = {}, {}
+            try:
+                children = list(getattr(browser, category).children)
+            except Exception:
+                children = []
+            for item in children:
+                try:
+                    if not item.is_device or not item.is_loadable:
+                        continue
+                    uri = str(item.uri)
+                    name = str(item.name)
+                except Exception:
+                    continue
+                if uri:
+                    by_uri[uri] = item
+                if name:
+                    by_name.setdefault(name.lower(), item)
+            index[category] = (by_uri, by_name)
+        self._browser_cache = index
+        return index
+
+    def _browser_item(self, ref):
+        """Айтем за uri; за відсутності -- за назвою в ТІЙ САМІЙ категорії.
+
+        uri може зсунутись між версіями Live, а назва -- те, що впізнає людина.
+        Міжкатегорійний збіг не приймаємо: Compressor у ефектах і однойменний
+        пресет деінде -- різні речі.
+        """
+        category = ref.get("category")
+        if category not in BROWSER_CATEGORIES:
+            return None
+        by_uri, by_name = self._browser_index().get(category, ({}, {}))
+        item = by_uri.get(ref.get("uri"))
+        if item is not None:
+            return item
+        name = ref.get("name")
+        return by_name.get(name.lower()) if isinstance(name, str) else None
+
+    def _queue_device_load(self, payload, gseq):
+        self._load_queue.append({"payload": payload, "gseq": gseq, "since": time.time()})
+
+    def _flush_device_loads(self):
+        """Один девайс за тік: завантаження важкого інструмента блокує на
+        сотні мілісекунд, і залп підвісив би Live."""
+        if not self._load_queue:
+            return
+        entry = self._load_queue[0]
+        if self._recording_guard():
+            if time.time() - entry["since"] < LOAD_QUEUE_MAX_SEC:
+                return  # чекаємо, доки транспорт зупиниться
+            self._load_queue.pop(0)
+            self._warn("gseq %s: девайс не завантажено -- запис триває надто довго"
+                       % (entry["gseq"],))
+            return
+        self._load_queue.pop(0)
+        self._safe(self._load_device, entry["payload"], entry["gseq"])
+
+    def _load_device(self, payload, gseq):
+        ref = payload.get("item") or {}
+        item = self._browser_item(ref)
+        if item is None:
+            self._warn("gseq %s: у твоїй бібліотеці немає %r"
+                       % (gseq, ref.get("name") or ref.get("uri")))
+            return
+        track, _tref = self._resolve_device_track(payload.get("track") or {})
+        if track is None:
+            return
+        container = track
+        for chain_ref in (payload.get("chain_path") or []):
+            chain = self._chains_reg.obj_of((chain_ref or {}).get("id"))
+            if chain is None or not self._chain_belongs_to(container, chain):
+                self._warn("gseq %s: ланцюг для завантаження не резолвиться" % (gseq,))
+                return
+            container = chain
+
+        view = getattr(self._doc, "view", None)
+        if view is None:
+            return
+        # load_item кладе девайс у ВИДІЛЕНИЙ обʼєкт, тож вид доводиться рухати.
+        # Механізм глушіння той самий, що у follow: інакше власний рух виділення
+        # полетів би партнеру як присутність.
+        saved_track = self._safe_attr(view, "selected_track")
+        saved_scene = self._safe_attr(view, "selected_scene")
+        self._suppress_view = True
+        self._view_applied_at = time.time()
+        try:
+            view.selected_track = track
+            if container is not track:
+                try:
+                    view.selected_chain = container
+                except Exception:
+                    pass  # у старіших збірках вибір ланцюга недоступний
+            index = payload.get("index")
+            try:
+                devices = list(container.devices)
+                if isinstance(index, int) and 0 < index <= len(devices):
+                    track.view.selected_device = devices[index - 1]
+            except Exception:
+                pass
+            Live.Application.get_application().browser.load_item(item)
+        finally:
+            try:
+                if saved_track is not None:
+                    view.selected_track = saved_track
+                if saved_scene is not None:
+                    view.selected_scene = saved_scene
+            except Exception:
+                pass
+            self._view_applied_at = time.time()
+            self._suppress_view = False
+            self._mirror["view"] = self._view_signature()
+            self._rewire_tracks()
+            self._refresh_chains()
+            self._persist_registry()
+            self._prime_devices()
+
     def _op_gap(self, etype, payload):
         """Чого бракує для цієї операції. None -- усе на місці.
 
@@ -3814,6 +3982,13 @@ class AbletonMP(ControlSurface):
             if track is None:
                 return {"what": "track", "id": track_ref.get("id"),
                         "kind": track_ref.get("kind")}
+
+        if etype == "DeviceLoad":
+            ref = payload.get("item") or {}
+            if self._browser_item(ref) is None:
+                return {"what": "device_item",
+                        "name": ref.get("name"), "uri": ref.get("uri")}
+            return None
 
         if etype == "DeviceParamSet":
             device, parameter = self._resolve_device_parameter(
