@@ -301,7 +301,7 @@ const sendHello = () =>
     features: ['apply_ack', 'full_state', 'state_apply', 'presence', 'view_follow'],
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
-      'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
+      'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet').split(','),
   });
 
@@ -702,6 +702,34 @@ function apply(type, payload, gseq) {
         solo: false,
         arm: false,
       });
+      break;
+    }
+    case 'TrackDuplicate': {
+      if (trackById(payload.track?.id)) return reject('така копія вже є');
+      const src = trackById(payload.source?.id);
+      const copy = src
+        ? JSON.parse(JSON.stringify(src))
+        : { name: payload.track?.name || 'copy', color: 0x777777, playing_slot_index: -1,
+            slots: song.scenes.length, clips: emptyClips(song.scenes.length),
+            devices: [], mix: {}, mute: false, solo: false, arm: false };
+      if (!src) console.log(`<- #${gseq} TrackDuplicate: джерела немає, роблю порожній трек`);
+      copy.id = payload.track.id;
+      copy.playing_slot_index = -1;
+      if (payload.track?.name) copy.name = payload.track.name;
+      if (payload.track?.color !== undefined) copy.color = payload.track.color;
+      const at = src ? song.tracks.indexOf(src) + 1 : song.tracks.length;
+      song.tracks.splice(at, 0, copy);
+      // Ланцюги копії дістають id детерміновано з локатора -- так само,
+      // як їх виведе друга машина.
+      const clearChains = (container) => {
+        for (const device of container.devices || []) {
+          for (const [, chains] of chainGroups(device)) {
+            for (const chain of chains) { chain.id = null; clearChains(chain); }
+          }
+        }
+      };
+      clearChains(copy);
+      refreshChainIds();
       break;
     }
     case 'TrackDelete': {
@@ -1108,6 +1136,31 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log(`loop ${clip.loop_start}..${clip.loop_end}`);
       break;
     }
+    case 'duptrack': {
+      const src = song.tracks[Number(rest[0]) || 0];
+      if (!src) return console.log('немає такого треку');
+      const copy = JSON.parse(JSON.stringify(src));
+      copy.id = newId();
+      copy.playing_slot_index = -1;
+      song.tracks.splice(song.tracks.indexOf(src) + 1, 0, copy);
+      const clearChains = (container) => {
+        for (const device of container.devices || []) {
+          for (const [, chains] of chainGroups(device)) {
+            for (const chain of chains) { chain.id = null; clearChains(chain); }
+          }
+        }
+      };
+      clearChains(copy);
+      refreshChainIds();
+      emit('TrackDuplicate', {
+        source: { id: src.id },
+        track: { id: copy.id, name: copy.name, color: copy.color },
+        idx: song.tracks.indexOf(copy),
+        kind: /MIDI/i.test(copy.name) ? 'midi' : 'audio',
+      });
+      console.log(`продубльовано ${src.name} -> ${copy.id}`);
+      break;
+    }
     case 'fullstate':
       queueState();
       break;
@@ -1121,7 +1174,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         'play | stop | tempo <bpm>',
         'fullstate -- повний знімок сету чанками',
         'look <track|return:N|master> [scene] | view',
-        'loop <track> <scene> <start> <end>',
+        'loop <track> <scene> <start> <end> | duptrack <track>',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
         'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',

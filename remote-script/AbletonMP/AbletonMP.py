@@ -42,7 +42,7 @@ SCRIPT_VERSION = "0.19.0-dev"
 APPLY_TYPES = [
     "TransportSet", "TempoSet",
     "ClipLaunch", "ClipStop", "SceneLaunch", "StopAllClips",
-    "TrackCreate", "TrackDelete", "SceneCreate", "SceneDelete",
+    "TrackCreate", "TrackDelete", "TrackDuplicate", "SceneCreate", "SceneDelete",
     "MixerSet", "TrackToggle", "DeviceParamSet", "ObjectMetaSet",
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
 ]
@@ -874,8 +874,20 @@ class AbletonMP(ControlSurface):
             "значення всередині неї синхронізуються далі." % (self._safe_name(track),))
 
     def _diff_tracks(self, emit=True):
-        """Р—РІС–СЂСЏС” СЂРµС”СЃС‚СЂ С–Р· РґРµСЂРµРІРѕРј С‚СЂРµРєС–РІ РїС–СЃР»СЏ Р·РјС–РЅРё СЃС‚СЂСѓРєС‚СѓСЂРё."""
+        """Звіряє реєстр із деревом треків після зміни структури."""
         created, removed = self._tracks_reg.diff(self._doc.tracks)
+        # Ctrl+D копіює трек РАЗОМ із set_data, тож копія приходить із
+        # ідентифікатором джерела. Це і є детектор дублювання -- точний
+        # і пасивний. Читати треба ДО _persist_registry, який перезапише
+        # успадкований id на щойно виданий власний.
+        duplicated = {}
+        for uid, _idx, track in created:
+            stored = self._obj_stored_id(track)
+            if not stored or stored == uid:
+                continue
+            source = self._tracks_reg.obj_of(stored)
+            if source is not None:
+                duplicated[uid] = stored
         for uid in removed:
             self._tracks_reg.forget(uid)
         if created or removed:
@@ -894,6 +906,17 @@ class AbletonMP(ControlSurface):
             color = self._safe_color(track)
             if color is not None:
                 ref["color"] = color
+            source = duplicated.get(uid)
+            if source:
+                # Партнер повторить дію, а не отримає вміст: у нього те саме
+                # джерело, тож копія вийде з девайсами й семплами.
+                self._emit("TrackDuplicate", {
+                    "source": {"id": source},
+                    "track": ref,
+                    "idx": idx,
+                    "kind": self._track_kind(track),
+                })
+                continue
             self._emit("TrackCreate", {
                 "track": ref,
                 "idx": idx,
@@ -2130,6 +2153,55 @@ class AbletonMP(ControlSurface):
             finally:
                 self._suppress_struct = False
                 self._diff_tracks(emit=False)
+
+        elif etype == "TrackDuplicate":
+            ref = payload.get("track") or {}
+            uid = ref.get("id")
+            if not uid or self._tracks_reg.obj_of(uid) is not None:
+                return  # ідемпотентність: копія вже є
+            source, _sref = self._resolve_device_track(payload.get("source") or {})
+            self._suppress_struct = True
+            try:
+                if source is None:
+                    # Джерела немає -- але дія користувача була. Порожній трек
+                    # ламає лише DeviceParamSet, а відсутній -- узагалі все,
+                    # що на нього адресується.
+                    self._warn("gseq %s: джерело для дубля невідоме, роблю порожній трек"
+                               % (gseq,))
+                    idx = len(self._doc.tracks)
+                    if payload.get("kind") == "midi":
+                        self._doc.create_midi_track(idx)
+                    elif payload.get("kind") == "audio":
+                        self._doc.create_audio_track(idx)
+                    else:
+                        return
+                    new = self._doc.tracks[idx]
+                else:
+                    idx = self._track_index(source)
+                    if idx is None:
+                        return
+                    self._doc.duplicate_track(idx)
+                    new = self._doc.tracks[idx + 1]
+                if isinstance(ref.get("name"), str):
+                    new.name = ref["name"]
+                color = ref.get("color")
+                if isinstance(color, int) and not isinstance(color, bool) and 0 <= color <= 0xFFFFFF:
+                    new.color = color
+                self._tracks_reg.bind(uid, new)
+                # Одразу перезаписуємо успадкований від джерела id, інакше два
+                # обʼєкти претендуватимуть на нього до наступного персисту.
+                self._obj_store_id(new, uid)
+            finally:
+                self._suppress_struct = False
+                self._diff_tracks(emit=False)
+                self._refresh_aux_tracks()
+                self._refresh_chains()
+                self._persist_registry()
+                self._prime_mixer()
+                self._prime_devices()
+                self._prime_notes()
+                self._prime_metadata()
+                self._prime_clip_loops()
 
         elif etype == "TrackDelete":
             uid = (payload.get("track") or {}).get("id")
