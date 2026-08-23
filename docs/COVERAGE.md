@@ -77,10 +77,24 @@ AbletonOSC — це RPC-поверхня: get/set/listen на властивос
 
 ## Arrangement
 
-**Стан: не синхронізується.** І це не наше упущення, а межа LOM: у AbletonOSC
-для Arrangement є **лише getter'и** -- `arrangement_clips/name`, `/length`,
-`/start_time`. Жодного сеттера, жодного створення, жодного пересування.
-Те саме бачить наш bridge.
+**Стан: не синхронізується.** У AbletonOSC для Arrangement є лише getter-и --
+`arrangement_clips/name`, `/length`, `/start_time`; жодного створення
+чи пересування.
+
+> **Але це межа AbletonOSC, а не LOM.** Проба на живому Live 12.3 --
+> `lom_call` без аргументів, щоб прочитати C++ підпис із тексту помилки --
+> показала, що метод існує:
+>
+> ```
+> duplicate_clip_to_arrangement(TTrackPyHandle self,
+>                               TPyHandle<AClip> clip, double destination_time)
+> ```
+>
+> Тобто Session-кліп **можна** покласти в Arrangement на довільний час.
+> Тут і видно головне обмеження чеклиста: він описує те, що автори
+> AbletonOSC вирішили виставити назовні, а не те, що вміє Live.
+> Ще не перевірено: чи пишеться `start_time` готового Arrangement-кліпу
+> (пересування) і чи є шлях його видалити.
 
 Сьогодні ми з Arrangement робимо рівно дві речі, обидві на читання:
 

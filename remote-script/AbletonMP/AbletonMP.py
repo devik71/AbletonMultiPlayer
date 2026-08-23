@@ -3127,6 +3127,8 @@ class AbletonMP(ControlSurface):
             for key in kwargs:
                 if not isinstance(key, str) or key.startswith("_"):
                     raise ValueError("kwargs keys must be public strings")
+            args = [self._ai_arg(a) for a in args]
+            kwargs = dict((k, self._ai_arg(v)) for k, v in kwargs.items())
             return self._ai_serialize(method(*args, **kwargs))
 
         raise ValueError("unknown op %r" % (op,))
@@ -3322,6 +3324,18 @@ class AbletonMP(ControlSurface):
                 continue
             raise ValueError("path token %r is not supported" % (token,))
         return obj
+
+    def _ai_arg(self, value):
+        """Аргумент виклику. {"$path": [...]} -- посилання на обʼєкт LOM.
+
+        Половина цікавих методів LOM приймає не числа, а самі обʼєкти
+        (duplicate_clip_to_arrangement бере Clip), і через голий JSON вони
+        недосяжні. Резолвер той самий, що для path, тож правила доступу
+        не слабшають: приватні атрибути так само заборонені.
+        """
+        if isinstance(value, dict) and list(value.keys()) == ["$path"]:
+            return self._ai_resolve_path(value["$path"])
+        return value
 
     def _ai_serialize(self, value, depth=0):
         if depth > 3:
