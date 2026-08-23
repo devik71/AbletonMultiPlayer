@@ -636,9 +636,15 @@ class AbletonMP(ControlSurface):
                              (self._aux_tracks_reg, self._device_aux_tracks())):
             for obj in objects:
                 uid = self._obj_stored_id(obj)
-                if uid:
-                    reg.bind(uid, obj)
-                    by_object += 1
+                if not uid:
+                    continue
+                if reg.taken_by_other(uid, obj):
+                    # Дубль обʼєкта приніс чужий id разом із set_data.
+                    # Хай отримає свій у _diff_tracks, а не краде цей.
+                    self._log("збережений id %s уже зайнятий, дубль дістане новий" % uid)
+                    continue
+                reg.bind(uid, obj)
+                by_object += 1
 
         try:
             raw = self._doc_str(self._doc.get_data(DATA_KEY_MAP, ""))
@@ -1098,6 +1104,13 @@ class AbletonMP(ControlSurface):
         return json.dumps(locator, sort_keys=True, ensure_ascii=True,
                           separators=(",", ":"))
 
+    def _free_id(self, reg, obj, *candidates):
+        """Перший кандидат, який ще не зайнятий іншим живим об'єктом."""
+        for uid in candidates:
+            if uid and not reg.taken_by_other(uid, obj):
+                return uid
+        return None
+
     def _refresh_chains(self, preferred_records=None):
         """Discover all Rack chains and assign stable session UUIDs.
 
@@ -1150,9 +1163,11 @@ class AbletonMP(ControlSurface):
                         locator_key = self._chain_locator_key(locator)
                         uid = self._chains_reg.id_of(chain, create=False)
                         if uid is None:
-                            uid = (preferred.get(locator_key) or
-                                   self._obj_stored_id(chain) or
-                                   saved.get(locator_key))
+                            uid = self._free_id(
+                                self._chains_reg, chain,
+                                preferred.get(locator_key),
+                                self._obj_stored_id(chain),
+                                saved.get(locator_key))
                             if not uid:
                                 uid = hashlib.sha256(locator_key.encode("utf-8")).hexdigest()[:12]
                             self._chains_reg.bind(uid, chain)

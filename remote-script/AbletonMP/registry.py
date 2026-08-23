@@ -74,6 +74,22 @@ class Registry(object):
                 return o if _alive(o) else None
         return None
 
+    def taken_by_other(self, uid, obj):
+        """Чи належить цей uuid іншому ЖИВОМУ об'єкту.
+
+        Ctrl+D у Live копіює трек разом із set_data, тож копія приходить із
+        ідентифікатором джерела. Довіритись йому означало б віддати ідентичність
+        випадковому з двох, а події для копії -- застосовувати до оригіналу.
+        Мертвий власник не рахується: він уже tombstone, його id вільний.
+        """
+        for u, o in self._entries:
+            if u != uid:
+                continue
+            if _same(o, obj):
+                return False
+            return _alive(o)
+        return False
+
     def bind(self, uid, obj):
         """Прив'язує наперед відомий uuid -- бootstrap від першого гравця.
 
