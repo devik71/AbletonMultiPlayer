@@ -611,12 +611,105 @@ const browserItem = (ref) => {
     || null;
 };
 
+// --- Етап 2 DeviceLoad: автоемісія. Дзеркало _diff_devices із bridge.
+
+const deviceName = (d) => (d.name === undefined ? d.class_display_name : d.name);
+
+// Назва -> [{категорія, айтем}]. З девайса uri не читається взагалі, тож
+// єдина ниточка назад у браузер -- відображувана назва.
+const browserNamed = () => {
+  const named = new Map();
+  for (const [category, list] of Object.entries(BROWSER)) {
+    for (const item of list) {
+      const key = item.name.toLowerCase();
+      if (!named.has(key)) named.set(key, []);
+      named.get(key).push({ category, item });
+    }
+  }
+  return named;
+};
+
+// Пресет має той самий class_name, що й голий девайс: різниця лише в name.
+const deviceIsBare = (device) => {
+  if (deviceName(device) !== device.class_display_name) return false;
+  for (const [, chains] of chainGroups(device)) if (chains.length) return false;
+  return true;
+};
+
+const deviceBrowserRef = (device) => {
+  if (!deviceIsBare(device)) return null;
+  const matches = browserNamed().get(String(device.class_display_name).toLowerCase()) || [];
+  if (matches.length !== 1) return null;
+  const { category, item } = matches[0];
+  return { uri: item.uri, name: item.name, category, class_name: device.class_name };
+};
+
+// Разом із name: інакше пресет не відрізнити від голого девайса поруч,
+// і вставку зарахувало б сусідові.
+const treeSig = (d) => `${deviceSignature(d)} ${deviceName(d)}`;
+
+const deviceTree = () => {
+  const tree = new Map();
+  const walk = (ref, container, chainPath) => {
+    tree.set(JSON.stringify([ref, chainPath]), {
+      container, ref, chainPath, sigs: (container.devices || []).map(treeSig),
+    });
+    for (const rack of container.devices || []) {
+      for (const [, chains] of chainGroups(rack)) {
+        for (const chain of chains) walk(ref, chain, [...chainPath, { id: chain.id }]);
+      }
+    }
+  };
+  for (const t of allDeviceTracks()) walk(deviceTrackRef(t), t, []);
+  return tree;
+};
+
+let deviceTreeSnapshot = new Map();
+const primeDevices = () => {
+  deviceTreeSnapshot = new Map([...deviceTree()].map(([k, v]) => [k, v.sigs]));
+};
+
+const diffDevices = () => {
+  if (!deviceTreeSnapshot.size) return;
+  const current = deviceTree();
+  const added = [];
+  for (const [key, entry] of current) {
+    const was = deviceTreeSnapshot.get(key);
+    if (!was) continue;                       // новий контейнер: копія треку
+    const now = entry.sigs;
+    if (now.length === was.length && now.every((s, i) => s === was[i])) continue;
+    // Будь-що складніше за одну вставку глушить емісію: перенесення девайса
+    // виглядає як «зникло там, зʼявилось тут», і партнер дістав би дубль.
+    if (now.length !== was.length + 1) return;
+    let spot = -1;
+    for (let i = 0; i < now.length; i += 1) {
+      if (was.every((s, j) => s === now[j < i ? j : j + 1])) { spot = i; break; }
+    }
+    if (spot < 0) return;
+    added.push({ entry, spot });
+  }
+  if (added.length !== 1) return;
+  const { entry, spot } = added[0];
+  const item = deviceBrowserRef(entry.container.devices[spot]);
+  if (!item) return;
+  const payload = { track: entry.ref, item, index: spot };
+  if (entry.chainPath.length) payload.chain_path = entry.chainPath;
+  emit('DeviceLoad', payload);
+};
+
+// Дзеркало _on_devices. suppressStruct -- те саме глушіння, що в bridge:
+// застосування чужого DeviceLoad не має повернутись автоемісією назад.
+const onDevices = (suppressStruct) => {
+  if (!suppressStruct) diffDevices();
+  primeDevices();
+};
 
 function buildRegistry() {
   song.tracks.forEach((t) => (t.id = newId()));
   song.scenes.forEach((s) => (s.id = newId()));
   refreshAuxTrackIds([], true);
   refreshChainIds();
+  primeDevices();
   registryReady = true;
   console.log('реєстр створено');
   return {
@@ -650,6 +743,7 @@ function adoptRegistry(reg) {
   for (const rec of reg.chains || []) {
     if (!knownChains.has(rec.id)) problems.push(`Rack chain ${rec.name}: не зіставився`);
   }
+  primeDevices();
   registryReady = true;
   console.log(`реєстр прийнято${problems.length ? `, незіставлено: ${problems.join('; ')}` : ''}`);
 }
@@ -885,6 +979,9 @@ function apply(type, payload, gseq) {
     default:
       return console.log(`<- #${gseq} невідомий тип ${type}`);
   }
+  // Дзеркало _on_devices після структурної зміни. Глушіння увімкнене:
+  // власне застосування не має полетіти назад автоемісією.
+  if (['TrackCreate', 'TrackDelete', 'TrackDuplicate', 'DeviceLoad'].includes(type)) onDevices(true);
   console.log(`<- #${gseq} ${type} ${JSON.stringify(payload)}`);
 }
 
@@ -1224,6 +1321,28 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         kind: /MIDI/i.test(copy.name) ? 'midi' : 'audio',
       });
       console.log(`продубльовано ${src.name} -> ${copy.id}`);
+      break;
+    }
+    case 'adddevice': {
+      // Локальна дія користувача: девайс лягає в сет мовчки, а подію (якщо
+      // взагалі) породжує вже діфф -- рівно як у справжньому Live.
+      const t = deviceTrackFromArg(rest[0]);
+      if (!t) return console.log('немає такого треку');
+      const wanted = String(rest[1] || '');
+      const found = Object.entries(BROWSER)
+        .flatMap(([category, list]) => list.map((item) => ({ category, item })))
+        .filter((m) => m.item.name.toLowerCase() === wanted.toLowerCase());
+      if (!found.length) return console.log(`немає девайса ${wanted}`);
+      const device = {
+        class_name: found[0].item.class_name,
+        class_display_name: found[0].item.name,
+        parameters: [fakeParam('Device On', 1, true)],
+      };
+      if (rest[2]) device.name = rest.slice(2).join(' ');   // пресет
+      t.devices.push(device);
+      refreshChainIds();
+      onDevices(false);
+      console.log(`поклав ${deviceName(device)} на ${t.name}`);
       break;
     }
     case 'load': {

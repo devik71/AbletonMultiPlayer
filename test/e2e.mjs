@@ -847,10 +847,41 @@ try {
     }
   });
 
-  await check('журнал: 61 подія, монотонний gseq, цілий hash-chain', async () => {
+  await check('покладений девайс їде сам, і застосування не відбивається назад', async () => {
+    const journal = () => readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean).length;
+    const before = journal();
+
+    const from = l2.out.length;
+    l1.stdin.write('adddevice 2 Compressor\n');
+    await waitFor(l2, /<- #\d+ DeviceLoad .*"name":"Compressor"/, 8000, from);
+    const seen = l2.out.slice(from);
+    if (!/"uri":"query:AudioFx#Compressor"/.test(seen)) throw new Error('подія приїхала без uri');
+    if (!/"index":\d+/.test(seen)) throw new Error('подія приїхала без позиції');
+    if (/DeviceLoad ВІДХИЛЕНО/.test(seen)) throw new Error('партнер не прийняв автоподію');
+
+    // Найтонше місце етапу 2: у партнера теж спрацює _on_devices, і без
+    // глушіння він емітив би DeviceLoad назад -- по колу, без кінця.
+    await new Promise((r) => setTimeout(r, 800));
+    const grew = journal() - before;
+    if (grew !== 1) throw new Error(`одна дія дала ${grew} подій -- застосування відбилось назад`);
+  });
+
+  await check('пресет не видається за голий девайс', async () => {
+    const journal = () => readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean).length;
+    const before = journal();
+
+    // Warm Bus має той самий class_name, що й голий Compressor. Мовчки віддати
+    // партнеру дефолт було б гірше за дірку: він чув би не те, що автор.
+    l1.stdin.write('adddevice 2 Compressor Warm Bus\n');
+    await waitFor(l1, /поклав Warm Bus/, 5000);
+    await new Promise((r) => setTimeout(r, 800));
+    if (journal() !== before) throw new Error('пресет полетів партнеру як стоковий девайс');
+  });
+
+  await check('журнал: 62 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 61) throw new Error(`очікував 61 подію, у журналі ${lines.length}`);
+    if (lines.length !== 62) throw new Error(`очікував 62 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

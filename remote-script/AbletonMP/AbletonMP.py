@@ -66,7 +66,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow"]
+            "presence", "view_follow", "device_load"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -141,7 +141,7 @@ class AbletonMP(ControlSurface):
         self._mirror = {
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
-            "loop": {},
+            "loop": {}, "device_tree": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -149,6 +149,7 @@ class AbletonMP(ControlSurface):
         self._rec_pending = {}   # clip key -> кліп, що зараз пишеться
         self._load_queue = []    # DeviceLoad: по одному за тік
         self._browser_cache = None
+        self._browser_named_cache = None
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._unshared_tracks = set()  # групи: uuid є, але в мережу не йдуть
         self._group_warned = set()
@@ -476,8 +477,10 @@ class AbletonMP(ControlSurface):
         changed = self._refresh_chains()
         self._rewire_tracks()
         if self._registry_ready:
-            # Device structure is not an event yet. Treat its current parameter
-            # values as the new baseline rather than emitting a synthetic burst.
+            if not self._suppress_struct:
+                self._safe(self._diff_devices)
+            # Значення параметрів після структурної зміни -- нова базова лінія,
+            # інакше поява девайса дала б залп DeviceParamSet на кожну ручку.
             self._prime_devices()
             if changed:
                 self._persist_registry()
@@ -3501,6 +3504,9 @@ class AbletonMP(ControlSurface):
                         continue
                     key = self._device_key(track_ref, chain_path, device_ref, parameter_ref)
                     self._mirror["device"][key] = round(value, 6)
+        # Дерево оновлюється тут же: так кожен наявний виклик _prime_devices
+        # автоматично лишається точкою відліку для _diff_devices.
+        self._mirror["device_tree"] = self._device_tree()
 
     def _mix_slots(self, track):
         slots = [("volume", None), ("panning", None)]
@@ -3887,6 +3893,157 @@ class AbletonMP(ControlSurface):
         name = ref.get("name")
         return by_name.get(name.lower()) if isinstance(name, str) else None
 
+    def _browser_named(self):
+        """Назва девайса -> [(категорія, айтем)]. Зворотний бік _browser_index.
+
+        Автоемісії нема з чого будувати uri: Device не віддає його взагалі.
+        Єдина ниточка назад у браузер -- class_display_name, і саме тому
+        неоднозначна назва означає відмову, а не вибір навмання.
+        """
+        if self._browser_named_cache is not None:
+            return self._browser_named_cache
+        named = {}
+        for category, (_by_uri, by_name) in self._browser_index().items():
+            for key, item in by_name.items():
+                named.setdefault(key, []).append((category, item))
+        self._browser_named_cache = named
+        return named
+
+    def _device_is_bare(self, device):
+        """Девайс щойно з браузера, без власного вмісту.
+
+        Пресет Compressor/Warm Bus має той самий class_name, що й голий
+        Compressor, тож без цієї перевірки автоемісія тихо віддала б партнеру
+        дефолт замість того, що чує автор. Різниця видна в name: у стокового
+        девайса воно дорівнює class_display_name, у пресета -- назві пресета.
+        Рак із ланцюгами і Drum Rack із падами -- теж власний вміст.
+        """
+        try:
+            if str(device.name) != str(device.class_display_name):
+                return False
+        except Exception:
+            return False
+        if self._device_has_chains(device):
+            for _kind, chains in self._rack_chain_groups(device):
+                if chains:
+                    return False
+        try:
+            for pad in device.drum_pads:
+                if pad.chains:
+                    return False
+        except Exception:
+            pass
+        return True
+
+    def _device_browser_ref(self, device):
+        """Адреса девайса в бібліотеці партнера -- або None, якщо не певні.
+
+        Фільтр навмисно суворий: рівно один айтем першого рівня з такою назвою
+        в усіх трьох категоріях разом. Розбіжність відновна знімком, а мовчки
+        покладений не той девайс -- ні.
+        """
+        signature = self._device_signature(device)
+        if signature is None or not self._device_is_bare(device):
+            return None
+        class_name, display_name = signature
+        matches = self._browser_named().get(display_name.lower(), [])
+        if len(matches) != 1:
+            return None
+        category, item = matches[0]
+        try:
+            return {"uri": str(item.uri), "name": str(item.name),
+                    "category": category, "class_name": class_name}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _device_tree_sig(device):
+        """Сигнатура для діффу структури -- разом із name.
+
+        Без name пресет Compressor/Warm Bus не відрізнити від голого
+        Compressor поруч, і вставку зарахувало б сусідові: партнер дістав
+        би другий примірник того, що в нього вже є.
+        """
+        try:
+            return (str(device.class_name), str(device.class_display_name),
+                    str(device.name))
+        except Exception:
+            return None
+
+    def _device_tree(self):
+        """Знімок структури: контейнер -> сигнатури девайсів у порядку."""
+        tree = {}
+        for track in self._iter_device_tracks():
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
+                continue
+            base = (track_ref.get("id"), track_ref.get("kind"))
+            for _container, device, chain_path in self._iter_track_devices(track):
+                key = (base, tuple(c.get("id") for c in chain_path))
+                tree.setdefault(key, []).append(self._device_tree_sig(device))
+        return tree
+
+    def _diff_devices(self):
+        """Рівно один доданий девайс -> DeviceLoad.
+
+        Обережність тут дорожча за повноту. Видалення девайса події не має
+        взагалі, тож перенесення девайса між контейнерами виглядає як пара
+        "зникло там, зʼявилось тут"; якби ми емітили саму лише появу, партнер
+        дістав би дубль. Тому будь-яка інша зміна в тому ж діффі глушить
+        емісію цілком -- краще дірка, яку закриє знімок.
+        """
+        previous = self._mirror.get("device_tree")
+        if not previous:
+            return
+        current = self._device_tree()
+        added = []
+        for key, now in current.items():
+            was = previous.get(key)
+            if was is None:
+                continue          # новий контейнер: копія треку або свіжий ланцюг
+            if now == was:
+                continue
+            if len(now) != len(was) + 1:
+                return
+            spot = None
+            for i in range(len(now)):
+                if was[:i] == now[:i] and was[i:] == now[i + 1:]:
+                    spot = i
+                    break
+            if spot is None:
+                return
+            added.append((key, spot))
+        if len(added) != 1:
+            return
+        (base, chain_ids), spot = added[0]
+
+        target = None
+        for track in self._iter_device_tracks():
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
+                continue
+            if (track_ref.get("id"), track_ref.get("kind")) != base:
+                continue
+            seen = {}
+            for _container, device, chain_path in self._iter_track_devices(track):
+                ckey = tuple(c.get("id") for c in chain_path)
+                idx = seen.get(ckey, 0)
+                seen[ckey] = idx + 1
+                if ckey == chain_ids and idx == spot:
+                    target = (track_ref, chain_path, device)
+                    break
+            break
+        if target is None:
+            return
+        track_ref, chain_path, device = target
+        item = self._device_browser_ref(device)
+        if item is None:
+            return
+        payload = {"track": track_ref, "item": item, "index": spot}
+        if chain_path:
+            payload["chain_path"] = chain_path
+        self._emit("DeviceLoad", payload)
+
     def _queue_device_load(self, payload, gseq):
         self._load_queue.append({"payload": payload, "gseq": gseq, "since": time.time()})
 
@@ -3932,6 +4089,9 @@ class AbletonMP(ControlSurface):
         # полетів би партнеру як присутність.
         saved_track = self._safe_attr(view, "selected_track")
         saved_scene = self._safe_attr(view, "selected_scene")
+        # Без цього власне завантаження повернулось би партнеру автоемісією.
+        struct_was = self._suppress_struct
+        self._suppress_struct = True
         self._suppress_view = True
         self._view_applied_at = time.time()
         try:
@@ -3964,6 +4124,7 @@ class AbletonMP(ControlSurface):
             self._refresh_chains()
             self._persist_registry()
             self._prime_devices()
+            self._suppress_struct = struct_was
 
     def _op_gap(self, etype, payload):
         """Чого бракує для цієї операції. None -- усе на місці.
