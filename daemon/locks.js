@@ -11,7 +11,7 @@
 
 // Дискретні дії (launch, mute, rename) лока не потребують: вони миттєві,
 // і показувати "редагує" на них -- лише блимання в чужому UI.
-const CONTINUOUS = new Set(['TempoSet', 'MixerSet', 'DeviceParamSet', 'ClipNotesSet']);
+const CONTINUOUS = new Set(['TempoSet', 'MixerSet', 'DeviceParamSet', 'ClipNotesSet', 'ClipLoopSet']);
 
 function trackName(registry, id, kind) {
   if (!registry) return null;
@@ -30,7 +30,7 @@ export function lockTarget(type, payload, registry) {
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
 
-  if (type === 'ClipNotesSet') {
+  if (type === 'ClipNotesSet' || type === 'ClipLoopSet') {
     const track = p.track?.id;
     const scene = p.scene?.id;
     if (!track || !scene) return null;

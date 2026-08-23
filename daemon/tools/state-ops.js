@@ -85,6 +85,9 @@ const clipOps = (ref, clips) => clips.flatMap((entry) => {
       ops.push(['ClipNotesSet', { track: ref, scene, clip: meta, region, notes: part }]);
     }
   }
+  if (entry.loop) {
+    ops.push(['ClipLoopSet', { track: ref, scene, ...entry.loop }]);
+  }
   for (const prop of ['name', 'color']) {
     if (meta[prop] !== undefined && meta[prop] !== null) {
       ops.push(['ObjectMetaSet', { object: 'clip', track: ref, scene, prop, value: meta[prop] }]);

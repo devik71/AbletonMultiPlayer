@@ -44,7 +44,7 @@ APPLY_TYPES = [
     "ClipLaunch", "ClipStop", "SceneLaunch", "StopAllClips",
     "TrackCreate", "TrackDelete", "SceneCreate", "SceneDelete",
     "MixerSet", "TrackToggle", "DeviceParamSet", "ObjectMetaSet",
-    "ClipCreate", "ClipDelete", "ClipNotesSet",
+    "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
 ]
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
@@ -92,6 +92,9 @@ VIEW_ECHO_WINDOW = 0.5
 CLIP_LENGTH_MAX = 1e6
 # Скільки довжина має не мінятись, щоб вважати запис завершеним.
 REC_SETTLE_SEC = 0.3
+# Loop і маркери йдуть однією подією: Live клампить loop_end відносно
+# loop_start, тож окремі події проходили б через невалідні проміжні стани.
+CLIP_LOOP_PROPS = ("looping", "loop_start", "loop_end", "start_marker", "end_marker")
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -132,6 +135,7 @@ class AbletonMP(ControlSurface):
         self._mirror = {
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
+            "loop": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -292,6 +296,9 @@ class AbletonMP(ControlSurface):
                 if slot.has_clip:
                     clip = slot.clip
                     self._wire_metadata("clip", clip, track=track, scene=scene)
+                    loop_cb = self._make_clip_loop_cb(track, scene, clip)
+                    for prop in CLIP_LOOP_PROPS:
+                        self._listen(clip, prop, loop_cb)
                     if clip.is_midi_clip:
                         self._listen(clip, "notes", self._make_notes_cb(track, scene, clip))
             except Exception:
@@ -434,6 +441,7 @@ class AbletonMP(ControlSurface):
             self._prime_devices()
             self._prime_notes()
             self._prime_metadata()
+            self._prime_clip_loops()
 
             # Виділення могло переїхати разом зі структурою: адреса в підписі
             # уже інша, навіть якщо користувач нічого не чіпав.
@@ -449,6 +457,7 @@ class AbletonMP(ControlSurface):
             self._prime_devices()
             self._prime_notes()
             self._prime_metadata()
+            self._prime_clip_loops()
 
             # Виділення могло переїхати разом зі структурою: адреса в підписі
             # уже інша, навіть якщо користувач нічого не чіпав.
@@ -513,6 +522,7 @@ class AbletonMP(ControlSurface):
         self._prime_devices()
         self._prime_notes()
         self._prime_metadata()
+        self._prime_clip_loops()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
                   % (len(reg["tracks"]), len(reg["scenes"]), len(reg["aux_tracks"]),
@@ -587,6 +597,7 @@ class AbletonMP(ControlSurface):
         self._prime_devices()
         self._prime_notes()
         self._prime_metadata()
+        self._prime_clip_loops()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
         self._persist_registry()
@@ -1457,6 +1468,7 @@ class AbletonMP(ControlSurface):
         # has_clip changed: the old clip listener is dead or a new one is needed.
         self._rewire_tracks()
         self._prime_metadata()
+        self._prime_clip_loops()
         if current == "midi" and clip is not None:
             notes = self._clip_notes(clip)
             self._mirror["notes"][key] = notes
@@ -1649,6 +1661,82 @@ class AbletonMP(ControlSurface):
                         self._mirror["notes"][key] = self._clip_notes(clip)
                 except Exception:
                     pass
+
+    # ------------------------------------------------------ loop і маркери
+
+    def _make_clip_loop_cb(self, track, scene, clip):
+        def cb():
+            self._safe(self._on_clip_loop, track, scene, clip)
+        return cb
+
+    def _clip_loop_state(self, clip):
+        """Усі пʼять полів разом. None -- кліп їх не має (напр. не-warped audio)."""
+        state = {}
+        for prop in CLIP_LOOP_PROPS:
+            try:
+                value = getattr(clip, prop)
+            except Exception:
+                continue
+            if prop == "looping":
+                state[prop] = bool(value)
+                continue
+            try:
+                value = round(float(value), 6)
+            except Exception:
+                continue
+            if not math.isfinite(value) or abs(value) > CLIP_LENGTH_MAX:
+                return None
+            state[prop] = value
+        return state or None
+
+    def _on_clip_loop(self, track, scene, clip):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        key = self._clip_key(track, scene)
+        if key is None or key in self._rec_pending:
+            return  # під запис межі ще заглушкові
+        state = self._clip_loop_state(clip)
+        if state is None or self._mirror["loop"].get(key) == state:
+            return
+        self._mirror["loop"][key] = state
+        payload = self._clip_refs(track, scene)
+        payload.update(state)
+        # Спільний ключ на всі пʼять полів: тягнення брекета смикає loop_start
+        # і loop_end десятки разів, а жест має дати одну подію.
+        self._defer("loop:" + key, "ClipLoopSet", payload)
+
+    def _prime_clip_loop(self, track, scene, slot):
+        key = self._clip_key(track, scene)
+        if key is None:
+            return
+        try:
+            if not slot.has_clip:
+                self._mirror["loop"].pop(key, None)
+                return
+            state = self._clip_loop_state(slot.clip)
+        except Exception:
+            return
+        if state is None:
+            self._mirror["loop"].pop(key, None)
+        else:
+            self._mirror["loop"][key] = state
+
+    def _prime_clip_loops(self):
+        """Без прайму перший же рух брекета виглядав би як зміна відносно None."""
+        self._mirror["loop"] = {}
+        try:
+            scenes = list(self._doc.scenes)
+        except Exception:
+            return
+        for track in self._doc.tracks:
+            try:
+                slots = list(track.clip_slots)
+            except Exception:
+                continue
+            for i, scene in enumerate(scenes):
+                if i >= len(slots):
+                    break
+                self._prime_clip_loop(track, scene, slots[i])
 
     def _prime_note_clip(self, track, scene, slot):
         key = self._clip_key(track, scene)
@@ -1880,6 +1968,7 @@ class AbletonMP(ControlSurface):
                                 key=self._note_signature)
         if current_region == target:
             self._prime_note_clip(track, scene, slot)
+            self._prime_clip_loop(track, scene, slot)
             return
 
         # Construct every new note before mutating Live. A constructor failure
@@ -1903,6 +1992,7 @@ class AbletonMP(ControlSurface):
                 clip.add_new_notes(specs)
         except Exception:
             self._prime_note_clip(track, scene, slot)
+            self._prime_clip_loop(track, scene, slot)
             raise
 
     # ------------------------------------------------------------ coalescing
@@ -2174,7 +2264,9 @@ class AbletonMP(ControlSurface):
                 self._suppress_struct = False
                 self._rewire_tracks()
                 self._prime_note_clip(track, scene, slot)
+                self._prime_clip_loop(track, scene, slot)
                 self._prime_metadata()
+                self._prime_clip_loops()
 
         elif etype == "ClipDelete":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -2193,7 +2285,74 @@ class AbletonMP(ControlSurface):
                 self._suppress_struct = False
                 self._rewire_tracks()
                 self._prime_note_clip(track, scene, slot)
+                self._prime_clip_loop(track, scene, slot)
                 self._prime_metadata()
+                self._prime_clip_loops()
+
+        elif etype == "ClipLoopSet":
+            track, scene, slot = self._resolve_clip_slot(payload, gseq)
+            if slot is None:
+                return
+            try:
+                if not slot.has_clip:
+                    self._warn("gseq %s: кліпу немає, межі нема на що класти" % (gseq,))
+                    return
+                clip = slot.clip
+            except Exception:
+                return
+
+            # Спершу повна валідація, і лише потім записи: частковий запис
+            # у LOM гірший за відмову.
+            state = {}
+            for prop in CLIP_LOOP_PROPS:
+                if prop not in payload:
+                    continue
+                value = payload[prop]
+                if prop == "looping":
+                    if not isinstance(value, bool):
+                        return self._warn("gseq %s: looping має бути булевим" % (gseq,))
+                    state[prop] = value
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return self._warn("gseq %s: %s має бути числом" % (gseq, prop))
+                value = float(value)
+                if not math.isfinite(value) or abs(value) > CLIP_LENGTH_MAX:
+                    return self._warn("gseq %s: %s поза межами" % (gseq, prop))
+                state[prop] = value
+            if not state:
+                return
+            for lo, hi in (("loop_start", "loop_end"), ("start_marker", "end_marker")):
+                if lo in state and hi in state and state[hi] <= state[lo]:
+                    return self._warn("gseq %s: %s не більший за %s" % (gseq, hi, lo))
+
+            key = self._clip_key(track, scene)
+            if key is not None:
+                self._mirror["loop"][key] = dict(state)
+            # Порядок незвертальний: якщо нова пара цілком правіша за поточну,
+            # спершу треба посунути кінець, інакше Live клампне початок.
+            for lo, hi in (("start_marker", "end_marker"), ("loop_start", "loop_end")):
+                pair = [p for p in (lo, hi) if p in state]
+                if len(pair) == 2:
+                    try:
+                        if state[lo] >= float(getattr(clip, hi)):
+                            pair = [hi, lo]
+                    except Exception:
+                        pass
+                for prop in pair:
+                    try:
+                        setattr(clip, prop, state[prop])
+                    except Exception:
+                        self._warn("gseq %s: %s не записався" % (gseq, prop))
+            if "looping" in state:
+                try:
+                    clip.looping = state["looping"]
+                except Exception:
+                    self._warn("gseq %s: looping не записався" % (gseq,))
+            # Live міг клампнути -- дзеркало має відповідати тому, що вийшло
+            if key is not None:
+                actual = self._clip_loop_state(clip)
+                if actual is not None:
+                    self._mirror["loop"][key] = actual
 
         elif etype == "ClipNotesSet":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -3446,6 +3605,9 @@ class AbletonMP(ControlSurface):
             if self._clip_is_recording(slot, clip):
                 continue  # у польоті: довжина ще заглушкова
             entry = {"scene": {"id": sid}, "clip": self._clip_meta(clip)}
+            loop = self._clip_loop_state(clip)
+            if loop:
+                entry["loop"] = loop
             try:
                 if clip.is_midi_clip:
                     entry["notes"] = self._clip_notes(clip)
@@ -3598,7 +3760,7 @@ class AbletonMP(ControlSurface):
         if isinstance(scene_ref, dict) and scene_ref.get("id"):
             if self._resolve_scene(scene_ref) is None:
                 return {"what": "scene", "id": scene_ref.get("id")}
-            if etype in ("ClipCreate", "ClipNotesSet") or payload.get("object") == "clip":
+            if etype in ("ClipCreate", "ClipNotesSet", "ClipLoopSet") or payload.get("object") == "clip":
                 _track, _scene, slot = self._resolve_clip_slot(payload, "state")
                 if slot is None:
                     return {"what": "clip", "track": self._safe_name(track),
@@ -3718,6 +3880,11 @@ class AbletonMP(ControlSurface):
                         "track": ref, "scene": scene, "clip": meta,
                         "region": region, "notes": part,
                     }))
+            loop = entry.get("loop")
+            if loop:
+                payload = {"track": ref, "scene": scene}
+                payload.update(loop)
+                ops.append(("ClipLoopSet", payload))
             for prop in ("name", "color"):
                 if meta.get(prop) is not None:
                     ops.append(("ObjectMetaSet", {

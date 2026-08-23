@@ -302,7 +302,7 @@ const sendHello = () =>
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
-      'ClipCreate,ClipDelete,ClipNotesSet').split(','),
+      'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet').split(','),
   });
 
 function emit(type, payload) {
@@ -391,6 +391,11 @@ const clipsState = (track) => (track.clips || []).map((clip, idx) => {
     clip: { length: clip.length, name: clip.name, color: clip.color },
   };
   if (clip.kind === 'midi') entry.notes = clip.notes;
+  const loop = {};
+  for (const prop of ['looping', 'loop_start', 'loop_end', 'start_marker', 'end_marker']) {
+    if (clip[prop] !== undefined) loop[prop] = clip[prop];
+  }
+  if (Object.keys(loop).length) entry.loop = loop;
   return entry;
 }).filter(Boolean);
 
@@ -476,7 +481,7 @@ function opGap(type, payload) {
   if (payload.scene?.id) {
     const sidx = sceneIdx(payload.scene.id);
     if (sidx < 0) return { what: 'scene', id: payload.scene.id };
-    if (['ClipCreate', 'ClipNotesSet'].includes(type) || payload.object === 'clip') {
+    if (['ClipCreate', 'ClipNotesSet', 'ClipLoopSet'].includes(type) || payload.object === 'clip') {
       if (!track || sidx >= track.clips.length) {
         return { what: 'clip', track: track?.name, scene: payload.scene.id };
       }
@@ -752,6 +757,18 @@ function apply(type, payload, gseq) {
       if (!t) return reject('невідомий трек');
       if (s < 0) return reject('невідома сцена');
       t.clips[s] = null;
+      break;
+    }
+    case 'ClipLoopSet': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      if (!t) return reject('невідомий трек');
+      if (s < 0) return reject('невідома сцена');
+      const clip = t.clips[s];
+      if (!clip) return reject('кліпу немає');
+      for (const prop of ['looping', 'loop_start', 'loop_end', 'start_marker', 'end_marker']) {
+        if (payload[prop] !== undefined) clip[prop] = payload[prop];
+      }
       break;
     }
     case 'ClipNotesSet': {
@@ -1069,6 +1086,28 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'view':
       console.log(JSON.stringify(viewPayload()));
       break;
+    case 'loop': {
+      const t = song.tracks[Number(rest[0]) || 0];
+      const s = Number(rest[1]) || 0;
+      const clip = t && t.clips[s];
+      if (!clip) return console.log('немає кліпу в цьому слоті');
+      clip.loop_start = Number(rest[2]) || 0;
+      clip.loop_end = Number(rest[3]) || clip.length;
+      clip.start_marker = clip.loop_start;
+      clip.end_marker = clip.loop_end;
+      clip.looping = true;
+      emit('ClipLoopSet', {
+        track: trackRef(t),
+        scene: sceneRef(song.scenes[s]),
+        looping: true,
+        loop_start: clip.loop_start,
+        loop_end: clip.loop_end,
+        start_marker: clip.start_marker,
+        end_marker: clip.end_marker,
+      });
+      console.log(`loop ${clip.loop_start}..${clip.loop_end}`);
+      break;
+    }
     case 'fullstate':
       queueState();
       break;
@@ -1082,6 +1121,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         'play | stop | tempo <bpm>',
         'fullstate -- повний знімок сету чанками',
         'look <track|return:N|master> [scene] | view',
+        'loop <track> <scene> <start> <end>',
         'launch <t> <s> | scene <n> | stopclip <t> | stopall',
         'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
         'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',
