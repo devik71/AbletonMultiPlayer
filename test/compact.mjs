@@ -148,3 +148,19 @@ test('порожній хвіст не ламає стиснення', () => {
   assert.deepEqual(out.events, []);
   assert.equal(out.dropped, 0);
 });
+
+test('межі кліпу згортаються в останні, і лише в межах свого кліпу', () => {
+  gseq = 0;
+  const loop = (track, scene, end) => ev('ClipLoopSet', {
+    track: { id: track }, scene: { id: scene },
+    looping: true, loop_start: 0, loop_end: end, start_marker: 0, end_marker: end,
+  });
+  // Живий Live підтвердив: тягнення брекета дає серію змін на одну адресу
+  const out = compactTail([loop('t1', 's1', 6), loop('t1', 's1', 7), loop('t1', 's1', 8)]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.loop_end, 8);
+
+  gseq = 0;
+  const two = compactTail([loop('t1', 's1', 4), loop('t1', 's2', 4)]);
+  assert.equal(two.dropped, 0, 'різні кліпи не перекривають одне одного');
+});

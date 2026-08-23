@@ -201,3 +201,42 @@ test('обʼєкт без uuid у події не перетворюється',
   const ops = stateToOps({ tracks: [{ name: 'без id' }], aux_tracks: [{ id: 'r1' }], scenes: [{}] });
   assert.deepEqual(ops, []);
 });
+
+// Живий Live віддає 63072000 (два роки в секундах) для кліпу під запис.
+// Знімок, зроблений старим скриптом, донесе це число сюди -- регіон нот
+// такої довжини Live не переварить.
+test('отруєна довжина кліпу не породжує регіон завдовжки два роки', () => {
+  const [[region]] = noteRegionsFor({ length: 63072000 }, [{ pitch: 60, start_time: 0 }]);
+  assert.ok(region.time_span < 1e6, `регіон роздувся до ${region.time_span}`);
+
+  const [[sane]] = noteRegionsFor({ length: 8 }, [{ pitch: 60, start_time: 0 }]);
+  assert.equal(sane.time_span, 8, 'притомна довжина лишається як є');
+
+  const [[inf]] = noteRegionsFor({ length: Infinity }, []);
+  assert.ok(Number.isFinite(inf.time_span));
+});
+
+test('межі кліпу виставляються після створення і після нот', () => {
+  const ops = stateToOps({
+    tracks: [{
+      id: 't1',
+      clips: [{
+        scene: { id: 's1' },
+        clip: { length: 4 },
+        notes: [{ pitch: 60, start_time: 0 }],
+        loop: { looping: true, loop_start: 0, loop_end: 4, start_marker: 0, end_marker: 4 },
+      }],
+    }],
+  });
+  const types = ops.map(([type]) => type);
+  const loop = types.indexOf('ClipLoopSet');
+  assert.ok(loop > types.indexOf('ClipCreate'), 'петля після створення кліпу');
+  assert.ok(loop > types.lastIndexOf('ClipNotesSet'), 'петля після нот');
+  assert.deepEqual(ops[loop][1].track, { id: 't1' });
+  assert.equal(ops[loop][1].loop_end, 4);
+});
+
+test('кліп без петлі не породжує ClipLoopSet', () => {
+  const ops = stateToOps({ tracks: [{ id: 't1', clips: [{ scene: { id: 's1' }, notes: [] }] }] });
+  assert.ok(!ops.some(([type]) => type === 'ClipLoopSet'));
+});

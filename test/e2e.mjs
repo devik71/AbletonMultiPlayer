@@ -81,6 +81,25 @@ const canonical = (v) => {
   return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
 };
 
+/** Подія від стороннього клієнта. Єдиний спосіб перевірити прийом того, чого
+ *  локальний bridge ніколи не надішле: адреси без обʼєкта, чужі uri, старі поля. */
+const inject = (event) => new Promise((resolve, reject) => {
+  const ws = new WebSocket(`ws://127.0.0.1:${RELAY_PORT}`);
+  ws.on('open', () => ws.send(JSON.stringify({
+    m: 'join', session: SESSION, author: 'ghost', since: 1e9, proto: 1,
+  })));
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw);
+    if (msg.m === 'welcome') {
+      ws.send(JSON.stringify({ m: 'submit', event: { ...event, lseq: Date.now() } }));
+    } else if (msg.m === 'commit' && msg.event.author === 'ghost') {
+      ws.close();
+      resolve();
+    }
+  });
+  ws.on('error', reject);
+});
+
 // ------------------------------------------------------------------- сценарій
 
 try {
@@ -703,10 +722,135 @@ try {
     await waitFor(d2, /undo неможливий: у p9 немає дій/, 8000, from2);
   });
 
-  await check('журнал: 50 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('межі кліпу їдуть однією подією, з усіма пʼятьма полями', async () => {
+    // Кліп під петлю робимо свій: попередні перевірки свої слоти вже прибрали
+    const from = l2.out.length;
+    l1.stdin.write('note 2 3 60 0 2 100\n');
+    await waitFor(l2, /<- #\d+ ClipCreate/, 8000, from);
+
+    const loopFrom = l2.out.length;
+    l1.stdin.write('loop 2 3 1 3\n');
+    await waitFor(l2, /<- #\d+ ClipLoopSet/, 8000, loopFrom);
+    const seen = l2.out.slice(loopFrom);
+    // Пʼять окремих подій Live клампив би одна об одну через невалідні
+    // проміжні стани -- тому вони мусять приїхати разом
+    for (const [prop, want] of [['looping', 'true'], ['loop_start', '1'],
+      ['loop_end', '3'], ['start_marker', '1'], ['end_marker', '3']]) {
+      if (!new RegExp(`"${prop}":${want}`).test(seen)) {
+        throw new Error(`${prop} не приїхав однією подією з рештою`);
+      }
+    }
+    if (/ClipLoopSet ВІДХИЛЕНО/.test(seen)) throw new Error('петлю відхилено');
+  });
+
+  await check('петля на порожньому слоті не створює кліп', async () => {
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const track = state.tracks[0];
+    const busy = new Set((track.clips || []).map((c) => c.scene?.id));
+    const scene = [...state.scenes].reverse().find((s) => !busy.has(s.id));
+    if (!scene) throw new Error('не знайшов порожнього слоту для перевірки');
+
+    const from = l2.out.length;
+    await inject({
+      type: 'ClipLoopSet',
+      payload: {
+        track: { id: track.id }, scene: { id: scene.id },
+        looping: true, loop_start: 0, loop_end: 4, start_marker: 0, end_marker: 4,
+      },
+    });
+    await waitFor(l2, /ClipLoopSet ВІДХИЛЕНО \(кліпу немає\)/, 6000, from);
+  });
+
+  await check('копія треку приїжджає з девайсами, і ланцюги в ній сходяться самі', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('duptrack 0\n');
+    await waitFor(l2, /<- #\d+ TrackDuplicate/, 8000, from);
+    if (/TrackDuplicate: джерела немає/.test(l2.out.slice(from))) {
+      throw new Error('партнер не знайшов джерела і зробив порожній трек');
+    }
+
+    // Головна обіцянка стадії: ланцюги всередині Rack копії дістають ті самі
+    // uuid на обох машинах без жодної нової події -- лише з локатора
+    const paramFrom = l2.out.length;
+    l1.stdin.write('device 1 3/0/0 0 0.91\n');
+    await waitFor(l2, /<- #\d+ DeviceParamSet .*"value":0\.91/, 8000, paramFrom);
+    const seen = l2.out.slice(paramFrom);
+    if (!/"chain_path"/.test(seen)) throw new Error('подія приїхала без адреси ланцюга');
+    if (/ВІДХИЛЕНО/.test(seen)) throw new Error('ланцюг у копії не розпізнався у партнера');
+  });
+
+  await check('девайс із браузера доїжджає; невідомий не підмінюється', async () => {
+    const from = l2.out.length;
+    l1.stdin.write('load 2 query:AudioFx#Compressor\n');
+    await waitFor(l2, /<- #\d+ DeviceLoad .*Compressor/, 8000, from);
+    if (/DeviceLoad ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер не знайшов девайс у своєму браузері');
+    }
+
+    const bad = l1.out.length;
+    l1.stdin.write('load 2 query:AudioFx#Nope\n');
+    await waitFor(l1, /немає девайса query:AudioFx#Nope/, 5000, bad);
+
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const target = { id: state.tracks[0].id };
+
+    // Замінник не створюємо ніколи: краще дірка, ніж чужий девайс на тій адресі
+    const missing = l2.out.length;
+    await inject({
+      type: 'DeviceLoad',
+      payload: { track: target, item: { uri: 'query:AudioFx#Ozone', name: 'Ozone', category: 'audio_effects' } },
+    });
+    await waitFor(l2, /DeviceLoad ВІДХИЛЕНО \(немає девайса Ozone\)/, 6000, missing);
+
+    // uri зсувається між версіями Live -- назва лишається тим, що впізнає людина
+    const byName = l2.out.length;
+    await inject({
+      type: 'DeviceLoad',
+      payload: {
+        track: target,
+        item: { uri: 'query:AudioFx#Compressor2', name: 'Compressor', category: 'audio_effects' },
+      },
+    });
+    await waitFor(l2, /<- #\d+ DeviceLoad .*Compressor2/, 6000, byName);
+    if (/DeviceLoad ВІДХИЛЕНО/.test(l2.out.slice(byName))) {
+      throw new Error('запасний пошук за назвою не спрацював');
+    }
+  });
+
+  await check('партнер на старому скрипті не породжує ні фантома, ні кліпа-монстра', async () => {
+    // Обидві події -- точні копії того, що прилетіло з машини на 0.17.0
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+
+    const phantom = l2.out.length;
+    await inject({
+      type: 'TrackCreate',
+      payload: { track: { id: 'aaaaaaaaaaaa', name: '1-Group' }, kind: 'group', idx: 0 },
+    });
+    await waitFor(l2, /TrackCreate ВІДХИЛЕНО \(невідомий різновид треку group\)/, 6000, phantom);
+
+    // 63072000 доль -- заглушка Live для кліпу, що зараз записується
+    const monster = l2.out.length;
+    const track = state.tracks[0];
+    const busy = new Set((track.clips || []).map((c) => c.scene?.id));
+    const scene = [...state.scenes].reverse().find((s) => !busy.has(s.id));
+    await inject({
+      type: 'ClipCreate',
+      payload: { track: { id: track.id }, scene: { id: scene.id }, clip: { length: 63072000 } },
+    });
+    await waitFor(l2, /<- #\d+ ClipCreate/, 6000, monster);
+
+    const stateFrom = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, stateFrom);
+    if (/"length": 63072000/.test(l2.out.slice(stateFrom))) {
+      throw new Error('довжина кліпу-монстра осіла в стані');
+    }
+  });
+
+  await check('журнал: 61 подія, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 50) throw new Error(`очікував 50 подій, у журналі ${lines.length}`);
+    if (lines.length !== 61) throw new Error(`очікував 61 подію, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);
@@ -716,6 +860,38 @@ try {
       if (want !== hash) throw new Error(`hash не збігається на gseq=${body.gseq}`);
       prev = hash;
     });
+  });
+
+  await check('verify.js підтверджує цілісність сесії і ловить підміну', async () => {
+    const run = (args) => new Promise((resolve) => {
+      const p = spawn(process.execPath, [join(root, 'relay/verify.js'), ...args], { cwd: root });
+      let out = '';
+      p.stdout.on('data', (b) => { out += b; });
+      p.stderr.on('data', (b) => { out += b; });
+      p.on('close', (code) => resolve({ code, out }));
+    });
+
+    const ok = await run([SESSION, '--dir', tmp]);
+    if (ok.code !== 0) throw new Error(`чистий журнал не пройшов: ${ok.out}`);
+    if (!/цілісність підтверджена/.test(ok.out)) throw new Error(ok.out);
+
+    // Підміняємо значення в середині журналу, лишаючи hash недоторканим --
+    // саме так виглядав би тихо відредагований файл
+    const path = join(tmp, `${SESSION}.jsonl`);
+    const original = readFileSync(path, 'utf8');
+    const lines = original.split('\n').filter(Boolean);
+    const at = Math.floor(lines.length / 2);
+    const forged = JSON.parse(lines[at]);
+    forged.author = `${forged.author}-підробка`;
+    lines[at] = JSON.stringify(forged);
+    writeFileSync(path, lines.join('\n') + '\n');
+    try {
+      const bad = await run([SESSION, '--dir', tmp]);
+      if (bad.code === 0) throw new Error('підміну не помічено');
+      if (!/ПРОБЛЕМА/.test(bad.out)) throw new Error(`мовчазна відмова: ${bad.out}`);
+    } finally {
+      writeFileSync(path, original);
+    }
   });
 
   await check('той самий автор в іншій сесії не глухий до неї', async () => {

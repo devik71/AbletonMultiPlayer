@@ -88,3 +88,11 @@ test('чужі локи логуються лише коли змінились'
   locks([]);
   assert.deepEqual(lines.at(-1), 'ніхто нічого не редагує');
 });
+
+test('петля і ноти того самого кліпу діляться одним локом', () => {
+  const payload = { track: { id: 't1' }, scene: { id: 's1' } };
+  const notes = lockTarget('ClipNotesSet', payload, registry);
+  const loop = lockTarget('ClipLoopSet', payload, registry);
+  assert.equal(loop.object, notes.object, 'редагування нот і петлі -- один обʼєкт');
+  assert.equal(loop.object, 'clip:t1:s1');
+});
