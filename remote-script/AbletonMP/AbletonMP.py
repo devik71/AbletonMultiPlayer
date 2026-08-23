@@ -3083,7 +3083,7 @@ class AbletonMP(ControlSurface):
             return self._ai_set_device_parameter(action)
 
         if op == "load_device":
-            track = self._ai_target_track(action)
+            track, _idx = self._ai_target_track(action)
             ref = self._device_track_ref(track)
             if not ref:
                 raise ValueError("track is not addressable")
