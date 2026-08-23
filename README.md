@@ -6,6 +6,7 @@
 
 Візія і компроміси — [vision.md](vision.md), протокол — [docs/PROTOCOL.md](docs/PROTOCOL.md).
 Перший прогін на двох машинах — [docs/FIRST-RUN.md](docs/FIRST-RUN.md).
+Що ще не синхронізується — [docs/COVERAGE.md](docs/COVERAGE.md).
 
 > Проєкт не афілійований з Ableton і не містить їхнього коду. Взаємодія з Live
 > йде виключно через задокументовані точки розширення — Remote Script і
