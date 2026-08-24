@@ -240,6 +240,7 @@ class AbletonMP(ControlSurface):
             "pid": os.getpid(),
             "events": APPLY_TYPES,
             "features": FEATURES,
+            "sha": self._script_sha(),
         })
         self._link.send({"m": "snapshot", "state": self._snapshot()})
         self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
@@ -6023,6 +6024,26 @@ class AbletonMP(ControlSurface):
         self._lseq += 1
         self._link.send({"m": "event", "type": etype, "payload": payload, "lseq": self._lseq})
         self._log("-> %s %r" % (etype, payload))
+
+    @staticmethod
+    def _script_sha():
+        """Хеш власного джерела. Версія цього не ловить.
+
+        SCRIPT_VERSION між комітами не змінюється, тож Live, який тримає
+        в памʼяті вчорашній файл, виглядає точно як свіжий -- і це вже
+        тричі коштувало нам вечора: спершу партнеру з 0.17, потім тут,
+        коли SceneTimingSet мовчав, бо в запущеному скрипті його не було.
+        Перевірка файлу на диску цього не бачить: вона звіряє диск, а не
+        те, що Live прочитав під час старту.
+        """
+        try:
+            path = os.path.abspath(__file__)
+            if path.endswith(".pyc"):
+                path = path[:-1]
+            with open(path, "rb") as handle:
+                return hashlib.sha256(handle.read()).hexdigest()[:12]
+        except Exception:
+            return ""
 
     def _live_version(self):
         try:

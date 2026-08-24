@@ -5,6 +5,7 @@
 // локальний журнал, clock sync.
 
 import { createSocket } from 'node:dgram';
+import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -397,7 +398,9 @@ udp.on('message', (buf) => {
       log(`bridge підключився: Live ${msg.live}, script ${msg.script}, pid ${msg.pid}`);
       bridgeInfo = {
         live: msg.live, script: msg.script, events: msg.events || [], features: msg.features || [],
+        sha: msg.sha || null,
       };
+      warnIfStaleScript(msg.sha);
       announceCapabilities();
       registryAsked = false; // Live перезавантажився -- його реєстр треба відновити
       bootstrapRegistry();
@@ -688,6 +691,46 @@ function reportSamples(s) {
     log(`УВАГА: ${miss.length} семплів взагалі немає на диску (missing media):`);
     for (const p of miss.slice(0, 5)) log(`  бракує: ${p}`);
   }
+}
+
+let staleWarned = null;
+
+/** Чи той самий код крутить Live, що лежить у репозиторії.
+ *
+ *  SCRIPT_VERSION між комітами не змінюється, тож Live із учорашнім файлом
+ *  у пам’яті виглядає точно як свіжий. Ловиться це лише хешем джерела --
+ *  і ловити треба, бо мовчазний наслідок виглядає як «подія не працює»,
+ *  а не як «скрипт застарів». */
+function warnIfStaleScript(sha) {
+  const key = sha || '(без хешу)';
+  if (staleWarned === key) return;
+  staleWarned = key;
+  let src;
+  try {
+    src = readFileSync(join(__dirname, '..', 'remote-script', 'AbletonMP', 'AbletonMP.py'));
+  } catch {
+    return;  // запущено не з репозиторію -- порівнювати нема з чим
+  }
+  if (!sha) {
+    // Скрипт узагалі не вміє рахувати свій хеш. Якщо в репозиторії ця
+    // здатність уже є -- значить у Live лежить старіший файл, і це саме
+    // той випадок, заради якого перевірка й писалась.
+    if (src.includes('_script_sha')) {
+      log('УВАГА: Live крутить скрипт, старіший за репозиторій (він ще не вміє');
+      log('  повідомляти свій хеш). Події, додані пізніше, приходитимуть');
+      log('  як «невідомий тип». Лікується перезапуском Live.');
+    }
+    return;
+  }
+  const want = createHash('sha256').update(src).digest('hex').slice(0, 12);
+  if (want === sha) {
+    log(`скрипт у Live збігається з репозиторієм (${sha})`);
+    return;
+  }
+  log(`УВАГА: Live крутить НЕ той скрипт, що в репозиторії.`);
+  log(`  у Live: ${sha}, у репозиторії: ${want}`);
+  log(`  події, додані після того файлу, приходитимуть як «невідомий тип».`);
+  log(`  лікується: node tools/check-install.mjs --install і перезапуск Live.`);
 }
 
 /** Або віддаємо bridge готовий реєстр сесії, або просимо створити новий. */
