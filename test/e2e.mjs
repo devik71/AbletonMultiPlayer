@@ -1166,10 +1166,40 @@ try {
     await waitFor(l2, /SongPropSet ВІДХИЛЕНО \(невідома властивість пісні metronome\)/, 6000, unknown);
   });
 
-  await check('журнал: 91 подія, монотонний gseq, цілий hash-chain', async () => {
+  await check('темп і метр сцени доїжджають одним блоком', async () => {
+    // Live віддає -1 замість значення, доки перевизначення вимкнене, тож
+    // пʼять полів взаємозалежні: окремими подіями вони пройшли б через стан,
+    // у якому значення просто нікуди писати.
+    const from = l2.out.length;
+    l1.stdin.write('scenetiming 2 140 6 8\n');
+    await waitFor(l2, /<- #\d+ SceneTimingSet .*"tempo":140.*"time_signature_numerator":6/, 8000, from);
+    if (/SceneTimingSet ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер відхилив блок');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    const state = l2.out.slice(shown);
+    if (!/"tempo": 140/.test(state)) throw new Error('темп сцени в партнера не змінився');
+    if (!/"time_signature_denominator": 8/.test(state)) throw new Error('метр сцени не доїхав');
+
+    // Знаменник поза степенями двійки Live округлив би мовчки
+    const bad = l2.out.length;
+    const stateFile = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    await inject({
+      type: 'SceneTimingSet',
+      payload: {
+        scene: { id: stateFile.scenes[0].id },
+        tempo_enabled: false, time_signature_enabled: true,
+        time_signature_numerator: 6, time_signature_denominator: 5,
+      },
+    });
+    await waitFor(l2, /SceneTimingSet ВІДХИЛЕНО \(некоректний блок/, 6000, bad);
+  });
+
+  await check('журнал: 93 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 91) throw new Error(`очікував 91 подію, у журналі ${lines.length}`);
+    if (lines.length !== 93) throw new Error(`очікував 93 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

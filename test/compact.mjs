@@ -201,3 +201,17 @@ test('властивості пісні згортаються кожна у с�
   const mixed = compactTail([set('signature_numerator', 3), set('root_note', 5)]);
   assert.equal(mixed.dropped, 0);
 });
+
+test('перевизначення сцени згортається в останнє, і лише в межах своєї сцени', () => {
+  gseq = 0;
+  const timing = (scene, tempo) => ev('SceneTimingSet', {
+    scene: { id: scene }, tempo_enabled: true, tempo,
+    time_signature_enabled: false,
+  });
+  const out = compactTail([timing('s1', 120), timing('s1', 130), timing('s1', 140)]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.tempo, 140);
+
+  gseq = 0;
+  assert.equal(compactTail([timing('s1', 120), timing('s2', 120)]).dropped, 0);
+});

@@ -37,6 +37,10 @@ export function supersedeKey(ev) {
       return 'tempo';
     case 'TransportSet':
       return 'transport';
+    case 'SceneTimingSet':
+      // Увесь блок перевизначень сцени перезаписується цілком, тож серія
+      // рухів доїжджає останньою -- як у ClipLoopSet.
+      return `scenetiming:${p.scene?.id}`;
     case 'SongPropSet':
       // Кожна властивість -- власна адреса: розмір такту не перекриває
       // тональність, а серія рухів однієї доїжджає останньою.

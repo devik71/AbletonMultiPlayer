@@ -117,6 +117,11 @@ export function stateToOps(state) {
       ...deviceOps(ref, aux.devices || []));
   }
   for (const scene of state.scenes || []) {
+    // Темп і метр сцени -- частина документа: сцена, що мовчки перемикає
+    // темп в одного і не перемикає в іншого, розводить пару миттєво.
+    if (scene?.id && scene.timing) {
+      ops.push(['SceneTimingSet', { scene: { id: scene.id }, ...scene.timing }]);
+    }
     if (scene.id) ops.push(...metaOps('scene', { id: scene.id }, scene));
   }
   return ops;

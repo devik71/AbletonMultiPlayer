@@ -47,7 +47,7 @@ APPLY_TYPES = [
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
     "DeviceLoad",
     "DeviceInsert", "DeviceDelete", "DeviceMove",
-    "SampleLoad", "SongPropSet",
+    "SampleLoad", "SongPropSet", "SceneTimingSet",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
@@ -77,7 +77,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -164,6 +164,7 @@ class AbletonMP(ControlSurface):
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
+            "scene_timing": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -329,6 +330,9 @@ class AbletonMP(ControlSurface):
             self._wire_devices(track)
         for scene in self._doc.scenes:
             self._wire_metadata("scene", scene, scene=scene)
+            for prop in ("tempo", "tempo_enabled", "time_signature_numerator",
+                         "time_signature_denominator", "time_signature_enabled"):
+                self._listen(scene, prop, self._make_scene_timing_cb(scene))
 
     def _wire_note_slots(self, track):
         try:
@@ -550,6 +554,127 @@ class AbletonMP(ControlSurface):
         if actual is not None:
             self._mirror["song"][prop] = actual
 
+    # ---------------------------------------------------- темп і метр сцени
+    #
+    # Live віддає -1 замість значення, коли перевизначення вимкнене, тож поля
+    # взаємозалежні: писати tempo при вимкненому tempo_enabled безглуздо.
+    # Звідси й форма -- увесь блок однією подією, як у ClipLoopSet.
+
+    def _scene_timing(self, scene):
+        """Блок перевизначень сцени, або None, якщо їх у цій збірці немає."""
+        enabled = self._safe_attr(scene, "tempo_enabled")
+        sig_enabled = self._safe_attr(scene, "time_signature_enabled")
+        if enabled is None and sig_enabled is None:
+            return None
+        block = {"tempo_enabled": bool(enabled),
+                 "time_signature_enabled": bool(sig_enabled)}
+        if block["tempo_enabled"]:
+            try:
+                tempo = round(float(scene.tempo), 6)
+            except Exception:
+                tempo = None
+            if tempo is not None and 20.0 <= tempo <= 999.0:
+                block["tempo"] = tempo
+        if block["time_signature_enabled"]:
+            for prop, key in (("time_signature_numerator", "numerator"),
+                              ("time_signature_denominator", "denominator")):
+                try:
+                    value = int(getattr(scene, prop))
+                except Exception:
+                    continue
+                if key == "numerator" and 1 <= value <= 99:
+                    block[prop] = value
+                elif key == "denominator" and value in (1, 2, 4, 8, 16):
+                    block[prop] = value
+        return block
+
+    def _prime_scene_timing(self):
+        state = {}
+        for scene in self._doc.scenes:
+            sid = self._scenes_reg.id_of(scene, create=False)
+            if not sid:
+                continue
+            block = self._scene_timing(scene)
+            if block is not None:
+                state[sid] = block
+        self._mirror["scene_timing"] = state
+
+    def _make_scene_timing_cb(self, scene):
+        def cb():
+            self._safe(self._on_scene_timing, scene)
+        return cb
+
+    def _on_scene_timing(self, scene):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        sid = self._scenes_reg.id_of(scene, create=False)
+        if not sid:
+            return
+        block = self._scene_timing(scene)
+        if block is None or self._mirror["scene_timing"].get(sid) == block:
+            return
+        self._mirror["scene_timing"][sid] = block
+        payload = {"scene": {"id": sid}}
+        payload.update(block)
+        # Спільний ключ на всі пʼять полів: увімкнути перевизначення й виставити
+        # значення -- це один жест користувача, а не пʼять подій.
+        self._defer("scene_timing:%s" % sid, "SceneTimingSet", payload)
+
+    def _apply_scene_timing(self, payload, gseq):
+        sidx = self._resolve_scene(payload.get("scene"))
+        if sidx is None:
+            return
+        try:
+            scene = list(self._doc.scenes)[sidx]
+        except Exception:
+            return
+        sid = (payload.get("scene") or {}).get("id")
+
+        # Спершу повна валідація, і лише потім записи: часткове застосування
+        # лишило б сцену з увімкненим перевизначенням і чужим значенням.
+        want = {"tempo_enabled": bool(payload.get("tempo_enabled")),
+                "time_signature_enabled": bool(payload.get("time_signature_enabled"))}
+        if want["tempo_enabled"]:
+            try:
+                tempo = round(float(payload.get("tempo")), 6)
+            except Exception:
+                tempo = None
+            if tempo is None or not (20.0 <= tempo <= 999.0):
+                self._warn("gseq %s: некоректний темп сцени %r" % (gseq, payload.get("tempo")))
+                return
+            want["tempo"] = tempo
+        if want["time_signature_enabled"]:
+            try:
+                num = int(payload.get("time_signature_numerator"))
+                den = int(payload.get("time_signature_denominator"))
+            except Exception:
+                self._warn("gseq %s: некоректний метр сцени" % (gseq,))
+                return
+            if not (1 <= num <= 99) or den not in (1, 2, 4, 8, 16):
+                self._warn("gseq %s: метр сцени %r/%r поза межами" % (gseq, num, den))
+                return
+            want["time_signature_numerator"] = num
+            want["time_signature_denominator"] = den
+
+        if sid:
+            self._mirror["scene_timing"][sid] = want  # ДО запису -- глушимо ехо
+        try:
+            # Порядок незвертальний: доки перевизначення вимкнене, Live віддає
+            # -1 і значення просто нікуди писати.
+            scene.tempo_enabled = want["tempo_enabled"]
+            if want["tempo_enabled"]:
+                scene.tempo = want["tempo"]
+            scene.time_signature_enabled = want["time_signature_enabled"]
+            if want["time_signature_enabled"]:
+                scene.time_signature_numerator = want["time_signature_numerator"]
+                scene.time_signature_denominator = want["time_signature_denominator"]
+        except Exception as e:
+            self._warn("gseq %s: темп/метр сцени не встановились: %r" % (gseq, e))
+        if sid:
+            actual = self._scene_timing(scene)
+            if actual is not None:
+                self._mirror["scene_timing"][sid] = actual
+
     def _on_tracks(self):
         # СЃС‚СЂСѓРєС‚СѓСЂР° С‚СЂРµРєС–РІ Р·РјС–РЅРёР»Р°СЃСЊ: РїРµСЂРµРїС–РґРїРёСЃСѓС”РјРѕСЃСЊ С– СЃРєРёРґР°С”РјРѕ РґР·РµСЂРєР°Р»Рѕ СЃР»РѕС‚С–РІ,
         # С–РЅР°РєС€Рµ Р·СЃСѓРІ С–РЅРґРµРєСЃС–РІ РїРѕСЂРѕРґРёС‚СЊ С„Р°РЅС‚РѕРјРЅС– ClipLaunch
@@ -664,6 +789,7 @@ class AbletonMP(ControlSurface):
         self._prime_metadata()
         self._prime_clip_loops()
         self._prime_song_props()
+        self._prime_scene_timing()
         self._prime_arrangement()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
@@ -742,6 +868,7 @@ class AbletonMP(ControlSurface):
         self._prime_metadata()
         self._prime_clip_loops()
         self._prime_song_props()
+        self._prime_scene_timing()
         self._prime_arrangement()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
@@ -2237,6 +2364,9 @@ class AbletonMP(ControlSurface):
                 self._doc.start_playing()
             else:
                 self._doc.stop_playing()
+
+        elif etype == "SceneTimingSet":
+            self._apply_scene_timing(payload, gseq)
 
         elif etype == "SongPropSet":
             self._apply_song_prop(payload, gseq)
@@ -4168,6 +4298,7 @@ class AbletonMP(ControlSurface):
                 "idx": idx,
                 "name": self._safe_name(scene),
                 "color": self._safe_color(scene),
+                "timing": self._scene_timing(scene),
             })
 
         try:

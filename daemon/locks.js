@@ -15,6 +15,7 @@ const CONTINUOUS = new Set([
   'TempoSet', 'MixerSet', 'DeviceParamSet', 'ClipNotesSet', 'ClipLoopSet',
   'ArrangementClipMove', 'ArrangementClipNotesSet',
   'SongPropSet',
+  'SceneTimingSet',
   'SongPropSet',
 ]);
 
@@ -34,6 +35,12 @@ export function lockTarget(type, payload, registry) {
   const p = payload || {};
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
+
+  if (type === 'SceneTimingSet') {
+    const scene = p.scene?.id;
+    if (!scene) return null;
+    return { object: `scene:${scene}:timing`, label: sceneName(registry, scene) };
+  }
 
   if (type === 'SongPropSet') {
     // Своя адреса на кожну властивість: двоє можуть одночасно правити

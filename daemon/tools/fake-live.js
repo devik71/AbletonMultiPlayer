@@ -326,7 +326,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet').split(','),
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet').split(','),
   });
 
 function emit(type, payload) {
@@ -337,6 +337,28 @@ function emit(type, payload) {
   send({ m: 'event', type, payload, lseq });
   console.log(`-> ${type} ${JSON.stringify(payload)}`);
 }
+
+// Live віддає -1 замість значення, коли перевизначення вимкнене, тож поля
+// взаємозалежні й їдуть одним блоком.
+const sceneTiming = (block) => {
+  if (!block) return null;
+  const out = { tempo_enabled: Boolean(block.tempo_enabled),
+                time_signature_enabled: Boolean(block.time_signature_enabled) };
+  if (out.tempo_enabled) {
+    const t = Number(block.tempo);
+    if (!(t >= 20 && t <= 999)) return null;
+    out.tempo = t;
+  }
+  if (out.time_signature_enabled) {
+    const n = Number(block.time_signature_numerator);
+    const d = Number(block.time_signature_denominator);
+    if (!(Number.isInteger(n) && n >= 1 && n <= 99)) return null;
+    if (![1, 2, 4, 8, 16].includes(d)) return null;
+    out.time_signature_numerator = n;
+    out.time_signature_denominator = d;
+  }
+  return out;
+};
 
 const snapshot = () => ({
   playing: song.playing,
@@ -611,7 +633,7 @@ const fullState = () => ({
     devices: deviceEntries(t),
   })),
   scenes: song.scenes.filter((s) => s.id).map((s, idx) => ({
-    id: s.id, idx, name: s.name, color: s.color,
+    id: s.id, idx, name: s.name, color: s.color, timing: s.timing || null,
   })),
 });
 
@@ -1018,6 +1040,14 @@ function apply(type, payload, gseq) {
     case 'TransportSet':
       song.playing = !!payload.playing;
       break;
+    case 'SceneTimingSet': {
+      const scene = song.scenes.find((x) => x.id === payload.scene?.id);
+      if (!scene) return reject('невідома сцена');
+      const block = sceneTiming(payload);
+      if (!block) return reject('некоректний блок темпу/метру сцени');
+      scene.timing = block;
+      break;
+    }
     case 'SongPropSet': {
       const check = SONG_PROPS[payload.prop];
       if (!check) return reject(`невідома властивість пісні ${payload.prop}`);
@@ -1432,6 +1462,21 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       song.playing = false;
       emit('TransportSet', { playing: false });
       break;
+    case 'scenetiming': {
+      const scene = song.scenes[Number(rest[0]) || 0];
+      if (!scene) return console.log('немає такої сцени');
+      const block = sceneTiming({
+        tempo_enabled: rest[1] !== undefined, tempo: Number(rest[1]),
+        time_signature_enabled: rest[2] !== undefined,
+        time_signature_numerator: Number(rest[2]),
+        time_signature_denominator: Number(rest[3]),
+      });
+      if (!block) return console.log('некоректні значення');
+      scene.timing = block;
+      emit('SceneTimingSet', { scene: { id: scene.id }, ...block });
+      console.log(`сцена ${rest[0]}: темп ${block.tempo ?? '—'}, метр ${block.time_signature_numerator ?? '—'}/${block.time_signature_denominator ?? '—'}`);
+      break;
+    }
     case 'songprop': {
       const prop = rest[0];
       const check = SONG_PROPS[prop];
