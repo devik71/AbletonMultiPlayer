@@ -61,6 +61,11 @@ AbletonOSC — це RPC-поверхня: get/set/listen на властивос
 
 ### Тир 3 — режими запису
 
+> **Розібрано.** Петля Arrangement і `punch_*` увійшли в `SongPropSet`.
+> Решта -- `record_mode`, `session_record`, `arrangement_overdub`,
+> `back_to_arranger` -- **свідомо не синхронізується**: це намір людини
+> або стан її власного відтворення. Причини в [PROTOCOL.md](PROTOCOL.md#властивості-пісні).
+
 `session_record`, `arrangement_overdub`, `record_mode`, `punch_in`/`punch_out`,
 `back_to_arranger`. Тут спершу треба вирішити семантику: це стан документа
 (синхронізувати) чи намір конкретної людини (ні). Схиляємось до другого для

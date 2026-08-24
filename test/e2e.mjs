@@ -1227,10 +1227,38 @@ try {
     await waitFor(l2, /ClipPropSet ВІДХИЛЕНО \(невідомий трек\)/, 6000, bad);
   });
 
-  await check('журнал: 98 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('петля Arrangement доїжджає, режими запису -- ні', async () => {
+    // Петля -- це «де ми зараз працюємо», найспільніше, що взагалі є.
+    const from = l2.out.length;
+    l1.stdin.write('songprop loop true\n');
+    await waitFor(l2, /<- #\d+ SongPropSet .*"loop".*"value":true/, 8000, from);
+    l1.stdin.write('songprop loop_start 32\n');
+    await waitFor(l2, /<- #\d+ SongPropSet .*"loop_start".*"value":32/, 8000, from);
+    l1.stdin.write('songprop loop_length 8\n');
+    await waitFor(l2, /<- #\d+ SongPropSet .*"loop_length".*"value":8/, 8000, from);
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    const state = l2.out.slice(shown);
+    if (!/"loop_start": 32/.test(state)) throw new Error('початок петлі не доїхав');
+
+    // Нульова довжина -- не петля: Live підтягнув би її мовчки
+    const bad = l2.out.length;
+    await inject({ type: 'SongPropSet', payload: { prop: 'loop_length', value: 0 } });
+    await waitFor(l2, /SongPropSet ВІДХИЛЕНО \(некоректне значення 0/, 6000, bad);
+
+    // Режим запису -- намір людини, а не стан документа: приїхавши, він
+    // почав би писати озброєні треки партнера його ж входом
+    const rec = l2.out.length;
+    await inject({ type: 'SongPropSet', payload: { prop: 'record_mode', value: true } });
+    await waitFor(l2, /SongPropSet ВІДХИЛЕНО \(невідома властивість пісні record_mode\)/, 6000, rec);
+  });
+
+  await check('журнал: 103 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 98) throw new Error(`очікував 98 подій, у журналі ${lines.length}`);
+    if (lines.length !== 103) throw new Error(`очікував 103 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

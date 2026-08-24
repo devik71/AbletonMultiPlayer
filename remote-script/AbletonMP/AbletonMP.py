@@ -117,14 +117,25 @@ CLIP_PROPS = ("gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode",
 # Портативні лише стокові девайси першого рівня: дампи браузера з двох машин
 # показали, що їхні uri ідентичні, а вміст адресується локальними FileId.
 BROWSER_CATEGORIES = ("audio_effects", "instruments", "midi_effects")
-# Скалярні властивості пісні, спільні для всіх учасників. Метроном
-# і midi_recording_quantization сюди НЕ входять навмисно: перший --
-# особиста річ, як гучність навушників, а друга впливає лише на власний
-# запис, і партнер уже дістає ноти квантованими, тобто розсинхрону з неї
-# не буває.
+# Скалярні властивості пісні, спільні для всіх учасників.
+#
+# Петля Arrangement (loop, loop_start, loop_length) -- це "де ми зараз
+# працюємо", тобто найспільніше, що взагалі є. punch_in/punch_out ідуть
+# із нею: вони змінюють саме те, що ця петля означає для запису.
+#
+# А от НЕ входять сюди, і кожне з власної причини:
+#   record_mode, session_record, arrangement_overdub -- це намір людини
+#     натиснути запис, а не стан документа. Приїхавши, вони почали б
+#     писати озброєні треки партнера його ж входом -- сюрприз у вигляді
+#     чужого дубля;
+#   back_to_arranger -- стан ВЛАСНОГО відтворення, у кожного свій;
+#   metronome -- особиста річ, як гучність навушників;
+#   midi_recording_quantization -- впливає лише на власний запис, і партнер
+#     дістає ноти вже квантованими, тож розсинхрону з неї не буває.
 SONG_PROPS = ("signature_numerator", "signature_denominator",
               "clip_trigger_quantization", "root_note", "scale_name",
-              "scale_mode")
+              "scale_mode", "loop", "loop_start", "loop_length",
+              "punch_in", "punch_out")
 LOAD_QUEUE_MAX_SEC = 60.0
 # Семпл може ще їхати filesync-ом (перескан раз на 10 с), та й браузер Live
 # помічає новий файл не миттєво. Тож чекаємо довше, ніж на девайс.
@@ -503,8 +514,17 @@ class AbletonMP(ControlSurface):
             if prop == "scale_name":
                 text = self._doc_str(raw)
                 return text if text and len(text) <= 64 else None
-            if prop == "scale_mode":
+            if prop in ("scale_mode", "loop", "punch_in", "punch_out"):
                 return bool(raw)
+            if prop in ("loop_start", "loop_length"):
+                value = round(float(raw), 6)
+                if not math.isfinite(value) or value < 0 or value > CLIP_LENGTH_MAX:
+                    return None
+                # Нульова довжина петлі -- не петля, а Live її мовчки
+                # підтягне до мінімуму, і партнери розійдуться.
+                if prop == "loop_length" and value <= 0:
+                    return None
+                return value
             value = int(raw)
         except Exception:
             return None

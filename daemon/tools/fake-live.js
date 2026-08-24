@@ -95,6 +95,13 @@ const SONG_PROPS = {
   root_note: (v) => (Number.isInteger(v) && v >= 0 && v <= 11 ? v : null),
   scale_name: (v) => (typeof v === 'string' && v && v.length <= 64 ? v : null),
   scale_mode: (v) => Boolean(v),
+  // Петля Arrangement -- "де ми зараз працюємо", найспільніше, що є.
+  // punch іде з нею: він змінює те, що ця петля означає для запису.
+  loop: (v) => Boolean(v),
+  punch_in: (v) => Boolean(v),
+  punch_out: (v) => Boolean(v),
+  loop_start: (v) => (Number.isFinite(v) && v >= 0 && v <= 1e6 ? Number(v) : null),
+  loop_length: (v) => (Number.isFinite(v) && v > 0 && v <= 1e6 ? Number(v) : null),
 };
 
 const song = {
@@ -102,7 +109,9 @@ const song = {
   tempo: 120,
   props: { signature_numerator: 4, signature_denominator: 4,
            clip_trigger_quantization: 4, root_note: 0,
-           scale_name: 'Major', scale_mode: false },
+           scale_name: 'Major', scale_mode: false,
+           loop: false, loop_start: 0, loop_length: 16,
+           punch_in: false, punch_out: false },
   tracks: [
     { id: null, name: '1-MIDI', color: 0xff8c00, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
     { id: null, name: '2-MIDI', color: 0x33aa55, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
@@ -1531,7 +1540,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const check = SONG_PROPS[prop];
       if (!check) return console.log(`невідома властивість ${prop}`);
       const raw = prop === 'scale_name' ? rest.slice(1).join(' ')
-        : prop === 'scale_mode' ? rest[1] === 'true' : Number(rest[1]);
+        : ['scale_mode', 'loop', 'punch_in', 'punch_out'].includes(prop)
+          ? rest[1] === 'true' : Number(rest[1]);
       const value = check(raw);
       if (value === null) return console.log(`некоректне значення ${rest[1]}`);
       song.props[prop] = value;
