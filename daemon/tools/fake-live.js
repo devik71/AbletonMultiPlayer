@@ -453,6 +453,17 @@ const diffArrangement = () => {
         }
         continue;
       }
+      if (c.file_path) {
+        // Партнер не створить audio-кліп із нічого, зате завантажить
+        // той самий файл -- тож структурної події тут не шлемо взагалі.
+        emit('SampleLoad', {
+          track: { id: t.id },
+          clip: { id: c.id },
+          target: { kind: 'arrangement', start_time: c.start_time },
+          sample: { path: c.file_path, name: String(c.file_path).split('/').pop() },
+        });
+        continue;
+      }
       emit('ArrangementClipCreate', {
         track: { id: t.id },
         clip: { id: c.id, length: c.length, name: c.name, color: c.color, is_midi: true },
@@ -1278,6 +1289,21 @@ function apply(type, payload, gseq) {
     }
     case 'SampleLoad': {
       const rel = payload.sample?.path;
+      if (payload.target?.kind === 'arrangement') {
+        const at = trackById(payload.track?.id);
+        if (!at) return reject('невідомий трек');
+        if (!payload.clip?.id) return reject('кліп без uuid');
+        if (!sampleExists(rel)) return reject(`семпла ${rel} ще немає в теці проєкту`);
+        if (arrOf(at).some((c) => c.id === payload.clip.id)) break;   // ідемпотентність
+        if (!at.clips.some((c) => !c)) return reject('усі слоти Session зайняті');
+        arrOf(at).push({
+          id: payload.clip.id, start_time: payload.target.start_time,
+          length: NOTE_TIME_SPAN, name: String(rel).split('/').pop(),
+          color: 0x777777, notes: [], kind: 'audio', file_path: rel,
+        });
+        arrOf(at).sort((a, b) => a.start_time - b.start_time);
+        break;
+      }
       if (payload.target?.kind === 'drum_pad') {
         const dt = deviceTrackByRef(payload.track);
         if (!dt) return reject('невідомий трек');
@@ -1687,6 +1713,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const start = Number(rest[2]);
       if (!Number.isFinite(start) || start < 0) return console.log('некоректна позиція');
       arrOf(t).push({ id: newId(), start_time: start, length: clip.length, name: clip.name, color: clip.color,
+        kind: clip.kind, file_path: clip.file_path,
         notes: (clip.notes || []).map((n) => ({ ...n })) });
       arrOf(t).sort((a, b) => a.start_time - b.start_time);
       onArrangement(false);

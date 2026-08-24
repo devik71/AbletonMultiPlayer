@@ -1112,10 +1112,34 @@ try {
     }
   });
 
-  await check('журнал: 84 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('семпл у лінійці їде як семпл, а не як порожня структура', async () => {
+    // Audio-кліп в Arrangement партнер не створить із нічого -- зате
+    // завантажить той самий файл. Тому структурної події тут немає взагалі:
+    // ArrangementClipCreate із is_midi:false приймальний бік чесно відхилив би.
+    const dropped = l2.out.length;
+    l1.stdin.write('dropsample 2 6 Samples/kick.wav\n');
+    await waitFor(l2, /<- #\d+ SampleLoad .*"kind":"slot"/, 8000, dropped);
+
+    const from = l2.out.length;
+    l1.stdin.write('arr 2 6 32\n');
+    await waitFor(l2, /<- #\d+ SampleLoad .*"kind":"arrangement".*"start_time":32/, 8000, from);
+    const seen = l2.out.slice(from);
+    if (/ArrangementClipCreate/.test(seen)) {
+      throw new Error('audio-кліп полетів структурною подією, яку партнер відхилить');
+    }
+    if (/SampleLoad ВІДХИЛЕНО/.test(seen)) throw new Error('партнер відхилив семпл у лінійці');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    const state = l2.out.slice(shown);
+    if (!/"start_time": 32/.test(state)) throw new Error('кліпа на 32-й долі в партнера немає');
+  });
+
+  await check('журнал: 86 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 84) throw new Error(`очікував 84 події, у журналі ${lines.length}`);
+    if (lines.length !== 86) throw new Error(`очікував 86 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

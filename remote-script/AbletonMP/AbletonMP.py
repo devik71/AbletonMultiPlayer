@@ -2864,6 +2864,9 @@ class AbletonMP(ControlSurface):
         if target.get("kind") == "drum_pad":
             self._apply_sample_to_pad(payload, target, item, gseq)
             return True
+        if target.get("kind") == "arrangement":
+            self._apply_sample_to_arrangement(payload, target, item, gseq)
+            return True
         if target.get("kind") != "slot":
             self._warn("gseq %s: невідома ціль для семпла %r"
                        % (gseq, target.get("kind")))
@@ -2911,6 +2914,69 @@ class AbletonMP(ControlSurface):
             self._prime_clip_loops()
             self._suppress_struct = struct_was
         return True
+
+    def _apply_sample_to_arrangement(self, payload, target, item, gseq):
+        """Семпл на лінійку. Той самий тимчасовий слот, що й для MIDI.
+
+        Створити кліп в Arrangement з нічого LOM не вміє: потрібне джерело.
+        Для MIDI ми його ліпимо порожнім, тут -- вантажимо в нього семпл,
+        а далі той самий duplicate_clip_to_arrangement. Шлях перевірений
+        на живому 12.3.5 покроково.
+        """
+        uid = (payload.get("clip") or {}).get("id")
+        start = self._arr_time_from_payload(target)
+        if not uid or start is None:
+            return
+        track, _tref = self._resolve_device_track(payload.get("track") or {})
+        if track is None:
+            return
+        if self._arr_reg.obj_of(uid) is not None:
+            return  # ідемпотентність: кліп уже на місці
+        slot = self._arr_free_slot(track)
+        if slot is None:
+            self._warn("gseq %s: усі слоти Session зайняті, немає де зібрати "
+                       "джерело для Arrangement" % (gseq,))
+            return
+
+        view = getattr(self._doc, "view", None)
+        if view is None:
+            return
+        saved_slot = self._safe_attr(view, "highlighted_clip_slot")
+        saved_track = self._safe_attr(view, "selected_track")
+        struct_was = self._suppress_struct
+        self._suppress_struct = True
+        self._suppress_view = True
+        self._view_applied_at = time.time()
+        try:
+            view.selected_track = track
+            view.highlighted_clip_slot = slot
+            Live.Application.get_application().browser.load_item(item)
+            source = slot.clip if slot.has_clip else None
+            if source is None:
+                self._warn("gseq %s: семпл не створив кліпу-джерела" % (gseq,))
+            else:
+                placed = self._arr_place(track, source, start, gseq)
+                if placed is not None:
+                    self._arr_reg.bind(uid, placed)
+            try:
+                slot.delete_clip()
+            except Exception as e:
+                self._warn("gseq %s: тимчасовий кліп не прибрався: %r" % (gseq, e))
+        except Exception as e:
+            self._warn("gseq %s: семпл не ліг у лінійку: %r" % (gseq, e))
+        finally:
+            try:
+                if saved_slot is not None:
+                    view.highlighted_clip_slot = saved_slot
+                elif saved_track is not None:
+                    view.selected_track = saved_track
+            except Exception:
+                pass
+            self._view_applied_at = time.time()
+            self._suppress_view = False
+            self._mirror["view"] = self._view_signature()
+            self._arr_after_write()
+            self._suppress_struct = struct_was
 
     def _emit_sample_load_slot(self, clip, refs):
         """Audio-кліп у слоті -> SampleLoad, якщо семпл усередині проєкту."""
@@ -4452,10 +4518,26 @@ class AbletonMP(ControlSurface):
             meta["is_midi"] = bool(clip.is_midi_clip)
         except Exception:
             meta["is_midi"] = True
+        if not meta["is_midi"]:
+            # Audio-кліп несе не структуру, а семпл: партнер не може
+            # створити його з нічого, зате може завантажити той самий файл.
+            # ArrangementClipCreate тут був би подією, яку приймальний бік
+            # чесно відхилить -- тож її й не шлемо.
+            path = self._safe_attr(clip, "file_path")
+            rel = self._sample_rel_path(str(path) if path else "")
+            if rel is None:
+                self._warn("audio-кліп в Arrangement із семплом поза текою "
+                           "проєкту не синхронізується; File > Collect All and Save")
+                return
+            self._emit("SampleLoad", {
+                "track": track_ref,
+                "clip": {"id": uid},
+                "target": {"kind": "arrangement", "start_time": start},
+                "sample": {"path": rel, "name": rel.rsplit("/", 1)[-1]},
+            })
+            return
         self._emit("ArrangementClipCreate",
                    {"track": track_ref, "clip": meta, "start_time": start})
-        if not meta["is_midi"]:
-            return
         # Вміст -- окремими подіями: створення має лишатись маленьким, інакше
         # один довгий кліп заблокував би чергу партнера на секунди.
         notes = self._clip_notes(clip)

@@ -930,12 +930,23 @@ Audio-кліпи цими подіями поки не створюються: `
 |---|---|---|
 | `slot` | `scene` в payload | `song.view.highlighted_clip_slot` |
 | `drum_pad` | `device` + `chain_path?` + `note` | `device.view.selected_drum_pad` |
+| `arrangement` | `clip.id` + `target.start_time` | тимчасовий слот + `duplicate_clip_to_arrangement` |
 
 Прицілювання **пряме**: виміряно на 12.3.5, що семпл лягає саме на
 виділений пад, а не на перший вільний. Довідник LOM позначає
 `selected_drum_pad` як `R` -- це неправда, сеттер є (див. LOCAL-NOTES
-скіла). Arrangement лишається за `duplicate_clip_to_arrangement`
-і подією поки не покритий.
+скіла).
+
+Для лінійки джерело збирається в порожньому слоті Session -- той самий
+хід, що для MIDI в `ArrangementClipCreate`, тільки в тимчасовий кліп
+вантажиться семпл. Кліп отримує той самий uuid, тож `ArrangementClipMove`
+і `ArrangementClipDelete` працюють на ньому далі без змін.
+
+**Audio-кліп в Arrangement структурної події не породжує взагалі.**
+`ArrangementClipCreate` з `is_midi: false` приймальний бік чесно
+відхиляє -- створити audio-кліп із нічого не можна. Тож емісія одразу
+шле `SampleLoad`: партнер не відтворює структуру, він завантажує той
+самий файл.
 
 **Чому пади мають окремий шлях, а не гілку в дифі девайсів.** Семпл на
 паді народжує **новий ланцюг** усередині рака, а нові контейнери дифф
