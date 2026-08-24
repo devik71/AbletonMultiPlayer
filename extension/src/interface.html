@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<title>AbletonMP probe</title>
+<style>
+  :root {
+    --bg: #4E4E4E; --panel: #383838; --accent: #FFA500;
+    --text: #FFFFFF; --dim: #A8A8A8; --input: #2C2C2C; --border: #2C2C2C;
+  }
+  body { background: var(--bg); color: var(--text); font: 13px/1.5 sans-serif; margin: 0; padding: 16px; }
+  h1 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
+  label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 12px; }
+  input, select { width: 100%; box-sizing: border-box; background: var(--input); color: var(--text);
+                  border: 1px solid var(--border); padding: 6px 8px; font: inherit; }
+  .row { display: flex; gap: 8px; margin-top: 16px; }
+  button { flex: 1; background: var(--accent); color: #000; border: none; padding: 8px 16px;
+           cursor: pointer; font: inherit; font-weight: 600; }
+  button.secondary { background: var(--panel); color: var(--text); }
+  #origin { margin-top: 14px; padding: 8px; background: var(--panel); font-family: monospace;
+            font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+  <h1>AbletonMP probe</h1>
+
+  <label for="device">Стоковий девайс Live</label>
+  <input id="device" list="devices" value="Reverb" autofocus>
+  <datalist id="devices">
+    <option>Reverb</option><option>Auto Filter</option><option>EQ Eight</option>
+    <option>Compressor</option><option>Delay</option><option>Saturator</option>
+  </datalist>
+
+  <label for="index">Позиція в ланцюгу</label>
+  <input id="index" type="number" value="0" min="0">
+
+  <div id="origin">перевіряю походження…</div>
+
+  <div class="row">
+    <button class="secondary" onclick="closeWith({})">Скасувати</button>
+    <button onclick="apply()">Вставити</button>
+  </div>
+
+<script>
+  function sendMessage(message) {
+    if (window.webkit?.messageHandlers?.live) {
+      window.webkit.messageHandlers.live.postMessage(message);
+    } else if (window.chrome?.webview) {
+      window.chrome.webview.postMessage(message);
+    }
+  }
+
+  function closeWith(result) {
+    sendMessage({ method: "close_and_send", params: [JSON.stringify(result)] });
+  }
+
+  function apply() {
+    closeWith({
+      deviceName: document.getElementById("device").value.trim(),
+      index: Number(document.getElementById("index").value) || 0,
+    });
+  }
+
+  // Головне питання цієї сторінки: звідки її відкрили і чи дістає вона демона.
+  // Якщо origin — http://localhost:19850, значить схема працює і сторінку
+  // можна віддавати з демона, а не інлайнити в розширення.
+  (async () => {
+    const box = document.getElementById("origin");
+    const lines = ["origin: " + (location.origin || "(data: URL)")];
+    lines.push("host bridge: " + (window.chrome?.webview ? "WebView2" :
+                window.webkit?.messageHandlers?.live ? "WebKit" : "НЕМАЄ"));
+    try {
+      const response = await fetch("http://localhost:19850/ping");
+      lines.push("fetch до демона: OK " + JSON.stringify(await response.json()));
+    } catch (error) {
+      lines.push("fetch до демона: ЗАБЛОКОВАНО — " + error);
+    }
+    box.textContent = lines.join("\n");
+  })();
+</script>
+</body>
+</html>

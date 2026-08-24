@@ -22,3 +22,10 @@ daemon/state/
 
 # лог робочої сесії, не частина проєкту
 conversations/
+
+# Extensions SDK: ліцензія Ableton забороняє поширювати SDK або його частини
+# поза власним застосунком, а бета-матеріали є конфіденційними.
+# Кожен розробник качає zip зі свого бета-кабінету сам.
+extensions-sdk-*/
+extension/vendor/*.tgz
+extension/dist/
