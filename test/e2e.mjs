@@ -853,11 +853,11 @@ try {
 
     const from = l2.out.length;
     l1.stdin.write('adddevice 2 Compressor\n');
-    await waitFor(l2, /<- #\d+ DeviceLoad .*"name":"Compressor"/, 8000, from);
+    await waitFor(l2, /<- #\d+ DeviceInsert .*"class_display_name":"Compressor"/, 8000, from);
     const seen = l2.out.slice(from);
-    if (!/"uri":"query:AudioFx#Compressor"/.test(seen)) throw new Error('подія приїхала без uri');
+    if (/"uri"/.test(seen)) throw new Error('DeviceInsert адресує назвою, а не uri з браузера');
     if (!/"index":\d+/.test(seen)) throw new Error('подія приїхала без позиції');
-    if (/DeviceLoad ВІДХИЛЕНО/.test(seen)) throw new Error('партнер не прийняв автоподію');
+    if (/DeviceInsert ВІДХИЛЕНО/.test(seen)) throw new Error('партнер не прийняв автоподію');
 
     // Найтонше місце етапу 2: у партнера теж спрацює _on_devices, і без
     // глушіння він емітив би DeviceLoad назад -- по колу, без кінця.
@@ -891,12 +891,103 @@ try {
 
     const from = l2.out.length;
     l1.stdin.write('adddevice 0 Compressor\n');
-    await waitFor(l2, /<- #\d+ DeviceLoad .*"name":"Compressor"/, 8000, from);
-    if (/DeviceLoad ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер не прийняв подію');
+    await waitFor(l2, /<- #\d+ DeviceInsert .*"class_display_name":"Compressor"/, 8000, from);
+    if (/DeviceInsert ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер не прийняв подію');
 
     await new Promise((r) => setTimeout(r, 600));
     const grew = journal() - before;
-    if (grew !== 2) throw new Error(`очікував TrackCreate + DeviceLoad, отримав ${grew} подій`);
+    if (grew !== 2) throw new Error(`очікував TrackCreate + DeviceInsert, отримав ${grew} подій`);
+  });
+
+  await check('знятий девайс зникає і в партнера', async () => {
+    // До цього видалення події не мало взагалі: діфф бачив зникнення і мовчав.
+    const journal = () => readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean).length;
+
+    // Свіжий трек, щоб індекси не залежали від того, що наклали попередні
+    // перевірки: видалення адресується позицією, і чужий девайс усе змазав би.
+    const made = l2.out.length;
+    l1.stdin.write('addtrack midi 0\n');
+    await waitFor(l2, /<- #\d+ TrackCreate/, 8000, made);
+
+    const put = l2.out.length;
+    l1.stdin.write('adddevice 0 Compressor\n');
+    await waitFor(l2, /<- #\d+ DeviceInsert .*"class_display_name":"Compressor"/, 8000, put);
+
+    const before = journal();
+    const from = l2.out.length;
+    l1.stdin.write('deldevice 0 0\n');
+    await waitFor(l2, /<- #\d+ DeviceDelete .*"class_display_name":"Compressor"/, 8000, from);
+    const seen = l2.out.slice(from);
+    if (/DeviceDelete ВІДХИЛЕНО/.test(seen)) throw new Error('партнер не прийняв видалення');
+    if (!/"name":"Compressor"/.test(seen)) throw new Error('видалення їде без сигнатури для звірки');
+
+    await new Promise((r) => setTimeout(r, 800));
+    const grew = journal() - before;
+    if (grew !== 1) throw new Error(`одне видалення дало ${grew} подій`);
+  });
+
+  await check('переїзд девайса їде одним DeviceMove, а не парою', async () => {
+    const journal = () => readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean).length;
+
+    const put = l2.out.length;
+    l1.stdin.write('adddevice 3 Compressor\n');
+    await waitFor(l2, /<- #\d+ DeviceInsert/, 8000, put);
+
+    // Переїзд між треками -- саме той випадок, який раніше глушив емісію
+    // цілком: "зникло там, зʼявилось тут" виглядало як дві незалежні зміни.
+    const before = journal();
+    const from = l2.out.length;
+    l1.stdin.write('movedevice 3 0 2 0\n');
+    await waitFor(l2, /<- #\d+ DeviceMove /, 8000, from);
+    const seen = l2.out.slice(from);
+    if (/DeviceMove ВІДХИЛЕНО/.test(seen)) throw new Error('партнер не прийняв переїзд');
+    if (!/"from":/.test(seen) || !/"to":/.test(seen)) throw new Error('переїзд без адрес');
+
+    await new Promise((r) => setTimeout(r, 800));
+    const grew = journal() - before;
+    if (grew !== 1) throw new Error(`переїзд дав ${grew} подій замість одного DeviceMove`);
+  });
+
+  await check('режим pair розкладає переїзд на дві події і губить значення', async () => {
+    const journal = () => readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean).length;
+
+    l1.stdin.write('movemode pair\n');
+    await waitFor(l1, /режим переїзду: pair/, 5000);
+
+    const put = l2.out.length;
+    l1.stdin.write('adddevice 2 Compressor\n');
+    await waitFor(l2, /<- #\d+ DeviceInsert/, 8000, put);
+
+    const before = journal();
+    const from = l2.out.length;
+    l1.stdin.write('movedevice 2 0 3 0\n');
+    await waitFor(l2, /<- #\d+ DeviceDelete/, 8000, from);
+    await waitFor(l2, /<- #\d+ DeviceInsert/, 8000, from);
+    if (/DeviceMove/.test(l2.out.slice(from))) throw new Error('у режимі pair не має бути DeviceMove');
+
+    await new Promise((r) => setTimeout(r, 800));
+    const grew = journal() - before;
+    if (grew !== 2) throw new Error(`pair мав дати дві події, дав ${grew}`);
+
+    // Саме тут і живе ціна режиму: девайс у партнера перестворюється з нуля.
+    // На живому 12.3.8 це виміряно як Frequency 0.25 -> 0.899657.
+    l1.stdin.write('movemode move\n');
+    await waitFor(l1, /режим переїзду: move/, 5000);
+  });
+
+  await check('за тим індексом інший девайс -- партнер не стирає його', async () => {
+    // Індекс каже, що поїхало; сигнатура ловить те, що поїхало не те.
+    // Без цієї звірки розбіжність станів стерла б партнеру чужий девайс мовчки.
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const target = { id: state.tracks[2].id };
+
+    const from = l2.out.length;
+    await inject({
+      type: 'DeviceDelete',
+      payload: { track: target, index: 0,
+                 device: { class_name: 'Ozone9', class_display_name: 'Ozone', name: 'Ozone' } },
+    });
+    await waitFor(l2, /DeviceDelete ВІДХИЛЕНО/, 6000, from);
   });
 
   await check('кліп в Arrangement доїжджає з нотами, переїжджає і зникає', async () => {
@@ -956,10 +1047,10 @@ try {
     }
   });
 
-  await check('журнал: 71 подія, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 80 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 71) throw new Error(`очікував 71 подію, у журналі ${lines.length}`);
+    if (lines.length !== 80) throw new Error(`очікував 80 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

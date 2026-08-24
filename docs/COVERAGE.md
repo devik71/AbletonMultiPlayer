@@ -189,3 +189,93 @@ query:CurrentProject#Samples:Imported:DAVE%20NA%20...wav
 проєкту й завантажити звідти -- і Collect All and Save стане
 необовʼязковим. Це коштує розширення файлового сінку: зараз він возить
 лише те, що лежить під `Samples/`.
+
+## Девайси: що виміряно на живому 12.3.8
+
+Знято через `/api/exec` на Live 12.3.8 (і перевірено, що те саме є на
+12.4.5b11). Довідник тут помиляється двічі, тож перелік -- це вимір, а не
+переказ.
+
+### Підписи
+
+```
+Track.insert_device(TTrackPyHandle, std::string DeviceName, int DeviceIndex=-1)
+Track.delete_device(TTrackPyHandle, int)
+Song.move_device(ASong, ADevice device, TPyHandleBase target, int target_position)
+Song.find_device_position(ASong, ADevice device, TPyHandleBase target, int target_position)
+```
+
+Ті самі методи є в `Chain`, і `RackDevice.insert_chain` теж -- на ланцюгах
+рака нічого не міряно, бо в тестовому сеті рака не було.
+
+### Де довідник бреше
+
+| Довідник каже | Насправді |
+|---|---|
+| `insert_device` повертає `None` | повертає **створений Device**: `{class_name: "AutoFilter2", class_display_name: "Auto Filter"}` |
+| `insert_device` доступний «since 12.3» | так, підтверджено на 12.3.8 -- але `DeviceIndex` має дефолт `-1`, чого в довіднику немає |
+
+### Чим адресується девайс
+
+`insert_device` приймає **`class_display_name`**, і тільки його:
+
+| Аргумент | Відповідь |
+|---|---|
+| `"Auto Filter"` | девайс вставлено |
+| `"Eq8"` (`class_name`) | `ValueError: Device Eq8 not found.` |
+| `"EQ Eight"` | `ValueError: Device EQ Eight **not available**.` |
+| `"Neve 1073"` | `ValueError: Device Neve 1073 not found.` |
+
+Різниця між `not found` і `not available` -- не косметична. Перше означає,
+що назви інсталяція не знає взагалі. Друге -- що Live назву знає, але девайс
+недоступний у цій редакції чи бібліотеці. Друге лікується докупкою, перше ні,
+і партнеру треба казати різне.
+
+### Переїзд зберігає девайс живим, пара -- ні
+
+`Auto Filter` із `Frequency = 0.25`, трек `[Auto Filter, Reverb]`:
+
+| Дія | Порядок після | `Frequency` |
+|---|---|---|
+| `song.move_device(dev, track, 2)` | `[Reverb, Auto Filter]` | **0.25** |
+| `delete_device(0)` + `insert_device("Auto Filter", 1)` | `[Reverb, Auto Filter]` | **0.899657** (дефолт) |
+
+Між треками -- те саме: девайс приїхав на сусідній трек зі своєю `0.25`.
+`move_device` повертає новий індекс.
+
+### Дві межі move_device
+
+```
+позиція 99                    -> RuntimeError("Couldn't move device. target_index out of range.")
+MIDI-девайс в audio-трек      -> RuntimeError("Couldn't move device.")
+```
+
+**Індекс не клампиться.** Завелика позиція -- помилка, а не «покладу в
+кінець», і девайс лишається на місці. Приймальний бік клампить сам: розбіжність
+станів імовірніша за помилку відправника, і втрачати подію через це не варто.
+
+Несумісний девайс не проходить і нічого не псує: `Arpeggiator` лишився на
+своєму треку, audio-трек не змінився. Тобто відмова чесна, а не половинчаста.
+
+### Ланцюги рака
+
+Виміряно окремо, бо в першому підході рака в сеті не було.
+
+```
+RackDevice.insert_chain(TRackDevicePyHandle, int Index=-1)
+Chain.insert_device(TChainPyHandle, std::string DeviceName, int DeviceIndex=-1)
+Chain.delete_device(TChainPyHandle, int)
+```
+
+`insert_device("Audio Effect Rack")` повертає `RackDevice`
+(`class_name: AudioEffectGroupDevice`). Свіжий рак приходить **без ланцюгів** --
+`insert_chain()` без аргументів додає перший. Далі `chain.insert_device("Auto
+Filter")` кладе девайс усередину, і його параметри адресуються звичайним
+шляхом `devices -> chains -> devices -> parameters`.
+
+**`move_device` переносить девайс через межу контейнера.** Auto Filter із
+`Frequency = 0.33` усередині ланцюга переїхав на сам трек і приїхав із тією ж
+`0.33`; метод повернув новий індекс. Тобто `chain_path` у наших подіях покриває
+не лише адресацію всередині рака, а й переїзди рак -> трек і назад, і значення
+при цьому не губляться -- на відміну від пари delete+insert, яка тут втратила б
+їх так само, як на верхньому рівні.

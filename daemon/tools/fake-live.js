@@ -310,7 +310,8 @@ const sendHello = () =>
     events: arg('events',
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
-      'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad').split(','),
+      'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
+      'DeviceInsert,DeviceDelete,DeviceMove').split(','),
   });
 
 function emit(type, payload) {
@@ -760,7 +761,34 @@ const deviceBrowserRef = (device) => {
 
 // Разом із name: інакше пресет не відрізнити від голого девайса поруч,
 // і вставку зарахувало б сусідові.
-const treeSig = (d) => `${deviceSignature(d)} ${deviceName(d)}`;
+// Формат -- JSON трійки, а не склеєний рядок: DeviceDelete і DeviceMove несуть
+// сигнатуру девайса, якого вже немає, а дістати її можна лише зі знімка.
+const treeSig = (d) => JSON.stringify([d.class_name, d.class_display_name, deviceName(d)]);
+const sigPayload = (sig) => {
+  const [class_name, class_display_name, name] = JSON.parse(sig);
+  return { class_name, class_display_name, name };
+};
+
+const containerByPath = (trackRef, chainPath) => {
+  const t = deviceTrackByRef(trackRef);
+  if (!t) return null;
+  let container = t;
+  for (const cref of chainPath || []) {
+    container = chainInContainer(container, cref?.id);
+    if (!container) return null;
+  }
+  return container;
+};
+
+// Індекс каже, що поїхало; сигнатура ловить те, що поїхало не те. Без неї
+// розбіжність станів стерла б партнеру чужий девайс мовчки.
+const deviceMatches = (device, ref) => {
+  if (!ref) return true;
+  if (ref.class_name && ref.class_name !== device.class_name) return false;
+  if (ref.class_display_name && ref.class_display_name !== device.class_display_name) return false;
+  if (ref.name !== undefined && deviceName(device) !== ref.name) return false;
+  return true;
+};
 
 const deviceTree = () => {
   const tree = new Map();
@@ -783,32 +811,85 @@ const primeDevices = () => {
   deviceTreeSnapshot = new Map([...deviceTree()].map(([k, v]) => [k, v.sigs]));
 };
 
+// У bridge це змінна оточення: там режим -- рішення розгортання. Тут ще й
+// команда, бо інакше перевірка другого режиму коштувала б окремої сесії
+// з релеєм, демоном і двома емуляторами заради одного прапорця.
+let deviceMoveMode = (process.env.ABLETONMP_DEVICE_MOVE || 'move').toLowerCase();
+
+const singleChangeSpot = (short, long_) => {
+  for (let i = 0; i < long_.length; i += 1) {
+    if (short.every((s, j) => s === long_[j < i ? j : j + 1])) return i;
+  }
+  return -1;
+};
+
+const withChain = (entry, extra) => (entry.chainPath.length
+  ? { ...extra, chain_path: entry.chainPath } : extra);
+
+// Голизна потрібна лише вставці: insert_device уміє тільки стокову назву,
+// тож пресет приїхав би партнеру дефолтом. Видалення й переїзд працюють
+// за індексом, тому їм байдуже.
+const emitDeviceInsert = ({ entry, spot, sig }) => {
+  const device = entry.container.devices[spot];
+  if (!device || !deviceIsBare(device)) return;
+  emit('DeviceInsert', withChain(entry, {
+    track: entry.ref, index: spot,
+    device: { class_display_name: JSON.parse(sig)[1] },
+  }));
+};
+
+const emitDeviceDelete = ({ entry, spot, sig }) => {
+  emit('DeviceDelete', withChain(entry, {
+    track: entry.ref, index: spot, device: sigPayload(sig),
+  }));
+};
+
+const emitDeviceMove = (gone, appeared) => {
+  if (deviceMoveMode === 'pair') {
+    // Пара коштує партнеру значень параметрів. А якщо девайс не голий,
+    // вставка неможлива, і саме лише видалення знищило б його без заміни.
+    const device = appeared.entry.container.devices[appeared.spot];
+    if (!device || !deviceIsBare(device)) return;
+    emitDeviceDelete(gone);
+    emitDeviceInsert(appeared);
+    return;
+  }
+  emit('DeviceMove', {
+    from: withChain(gone.entry, { track: gone.entry.ref, index: gone.spot }),
+    to: withChain(appeared.entry, { track: appeared.entry.ref, index: appeared.spot }),
+    device: sigPayload(gone.sig),
+  });
+};
+
+// Дзеркало _diff_devices. Одна поява -> Insert, одне зникнення -> Delete,
+// зникнення й поява тієї самої сигнатури -> переїзд. Складніше -- мовчимо.
 const diffDevices = () => {
   if (!deviceTreeSnapshot.size) return;
   const current = deviceTree();
   const added = [];
+  const removed = [];
   for (const [key, entry] of current) {
     const was = deviceTreeSnapshot.get(key);
     if (!was) continue;                       // новий контейнер: копія треку
     const now = entry.sigs;
     if (now.length === was.length && now.every((s, i) => s === was[i])) continue;
-    // Будь-що складніше за одну вставку глушить емісію: перенесення девайса
-    // виглядає як «зникло там, зʼявилось тут», і партнер дістав би дубль.
-    if (now.length !== was.length + 1) return;
-    let spot = -1;
-    for (let i = 0; i < now.length; i += 1) {
-      if (was.every((s, j) => s === now[j < i ? j : j + 1])) { spot = i; break; }
-    }
-    if (spot < 0) return;
-    added.push({ entry, spot });
+    if (now.length === was.length + 1) {
+      const spot = singleChangeSpot(was, now);
+      if (spot < 0) return;
+      added.push({ entry, spot, sig: now[spot] });
+    } else if (now.length + 1 === was.length) {
+      const spot = singleChangeSpot(now, was);
+      if (spot < 0) return;
+      removed.push({ entry, spot, sig: was[spot] });
+    } else return;
   }
-  if (added.length !== 1) return;
-  const { entry, spot } = added[0];
-  const item = deviceBrowserRef(entry.container.devices[spot]);
-  if (!item) return;
-  const payload = { track: entry.ref, item, index: spot };
-  if (entry.chainPath.length) payload.chain_path = entry.chainPath;
-  emit('DeviceLoad', payload);
+  if (added.length === 1 && removed.length === 1 && added[0].sig === removed[0].sig) {
+    emitDeviceMove(removed[0], added[0]);
+  } else if (added.length === 1 && removed.length === 0) {
+    emitDeviceInsert(added[0]);
+  } else if (removed.length === 1 && added.length === 0) {
+    emitDeviceDelete(removed[0]);
+  }
 };
 
 // Дзеркало _on_devices. suppressStruct -- те саме глушіння, що в bridge:
@@ -1043,6 +1124,47 @@ function apply(type, payload, gseq) {
       t.clips[s] = null;
       break;
     }
+    case 'DeviceInsert': {
+      const container = containerByPath(payload.track, payload.chain_path);
+      if (!container) return reject('невідомий трек або ланцюг');
+      const wanted = String(payload.device?.class_display_name || '');
+      const matches = browserNamed().get(wanted.toLowerCase()) || [];
+      if (matches.length !== 1) return reject(`немає девайса ${wanted}`);
+      const item = matches[0].item;
+      const at = Number.isInteger(payload.index) ? payload.index : container.devices.length;
+      container.devices.splice(Math.max(0, Math.min(at, container.devices.length)), 0, {
+        class_name: item.class_name,
+        class_display_name: item.name,
+        parameters: [fakeParam('Device On', 1, true)],
+      });
+      refreshChainIds();
+      break;
+    }
+    case 'DeviceDelete': {
+      const container = containerByPath(payload.track, payload.chain_path);
+      if (!container) return reject('невідомий трек або ланцюг');
+      const device = container.devices[payload.index];
+      if (!device) return reject(`девайса за індексом ${payload.index} немає`);
+      if (!deviceMatches(device, payload.device)) return reject('за індексом інший девайс');
+      container.devices.splice(payload.index, 1);
+      refreshChainIds();
+      break;
+    }
+    case 'DeviceMove': {
+      const src = containerByPath(payload.from?.track, payload.from?.chain_path);
+      const dst = containerByPath(payload.to?.track, payload.to?.chain_path);
+      if (!src || !dst) return reject('невідомий трек або ланцюг');
+      const device = src.devices[payload.from?.index];
+      if (!device) return reject(`девайса за індексом ${payload.from?.index} немає`);
+      if (!deviceMatches(device, payload.device)) return reject('за індексом інший девайс');
+      src.devices.splice(payload.from.index, 1);
+      // Live не клампить сам (виміряно на 12.3.8), ми клампимо: розбіжність
+      // станів імовірніша за помилку відправника, і втрачати подію не варто.
+      const at = Math.max(0, Math.min(Number(payload.to?.index) || 0, dst.devices.length));
+      dst.devices.splice(at, 0, device);
+      refreshChainIds();
+      break;
+    }
     case 'DeviceLoad': {
       const item = browserItem(payload.item);
       if (!item) return reject(`немає девайса ${payload.item?.name || payload.item?.uri}`);
@@ -1140,7 +1262,8 @@ function apply(type, payload, gseq) {
   }
   // Дзеркало _on_devices після структурної зміни. Глушіння увімкнене:
   // власне застосування не має полетіти назад автоемісією.
-  if (['TrackCreate', 'TrackDelete', 'TrackDuplicate', 'DeviceLoad'].includes(type)) onDevices(true);
+  if (['TrackCreate', 'TrackDelete', 'TrackDuplicate', 'DeviceLoad',
+    'DeviceInsert', 'DeviceDelete', 'DeviceMove'].includes(type)) onDevices(true);
   if (type.startsWith('Arrangement')) onArrangement(true);
   console.log(`<- #${gseq} ${type} ${JSON.stringify(payload)}`);
 }
@@ -1544,6 +1667,39 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       refreshChainIds();
       onDevices(false);
       console.log(`поклав ${deviceName(device)} на ${t.name}`);
+      break;
+    }
+    case 'movemode': {
+      const wanted = String(rest[0] || '').toLowerCase();
+      if (wanted !== 'move' && wanted !== 'pair') return console.log('режим: move або pair');
+      deviceMoveMode = wanted;
+      console.log(`режим переїзду: ${deviceMoveMode}`);
+      break;
+    }
+    case 'deldevice': {
+      const t = deviceTrackFromArg(rest[0]);
+      if (!t) return console.log('немає такого треку');
+      const at = Number(rest[1]);
+      if (!t.devices[at]) return console.log('немає девайса за цим індексом');
+      const [gone] = t.devices.splice(at, 1);
+      refreshChainIds();
+      onDevices(false);
+      console.log(`зняв ${deviceName(gone)} з ${t.name}`);
+      break;
+    }
+    case 'movedevice': {
+      const from = deviceTrackFromArg(rest[0]);
+      const to = deviceTrackFromArg(rest[2]);
+      if (!from || !to) return console.log('немає такого треку');
+      const at = Number(rest[1]);
+      const device = from.devices[at];
+      if (!device) return console.log('немає девайса за цим індексом');
+      from.devices.splice(at, 1);
+      const target = Math.max(0, Math.min(Number(rest[3]) || 0, to.devices.length));
+      to.devices.splice(target, 0, device);
+      refreshChainIds();
+      onDevices(false);
+      console.log(`переніс ${deviceName(device)} на ${to.name}[${target}]`);
       break;
     }
     case 'load': {

@@ -46,9 +46,17 @@ APPLY_TYPES = [
     "MixerSet", "TrackToggle", "DeviceParamSet", "ObjectMetaSet",
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
     "DeviceLoad",
+    "DeviceInsert", "DeviceDelete", "DeviceMove",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
+
+# Як емітити перенесення девайса. "move" -- один DeviceMove через
+# song.move_device: девайс переїжджає живим, зі своїми значеннями. "pair" --
+# DeviceDelete + DeviceInsert: коду менше, але в партнера девайс перестворюється
+# з дефолтів. Виміряно на живому 12.4.5b11: Frequency 0.25 -> 0.899657.
+# Змінна існує, щоб різницю можна було переміряти, а не доводити.
+DEVICE_MOVE_MODE = (os.environ.get("ABLETONMP_DEVICE_MOVE") or "move").strip().lower()
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
@@ -2402,6 +2410,16 @@ class AbletonMP(ControlSurface):
             # і рухає виділення, а під запис виділений трек чіпати не можна.
             self._queue_device_load(payload, gseq)
 
+        elif etype in ("DeviceInsert", "DeviceMove"):
+            # insert_device виділення не рухає, тож guard на запис тут не потрібен.
+            # Черга лишається: завантаження важкого інструмента однаково блокує
+            # Live, і залп із журналу підвісив би його так само, як залп load_item.
+            self._queue_device_struct(etype, payload, gseq)
+
+        elif etype == "DeviceDelete":
+            # Видалення дешеве й миттєве -- у чергу його ставити нема за чим.
+            self._safe(self._apply_device_delete, payload, gseq)
+
         elif etype == "ArrangementClipCreate":
             self._apply_arr_create(payload, gseq)
 
@@ -4433,46 +4451,82 @@ class AbletonMP(ControlSurface):
             walk(track, [], 0)
         return tree
 
-    def _diff_devices(self):
-        """Рівно один доданий девайс -> DeviceLoad.
+    @staticmethod
+    def _single_change_spot(short, long_):
+        """Індекс, за яким long_ відрізняється від short рівно одним елементом.
 
-        Обережність тут дорожча за повноту. Видалення девайса події не має
-        взагалі, тож перенесення девайса між контейнерами виглядає як пара
-        "зникло там, зʼявилось тут"; якби ми емітили саму лише появу, партнер
-        дістав би дубль. Тому будь-яка інша зміна в тому ж діффі глушить
-        емісію цілком -- краще дірка, яку закриє знімок.
+        None -- відмінність не одинична, тобто в контейнері сталось щось
+        складніше за одну вставку чи одне видалення.
+        """
+        for i in range(len(long_)):
+            if short[:i] == long_[:i] and short[i:] == long_[i + 1:]:
+                return i
+        return None
+
+    def _diff_devices(self):
+        """Структурна зміна дерева девайсів -> DeviceInsert/Delete/Move.
+
+        Обережність тут і далі дорожча за повноту, але межа зсунулась. Раніше
+        видалення події не мало взагалі, тож переїзд девайса виглядав як пара
+        "зникло там, зʼявилось тут" і глушив емісію цілком. Тепер обидві
+        половини цієї пари мають імена, і пара зі збіжною сигнатурою
+        розпізнається як переїзд.
+
+        Що досі глушить емісію: будь-яка зміна складніша за одну вставку, одне
+        видалення або один переїзд. Дві появи, перестановка трьох девайсів,
+        видалення разом зі вставкою іншого -- усе це лишається дірою, яку
+        закриє знімок. Мовчки покладений не той девайс гірший за діру.
         """
         previous = self._mirror.get("device_tree")
         if not previous:
             return
         current = self._device_tree()
         added = []
+        removed = []
         for key, now in current.items():
             was = previous.get(key)
             if was is None:
                 continue          # новий контейнер: копія треку або свіжий ланцюг
             if now == was:
                 continue
-            if len(now) != len(was) + 1:
+            if len(now) == len(was) + 1:
+                spot = self._single_change_spot(was, now)
+                if spot is None:
+                    return
+                added.append((key, spot, now[spot]))
+            elif len(now) + 1 == len(was):
+                spot = self._single_change_spot(now, was)
+                if spot is None:
+                    return
+                removed.append((key, spot, was[spot]))
+            else:
                 return
-            spot = None
-            for i in range(len(now)):
-                if was[:i] == now[:i] and was[i:] == now[i + 1:]:
-                    spot = i
-                    break
-            if spot is None:
-                return
-            added.append((key, spot))
-        if len(added) != 1:
-            return
-        (base, chain_ids), spot = added[0]
 
-        target = None
+        if len(added) == 1 and len(removed) == 1 and added[0][2] == removed[0][2]:
+            self._emit_device_move(removed[0], added[0])
+        elif len(added) == 1 and not removed:
+            self._emit_device_insert(added[0])
+        elif len(removed) == 1 and not added:
+            self._emit_device_delete(removed[0])
+
+    def _key_address(self, key):
+        """Ключ дерева -> адреса в події. None, якщо трек більше не спільний."""
+        (tid, kind), chain_ids = key
+        if not tid:
+            return None, None
+        if tid in self._unshared_tracks:
+            return None, None
+        track_ref = {"id": tid}
+        if kind:
+            track_ref["kind"] = kind
+        return track_ref, [{"id": cid} for cid in chain_ids]
+
+    def _live_device_at(self, key, spot):
+        """Живий обʼєкт девайса за ключем дерева -- потрібен там, де сигнатури мало."""
+        (tid, kind), chain_ids = key
         for track in self._iter_device_tracks():
             track_ref = self._device_track_ref(track)
-            if not track_ref:
-                continue
-            if (track_ref.get("id"), track_ref.get("kind")) != base:
+            if not track_ref or (track_ref.get("id"), track_ref.get("kind")) != (tid, kind):
                 continue
             seen = {}
             for _container, device, chain_path in self._iter_track_devices(track):
@@ -4480,22 +4534,77 @@ class AbletonMP(ControlSurface):
                 idx = seen.get(ckey, 0)
                 seen[ckey] = idx + 1
                 if ckey == chain_ids and idx == spot:
-                    target = (track_ref, chain_path, device)
-                    break
-            break
-        if target is None:
+                    return device
+            return None
+        return None
+
+    @staticmethod
+    def _sig_payload(sig):
+        class_name, display_name, name = sig
+        return {"class_name": class_name, "class_display_name": display_name,
+                "name": name}
+
+    def _emit_device_insert(self, entry):
+        key, spot, sig = entry
+        track_ref, chain_path = self._key_address(key)
+        if track_ref is None:
             return
-        track_ref, chain_path, device = target
-        item = self._device_browser_ref(device)
-        if item is None:
+        # Фільтр на голий девайс лишається: insert_device уміє лише стокову
+        # назву, тож пресет Compressor/Warm Bus приїхав би партнеру дефолтом.
+        device = self._live_device_at(key, spot)
+        if device is None or not self._device_is_bare(device):
             return
-        payload = {"track": track_ref, "item": item, "index": spot}
+        payload = {"track": track_ref, "index": spot,
+                   "device": {"class_display_name": sig[1]}}
         if chain_path:
             payload["chain_path"] = chain_path
-        self._emit("DeviceLoad", payload)
+        self._emit("DeviceInsert", payload)
+
+    def _emit_device_delete(self, entry):
+        key, spot, sig = entry
+        track_ref, chain_path = self._key_address(key)
+        if track_ref is None:
+            return
+        # На відміну від вставки, тут голизна не потрібна: видалити за індексом
+        # можна що завгодно, і пресет теж. Сигнатура їде для звірки на прийомі.
+        payload = {"track": track_ref, "index": spot,
+                   "device": self._sig_payload(sig)}
+        if chain_path:
+            payload["chain_path"] = chain_path
+        self._emit("DeviceDelete", payload)
+
+    def _emit_device_move(self, gone, appeared):
+        if DEVICE_MOVE_MODE == "pair":
+            # Пара коштує партнеру значень параметрів: девайс перестворюється
+            # з дефолтів (виміряно на 12.3.8 -- Frequency 0.25 -> 0.899657).
+            # І якщо девайс не голий, вставка неможлива взагалі, тож саме лише
+            # видалення знищило б партнеру девайс без заміни. Тоді мовчимо.
+            device = self._live_device_at(appeared[0], appeared[1])
+            if device is None or not self._device_is_bare(device):
+                return
+            self._emit_device_delete(gone)
+            self._emit_device_insert(appeared)
+            return
+
+        src_ref, src_chain = self._key_address(gone[0])
+        dst_ref, dst_chain = self._key_address(appeared[0])
+        if src_ref is None or dst_ref is None:
+            return
+        source = {"track": src_ref, "index": gone[1]}
+        if src_chain:
+            source["chain_path"] = src_chain
+        target = {"track": dst_ref, "index": appeared[1]}
+        if dst_chain:
+            target["chain_path"] = dst_chain
+        self._emit("DeviceMove", {"from": source, "to": target,
+                                  "device": self._sig_payload(gone[2])})
 
     def _queue_device_load(self, payload, gseq):
         self._load_queue.append({"payload": payload, "gseq": gseq, "since": time.time()})
+
+    def _queue_device_struct(self, etype, payload, gseq):
+        self._load_queue.append({"etype": etype, "payload": payload,
+                                 "gseq": gseq, "since": time.time()})
 
     def _flush_device_loads(self):
         """Один девайс за тік: завантаження важкого інструмента блокує на
@@ -4503,7 +4612,10 @@ class AbletonMP(ControlSurface):
         if not self._load_queue:
             return
         entry = self._load_queue[0]
-        if self._recording_guard():
+        etype = entry.get("etype", "DeviceLoad")
+        # Чекає на зупинку транспорту лише DeviceLoad: тільки він рухає виділення.
+        # insert_device і move_device беруть індекс явно, тож під запис безпечні.
+        if etype == "DeviceLoad" and self._recording_guard():
             if time.time() - entry["since"] < LOAD_QUEUE_MAX_SEC:
                 return  # чекаємо, доки транспорт зупиниться
             self._load_queue.pop(0)
@@ -4511,7 +4623,180 @@ class AbletonMP(ControlSurface):
                        % (entry["gseq"],))
             return
         self._load_queue.pop(0)
-        self._safe(self._load_device, entry["payload"], entry["gseq"])
+        handler = {"DeviceLoad": self._load_device,
+                   "DeviceInsert": self._apply_device_insert,
+                   "DeviceMove": self._apply_device_move}.get(etype)
+        if handler is not None:
+            self._safe(handler, entry["payload"], entry["gseq"])
+
+    def _resolve_device_container(self, ref, chain_path, gseq):
+        """Трек + ланцюг -> контейнер, у якому живуть девайси.
+
+        Той самий шлях, що в _load_device, але окремо: три структурні події
+        адресують контейнер однаково, і розбіжність тут коштувала б девайса,
+        покладеного не туди.
+        """
+        track, _tref = self._resolve_device_track(ref or {})
+        if track is None:
+            return None, None
+        container = track
+        for chain_ref in (chain_path or []):
+            chain = self._chains_reg.obj_of((chain_ref or {}).get("id"))
+            if chain is None or not self._chain_belongs_to(container, chain):
+                self._warn("gseq %s: ланцюг не резолвиться" % (gseq,))
+                return None, None
+            container = chain
+        return container, track
+
+    def _device_at(self, container, index):
+        try:
+            devices = list(container.devices)
+        except Exception:
+            return None
+        if not isinstance(index, int) or index < 0 or index >= len(devices):
+            return None
+        return devices[index]
+
+    def _device_matches(self, device, ref):
+        """Звірка сигнатури перед руйнівною дією.
+
+        Індекс каже, що поїхало; сигнатура ловить те, що поїхало не те. Без неї
+        розбіжність станів стерла б партнеру чужий девайс мовчки.
+        """
+        if not isinstance(ref, dict):
+            return True
+        signature = self._device_signature(device)
+        if signature is None:
+            return False
+        class_name, display_name = signature
+        if ref.get("class_name") and ref["class_name"] != class_name:
+            return False
+        if ref.get("class_display_name") and ref["class_display_name"] != display_name:
+            return False
+        name = ref.get("name")
+        if name is not None:
+            try:
+                if str(device.name) != name:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _struct_guard(self):
+        """Контекст, у якому власна структурна правка не летить назад автоемісією."""
+        return self._suppress_struct
+
+    def _after_struct_change(self):
+        self._rewire_tracks()
+        self._refresh_chains()
+        self._persist_registry()
+        self._prime_devices()
+
+    def _apply_device_insert(self, payload, gseq):
+        container, _track = self._resolve_device_container(
+            payload.get("track"), payload.get("chain_path"), gseq)
+        if container is None:
+            return
+        ref = payload.get("device") or {}
+        name = ref.get("class_display_name")
+        if not name:
+            self._warn("gseq %s: DeviceInsert без class_display_name" % (gseq,))
+            return
+        index = payload.get("index")
+        if not isinstance(index, int) or index < 0:
+            index = -1
+        was = self._suppress_struct
+        self._suppress_struct = True
+        try:
+            container.insert_device(str(name), index)
+        except Exception as e:
+            self._warn("gseq %s: %s" % (gseq, self._insert_failure(name, e)))
+        finally:
+            self._after_struct_change()
+            self._suppress_struct = was
+
+    @staticmethod
+    def _insert_failure(name, error):
+        """Дві відмови insert_device означають різне, і партнеру треба різне.
+
+        "not available" -- назву Live знає, але девайса немає в цій редакції чи
+        бібліотеці. "not found" -- назви не знає взагалі: стороннє, пресет,
+        друкарська помилка. Перше лікується докупкою, друге -- ні.
+        """
+        text = str(error)
+        if "not available" in text:
+            return ("девайс %r є в Live, але недоступний у твоїй редакції "
+                    "чи бібліотеці" % (name,))
+        if "not found" in text:
+            return "девайс %r твоя інсталяція не знає" % (name,)
+        return "девайс %r не вставився: %s" % (name, text)
+
+    def _apply_device_delete(self, payload, gseq):
+        container, _track = self._resolve_device_container(
+            payload.get("track"), payload.get("chain_path"), gseq)
+        if container is None:
+            return
+        index = payload.get("index")
+        device = self._device_at(container, index)
+        if device is None:
+            self._warn("gseq %s: девайса за індексом %r немає" % (gseq, index))
+            return
+        if not self._device_matches(device, payload.get("device")):
+            self._warn("gseq %s: за індексом %r стоїть інший девайс -- не видаляю"
+                       % (gseq, index))
+            return
+        was = self._suppress_struct
+        self._suppress_struct = True
+        try:
+            container.delete_device(index)
+        except Exception as e:
+            self._warn("gseq %s: девайс не видалився: %r" % (gseq, e))
+        finally:
+            self._after_struct_change()
+            self._suppress_struct = was
+
+    def _apply_device_move(self, payload, gseq):
+        source = payload.get("from") or {}
+        target = payload.get("to") or {}
+        src_container, _src_track = self._resolve_device_container(
+            source.get("track"), source.get("chain_path"), gseq)
+        if src_container is None:
+            return
+        dst_container, _dst_track = self._resolve_device_container(
+            target.get("track"), target.get("chain_path"), gseq)
+        if dst_container is None:
+            return
+        device = self._device_at(src_container, source.get("index"))
+        if device is None:
+            self._warn("gseq %s: девайса для переїзду за індексом %r немає"
+                       % (gseq, source.get("index")))
+            return
+        if not self._device_matches(device, payload.get("device")):
+            self._warn("gseq %s: за індексом %r стоїть інший девайс -- не переношу"
+                       % (gseq, source.get("index")))
+            return
+        index = target.get("index")
+        if not isinstance(index, int) or index < 0:
+            index = 0
+        # Live не клампить сам: завелика позиція дає RuntimeError
+        # "target_index out of range" (виміряно на 12.3.8), і девайс лишається
+        # на місці. Розбіжність станів тут імовірніша за помилку відправника,
+        # тож кладемо в кінець, а не втрачаємо подію.
+        try:
+            ceiling = len(list(dst_container.devices))
+        except Exception:
+            ceiling = index
+        if index > ceiling:
+            index = ceiling
+        was = self._suppress_struct
+        self._suppress_struct = True
+        try:
+            self._doc.move_device(device, dst_container, index)
+        except Exception as e:
+            self._warn("gseq %s: девайс не переїхав: %r" % (gseq, e))
+        finally:
+            self._after_struct_change()
+            self._suppress_struct = was
 
     def _load_device(self, payload, gseq):
         ref = payload.get("item") or {}

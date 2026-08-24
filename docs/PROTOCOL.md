@@ -687,7 +687,10 @@ endpoint читає Max for Live device `AbletonMP Multiplayer Status.maxpat`; �
 | `DeviceParamSet` | `{track: {id, kind?: "return"|"master"}, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
 | `TrackDuplicate` | `{source: {id}, track: {id, name, color?}, idx, kind}` | `song.duplicate_track(i)` -- копія з девайсами й семплами |
 | `ClipLoopSet` | `{track, scene, looping, loop_start, loop_end, start_marker, end_marker}` | межі й петля кліпу однією подією |
-| `DeviceLoad` | `{track, chain_path?, index?, item: {uri, name, category}}` | `browser.load_item()` у виділений обʼєкт |
+| `DeviceLoad` | `{track, chain_path?, index?, item: {uri, name, category}}` | `browser.load_item()` у виділений обʼєкт (спадщина, нове не емітиться) |
+| `DeviceInsert` | `{track, chain_path?, index, device: {class_display_name}}` | `container.insert_device(name, index)` |
+| `DeviceDelete` | `{track, chain_path?, index, device: {class_name, class_display_name, name}}` | `container.delete_device(index)` |
+| `DeviceMove` | `{from: {track, chain_path?, index}, to: {…}, device: {…}}` | `song.move_device(device, target, index)` |
 | `ClipCreate` | `{track: {id}, scene: {id}, clip: {length, name, color?}}` | `clip_slot.create_clip(length)` |
 | `ClipDelete` | `{track: {id}, scene: {id}}` | `clip_slot.delete_clip()` |
 | `ClipNotesSet` | `{track, scene, clip, region, notes: [...]}` | заміна всіх MIDI-нот у регіоні |
@@ -769,6 +772,66 @@ Compressor, і автоемісія тихо віддала б партнеру 
 Застосування чужого `DeviceLoad` теж викликає `_on_devices`, тож на час
 `load_item` виставляється `_suppress_struct` — без нього подія відбивалась
 би назад по колу.
+
+### Структура девайсів: Insert, Delete, Move
+
+`DeviceLoad` лишається в `APPLY_TYPES` заради старих журналів, але новий код
+його не емітить. Причина не в стилі: LOM 12.3 має `insert_device`, і він
+міняє все, що робило `DeviceLoad` дорогим.
+
+`browser.load_item` кладе девайс у **виділений** обʼєкт -- звідси черга на
+60 секунд, глушіння виду і guard на час запису. `insert_device(name, index)`
+бере індекс явно й виділення не чіпає, тож із трьох нових типів у черзі
+лишаються тільки `DeviceInsert` і `DeviceMove`, і лише щоб залп із журналу
+не підвісив Live завантаженням важких інструментів. `DeviceDelete` іде одразу.
+
+**Адреса девайса -- `class_display_name`.** Не `class_name`: `insert_device`
+на `"Eq8"` відповідає `not found`, на `"EQ Eight"` -- працює. Те саме поле ми
+вже возимо в `DeviceParamSet`, тож нового словника не зʼявилось, а браузер
+із його `uri` і локальними `FileId` більше не потрібен узагалі.
+
+Дві відмови `insert_device` означають різне, і партнер має бачити різницю:
+
+- `not found` -- назви ця інсталяція не знає: стороннє, пресет, помилка;
+- `not available` -- назву Live знає, але девайса немає в **цій редакції чи
+  бібліотеці**. Після того як зʼясувалось, що редакції в учасників можуть
+  відрізнятись, це вже не теоретичний випадок.
+
+**Емісія.** `_diff_devices` порівнює дерево з попереднім знімком і розрізняє
+три випадки: одна поява -> `DeviceInsert`, одне зникнення -> `DeviceDelete`,
+зникнення й поява **тієї самої сигнатури** -> переїзд. Усе складніше й далі
+глушить емісію цілком: дві появи, перестановка трьох девайсів, видалення
+разом зі вставкою іншого. Краще діра, яку закриє знімок.
+
+Фільтр на голий девайс лишився, але тільки для вставки: `insert_device` уміє
+лише стокову назву, тож пресет `Compressor/Warm Bus` приїхав би партнеру
+дефолтом. Видалення й переїзд голизни не потребують -- за індексом
+видаляється й переїжджає що завгодно. Тобто пресет тепер синхронізується
+наполовину: створення ні, зникнення й переїзд так.
+
+**Переїзд: один тип, а не пара.** `DeviceMove` міг би розкластись на
+`DeviceDelete` + `DeviceInsert`, і код був би меншим на один обробник. Ціна
+виміряна на живому 12.3.8: девайс перестворюється з дефолтів.
+
+| | порядок | `Frequency` девайса |
+|---|---|---|
+| `song.move_device` | змінився правильно | **0.25 -- збереглась** |
+| `delete` + `insert` | змінився так само | **0.899657 -- дефолт** |
+
+Те саме при переїзді між треками, де втрата болючіша: девайс уже налаштований
+під конкретну партію. Обидва шляхи лишились у коді під `ABLETONMP_DEVICE_MOVE`
+(`move` за замовчуванням, `pair` -- альтернатива), щоб різницю можна було
+переміряти, а не доводити. У режимі `pair` неголий девайс глушить емісію
+цілком: саме лише видалення знищило б партнеру девайс без заміни.
+
+Перемикач читається по-різному з обох боків навмисно: у bridge це змінна
+оточення (режим -- рішення розгортання), у `fake-live` ще й команда `movemode`,
+бо інакше перевірка другого режиму коштувала б окремої сесії з релеєм, демоном
+і двома емуляторами заради одного прапорця.
+
+`DeviceDelete` і `DeviceMove` несуть повну сигнатуру девайса не для адресації,
+а для **звірки**. Індекс каже, що поїхало; сигнатура ловить те, що поїхало не
+те. Без неї розбіжність станів стерла б партнеру чужий девайс мовчки.
 
 ### Arrangement
 
