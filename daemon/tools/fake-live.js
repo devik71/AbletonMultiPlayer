@@ -326,7 +326,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet').split(','),
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet').split(','),
   });
 
 function emit(type, payload) {
@@ -358,6 +358,22 @@ const sceneTiming = (block) => {
     out.time_signature_denominator = d;
   }
   return out;
+};
+
+// Властивості кліпу поза межами. Частина існує лише в audio -- на MIDI
+// їх просто немає, і це різниця типів, а не помилка.
+const CLIP_PROPS = {
+  gain: (v) => (v >= 0 && v <= 1 ? Number(v) : null),
+  velocity_amount: (v) => (v >= 0 && v <= 1 ? Number(v) : null),
+  pitch_coarse: (v) => (Number.isInteger(v) && v >= -48 && v <= 48 ? v : null),
+  pitch_fine: (v) => (Number.isInteger(v) && v >= -50 && v <= 50 ? v : null),
+  warp_mode: (v) => (Number.isInteger(v) && v >= 0 && v <= 6 ? v : null),
+  launch_mode: (v) => (Number.isInteger(v) && v >= 0 && v <= 4 ? v : null),
+  launch_quantization: (v) => (Number.isInteger(v) && v >= 0 && v <= 13 ? v : null),
+  warping: (v) => Boolean(v),
+  muted: (v) => Boolean(v),
+  legato: (v) => Boolean(v),
+  ram_mode: (v) => Boolean(v),
 };
 
 const snapshot = () => ({
@@ -1040,6 +1056,20 @@ function apply(type, payload, gseq) {
     case 'TransportSet':
       song.playing = !!payload.playing;
       break;
+    case 'ClipPropSet': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      if (!t) return reject('невідомий трек');
+      if (s < 0) return reject('невідома сцена');
+      const check = CLIP_PROPS[payload.prop];
+      if (!check) return reject(`невідома властивість кліпу ${payload.prop}`);
+      const value = check(payload.value);
+      if (value === null) return reject(`некоректне значення ${payload.value} для ${payload.prop}`);
+      const clip = t.clips[s];
+      if (!clip) break;   // tombstone: кліпа немає, подія мовчки не діє
+      clip[payload.prop] = value;
+      break;
+    }
     case 'SceneTimingSet': {
       const scene = song.scenes.find((x) => x.id === payload.scene?.id);
       if (!scene) return reject('невідома сцена');
@@ -1462,6 +1492,25 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       song.playing = false;
       emit('TransportSet', { playing: false });
       break;
+    case 'clipprop': {
+      const t = song.tracks[Number(rest[0]) || 0];
+      const s = Number(rest[1]) || 0;
+      const prop = rest[2];
+      const check = CLIP_PROPS[prop];
+      if (!check) return console.log(`невідома властивість ${prop}`);
+      const clip = t && t.clips[s];
+      if (!clip) return console.log('немає кліпу в цьому слоті');
+      const raw = ['warping', 'muted', 'legato', 'ram_mode'].includes(prop)
+        ? rest[3] === 'true' : Number(rest[3]);
+      const value = check(raw);
+      if (value === null) return console.log(`некоректне значення ${rest[3]}`);
+      clip[prop] = value;
+      emit('ClipPropSet', {
+        track: trackRef(t), scene: sceneRef(song.scenes[s]), prop, value,
+      });
+      console.log(`кліп ${rest[0]}/${s}: ${prop} = ${value}`);
+      break;
+    }
     case 'scenetiming': {
       const scene = song.scenes[Number(rest[0]) || 0];
       if (!scene) return console.log('немає такої сцени');

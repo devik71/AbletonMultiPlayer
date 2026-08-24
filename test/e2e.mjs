@@ -1196,10 +1196,41 @@ try {
     await waitFor(l2, /SceneTimingSet ВІДХИЛЕНО \(некоректний блок/, 6000, bad);
   });
 
-  await check('журнал: 93 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('властивості audio-кліпа доїжджають, сміття -- ні', async () => {
+    // Для аудіо це половина звучання: gain, warp, pitch. Досі ми не возили
+    // з них нічого, тож семпл у партнера грав інакше, ніж в автора.
+    const born = l2.out.length;
+    l1.stdin.write('dropsample 3 1 Samples/kick.wav\n');
+    await waitFor(l2, /<- #\d+ SampleLoad .*"kind":"slot"/, 8000, born);
+
+    const from = l2.out.length;
+    l1.stdin.write('clipprop 3 1 gain 0.42\n');
+    await waitFor(l2, /<- #\d+ ClipPropSet .*"gain".*"value":0\.42/, 8000, from);
+    l1.stdin.write('clipprop 3 1 warping true\n');
+    await waitFor(l2, /<- #\d+ ClipPropSet .*"warping".*"value":true/, 8000, from);
+    l1.stdin.write('clipprop 3 1 pitch_coarse -5\n');
+    await waitFor(l2, /<- #\d+ ClipPropSet .*"pitch_coarse".*"value":-5/, 8000, from);
+    if (/ClipPropSet ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер відхилив властивість');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    const state = l2.out.slice(shown);
+    if (!/"gain": 0\.42/.test(state)) throw new Error('gain у партнера не змінився');
+    if (!/"pitch_coarse": -5/.test(state)) throw new Error('транспонування не доїхало');
+
+    const bad = l2.out.length;
+    await inject({
+      type: 'ClipPropSet',
+      payload: { track: { id: 'deadbeefcafe' }, scene: { id: 's' }, prop: 'gain', value: 99 },
+    });
+    await waitFor(l2, /ClipPropSet ВІДХИЛЕНО \(невідомий трек\)/, 6000, bad);
+  });
+
+  await check('журнал: 98 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 93) throw new Error(`очікував 93 події, у журналі ${lines.length}`);
+    if (lines.length !== 98) throw new Error(`очікував 98 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

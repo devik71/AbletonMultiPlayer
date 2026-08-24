@@ -215,3 +215,20 @@ test('перевизначення сцени згортається в оста
   gseq = 0;
   assert.equal(compactTail([timing('s1', 120), timing('s2', 120)]).dropped, 0);
 });
+
+test('властивість кліпу згортається у своїй адресі, не зачіпаючи сусідні', () => {
+  gseq = 0;
+  const set = (prop, value) => ev('ClipPropSet', {
+    track: { id: 't1' }, scene: { id: 's1' }, prop, value,
+  });
+  const out = compactTail([set('gain', 0.2), set('gain', 0.5), set('gain', 0.9)]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.value, 0.9);
+
+  gseq = 0;
+  // gain не перекриває warp_mode, і кліпи не перекривають один одного
+  assert.equal(compactTail([set('gain', 0.2), set('warp_mode', 3)]).dropped, 0);
+  gseq = 0;
+  const other = ev('ClipPropSet', { track: { id: 't1' }, scene: { id: 's2' }, prop: 'gain', value: 0.2 });
+  assert.equal(compactTail([set('gain', 0.2), other]).dropped, 0);
+});

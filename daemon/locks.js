@@ -16,6 +16,7 @@ const CONTINUOUS = new Set([
   'ArrangementClipMove', 'ArrangementClipNotesSet',
   'SongPropSet',
   'SceneTimingSet',
+  'ClipPropSet',
   'SongPropSet',
 ]);
 
@@ -35,6 +36,16 @@ export function lockTarget(type, payload, registry) {
   const p = payload || {};
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
+
+  if (type === 'ClipPropSet') {
+    // Лок на кліп цілком, а не на властивість: людина крутить один кліп,
+    // і показувати «зайнято» краще про нього, а не про окреме поле.
+    const track = p.track?.id;
+    const scene = p.scene?.id;
+    if (!track || !scene) return null;
+    const names = [trackName(registry, track), sceneName(registry, scene)].filter(Boolean);
+    return { object: `clip:${track}:${scene}`, label: names.join(' / ') || null };
+  }
 
   if (type === 'SceneTimingSet') {
     const scene = p.scene?.id;

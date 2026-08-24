@@ -52,6 +52,8 @@ AbletonOSC — це RPC-поверхня: get/set/listen на властивос
 
 ### Тир 2 — властивості кліпів, яких ми не торкаємось узагалі
 
+> **Закрито `ClipPropSet`**.
+
 `gain`, `pitch_coarse`, `pitch_fine`, `warping`, `warp_mode`, `muted`,
 `launch_mode`, `launch_quantization`, `legato`, `velocity_amount`, `groove`.
 Для audio-кліпів це половина звучання; ми зараз возимо лише межі й ноти.

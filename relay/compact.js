@@ -37,6 +37,10 @@ export function supersedeKey(ev) {
       return 'tempo';
     case 'TransportSet':
       return 'transport';
+    case 'ClipPropSet':
+      // Своя адреса на пару (кліп, властивість): gain тягнуть мишею, тож
+      // серія доїжджає останньою -- але gain не перекриває warp_mode.
+      return `clipprop:${p.track?.id}:${p.scene?.id}:${p.prop}`;
     case 'SceneTimingSet':
       // Увесь блок перевизначень сцени перезаписується цілком, тож серія
       // рухів доїжджає останньою -- як у ClipLoopSet.

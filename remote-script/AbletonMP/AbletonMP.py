@@ -47,7 +47,7 @@ APPLY_TYPES = [
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
     "DeviceLoad",
     "DeviceInsert", "DeviceDelete", "DeviceMove",
-    "SampleLoad", "SongPropSet", "SceneTimingSet",
+    "SampleLoad", "SongPropSet", "SceneTimingSet", "ClipPropSet",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
@@ -77,7 +77,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -107,6 +107,12 @@ REC_SETTLE_SEC = 0.3
 # Loop і маркери йдуть однією подією: Live клампить loop_end відносно
 # loop_start, тож окремі події проходили б через невалідні проміжні стани.
 CLIP_LOOP_PROPS = ("looping", "loop_start", "loop_end", "start_marker", "end_marker")
+# Властивості кліпу, що не входять у межі. Частина існує лише в audio
+# (gain, warping, warp_mode, pitch_*, ram_mode) -- на MIDI-кліпі їх просто
+# немає, і це не помилка, а різниця типів.
+CLIP_PROPS = ("gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode",
+              "ram_mode", "muted", "legato", "velocity_amount",
+              "launch_mode", "launch_quantization")
 
 # Портативні лише стокові девайси першого рівня: дампи браузера з двох машин
 # показали, що їхні uri ідентичні, а вміст адресується локальними FileId.
@@ -164,7 +170,7 @@ class AbletonMP(ControlSurface):
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
-            "scene_timing": {},
+            "scene_timing": {}, "clip_props": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -353,6 +359,9 @@ class AbletonMP(ControlSurface):
                     loop_cb = self._make_clip_loop_cb(track, scene, clip)
                     for prop in CLIP_LOOP_PROPS:
                         self._listen(clip, prop, loop_cb)
+                    for prop in CLIP_PROPS:
+                        self._listen(clip, prop,
+                                     self._make_clip_prop_cb(track, scene, clip, prop))
                     if clip.is_midi_clip:
                         self._listen(clip, "notes", self._make_notes_cb(track, scene, clip))
             except Exception:
@@ -694,6 +703,7 @@ class AbletonMP(ControlSurface):
             self._prime_notes()
             self._prime_metadata()
             self._prime_clip_loops()
+            self._prime_all_clip_props()
             # Набір треків змінився -- разом із ним і набір лінійок, які ми
             # обходимо. Без цього запис про кліп на видаленому треку висів би
             # у мапі до наступної зміни в Arrangement.
@@ -714,6 +724,7 @@ class AbletonMP(ControlSurface):
             self._prime_notes()
             self._prime_metadata()
             self._prime_clip_loops()
+            self._prime_all_clip_props()
             # Набір треків змінився -- разом із ним і набір лінійок, які ми
             # обходимо. Без цього запис про кліп на видаленому треку висів би
             # у мапі до наступної зміни в Arrangement.
@@ -789,8 +800,10 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_all_clip_props()
         self._prime_song_props()
         self._prime_scene_timing()
+        self._prime_all_clip_props()
         self._prime_arrangement()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
@@ -868,8 +881,10 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_all_clip_props()
         self._prime_song_props()
         self._prime_scene_timing()
+        self._prime_all_clip_props()
         self._prime_arrangement()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
@@ -1700,6 +1715,127 @@ class AbletonMP(ControlSurface):
 
     # ------------------------------------------------------------- MIDI clips
 
+    def _clip_prop_value(self, prop, raw):
+        """Нормалізоване значення властивості кліпу, або None.
+
+        Одна перевірка на емісію і на прийом: інакше рано чи пізно
+        розійдуться, і саме приймальний бік запише в LOM те, чого не буває.
+        """
+        try:
+            if prop in ("warping", "muted", "legato", "ram_mode"):
+                return bool(raw)
+            if prop in ("gain", "velocity_amount"):
+                value = round(float(raw), 6)
+                if not math.isfinite(value):
+                    return None
+                return value if 0.0 <= value <= 1.0 else None
+            value = int(raw)
+        except Exception:
+            return None
+        if prop == "pitch_coarse":
+            return value if -48 <= value <= 48 else None
+        if prop == "pitch_fine":
+            return value if -50 <= value <= 50 else None
+        if prop == "warp_mode":
+            return value if 0 <= value <= 6 else None
+        if prop == "launch_mode":
+            return value if 0 <= value <= 4 else None
+        if prop == "launch_quantization":
+            return value if 0 <= value <= 13 else None
+        return None
+
+    def _clip_props_state(self, clip):
+        """Знімок властивостей кліпу. Відсутні в цьому типі просто пропускаємо."""
+        state = {}
+        for prop in CLIP_PROPS:
+            value = self._clip_prop_value(prop, self._safe_attr(clip, prop))
+            if value is not None:
+                state[prop] = value
+        return state
+
+    def _make_clip_prop_cb(self, track, scene, clip, prop):
+        def cb():
+            self._safe(self._on_clip_prop, track, scene, clip, prop)
+        return cb
+
+    def _on_clip_prop(self, track, scene, clip, prop):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        key = self._clip_key(track, scene)
+        if key is None or key in self._rec_pending:
+            return  # кліп під запис ще не подія
+        value = self._clip_prop_value(prop, self._safe_attr(clip, prop))
+        if value is None:
+            return
+        current = self._mirror["clip_props"].setdefault(key, {})
+        if current.get(prop) == value:
+            return
+        current[prop] = value
+        payload = self._clip_refs(track, scene)
+        payload["prop"] = prop
+        payload["value"] = value
+        # Ключ на пару (кліп, властивість): gain тягнуть мишею, і жест має
+        # дати одну подію, але gain не має перекривати warp_mode.
+        self._defer("clipprop:%s:%s" % (key, prop), "ClipPropSet", payload)
+
+    def _prime_clip_props(self, track, scene, slot):
+        key = self._clip_key(track, scene)
+        if key is None:
+            return
+        try:
+            if not slot.has_clip:
+                self._mirror["clip_props"].pop(key, None)
+                return
+            self._mirror["clip_props"][key] = self._clip_props_state(slot.clip)
+        except Exception:
+            self._mirror["clip_props"].pop(key, None)
+
+    def _prime_all_clip_props(self):
+        self._mirror["clip_props"] = {}
+        for track in self._doc.tracks:
+            try:
+                slots = list(track.clip_slots)
+                scenes = list(self._doc.scenes)
+            except Exception:
+                continue
+            for i, slot in enumerate(slots):
+                if i >= len(scenes):
+                    break
+                self._prime_clip_props(track, scenes[i], slot)
+
+    def _apply_clip_prop(self, payload, gseq):
+        prop = payload.get("prop")
+        if prop not in CLIP_PROPS:
+            self._warn("gseq %s: невідома властивість кліпу %r" % (gseq, prop))
+            return
+        value = self._clip_prop_value(prop, payload.get("value"))
+        if value is None:
+            self._warn("gseq %s: некоректне значення %r для %s"
+                       % (gseq, payload.get("value"), prop))
+            return
+        track, scene, slot = self._resolve_clip_slot(payload, gseq)
+        if slot is None:
+            return
+        try:
+            if not slot.has_clip:
+                return  # tombstone: кліпа немає, подія мовчки не діє
+            clip = slot.clip
+        except Exception:
+            return
+        key = self._clip_key(track, scene)
+        if key is not None:
+            self._mirror["clip_props"].setdefault(key, {})[prop] = value
+        try:
+            setattr(clip, prop, value)
+        except Exception as e:
+            # Половина властивостей існує лише в audio-кліпів: warp на MIDI
+            # не помилка партнера, а різниця типів.
+            self._warn("gseq %s: %s не встановився: %r" % (gseq, prop, e))
+        if key is not None:
+            actual = self._clip_prop_value(prop, self._safe_attr(clip, prop))
+            if actual is not None:
+                self._mirror["clip_props"][key][prop] = actual
+
     def _clip_key(self, track, scene):
         if not self._registry_ready:
             return None
@@ -1767,6 +1903,7 @@ class AbletonMP(ControlSurface):
         self._rewire_tracks()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_all_clip_props()
         if current == "midi" and clip is not None:
             notes = self._clip_notes(clip)
             self._mirror["notes"][key] = notes
@@ -2267,6 +2404,7 @@ class AbletonMP(ControlSurface):
         if current_region == target:
             self._prime_note_clip(track, scene, slot)
             self._prime_clip_loop(track, scene, slot)
+            self._prime_clip_props(track, scene, slot)
             return
 
         # Construct every new note before mutating Live. A constructor failure
@@ -2291,6 +2429,7 @@ class AbletonMP(ControlSurface):
         except Exception:
             self._prime_note_clip(track, scene, slot)
             self._prime_clip_loop(track, scene, slot)
+            self._prime_clip_props(track, scene, slot)
             raise
 
     # ------------------------------------------------------------ coalescing
@@ -2365,6 +2504,9 @@ class AbletonMP(ControlSurface):
                 self._doc.start_playing()
             else:
                 self._doc.stop_playing()
+
+        elif etype == "ClipPropSet":
+            self._apply_clip_prop(payload, gseq)
 
         elif etype == "SceneTimingSet":
             self._apply_scene_timing(payload, gseq)
@@ -2483,6 +2625,7 @@ class AbletonMP(ControlSurface):
                 self._prime_notes()
                 self._prime_metadata()
                 self._prime_clip_loops()
+                self._prime_all_clip_props()
 
         elif etype == "TrackDelete":
             uid = (payload.get("track") or {}).get("id")
@@ -2618,8 +2761,10 @@ class AbletonMP(ControlSurface):
                 self._rewire_tracks()
                 self._prime_note_clip(track, scene, slot)
                 self._prime_clip_loop(track, scene, slot)
+                self._prime_clip_props(track, scene, slot)
                 self._prime_metadata()
                 self._prime_clip_loops()
+                self._prime_all_clip_props()
 
         elif etype == "ClipDelete":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -2639,8 +2784,10 @@ class AbletonMP(ControlSurface):
                 self._rewire_tracks()
                 self._prime_note_clip(track, scene, slot)
                 self._prime_clip_loop(track, scene, slot)
+                self._prime_clip_props(track, scene, slot)
                 self._prime_metadata()
                 self._prime_clip_loops()
+                self._prime_all_clip_props()
 
         elif etype == "SampleLoad":
             self._queue_device_struct(etype, payload, gseq)
@@ -3142,6 +3289,7 @@ class AbletonMP(ControlSurface):
             self._rewire_tracks()
             self._prime_metadata()
             self._prime_clip_loops()
+            self._prime_all_clip_props()
             self._suppress_struct = struct_was
         return True
 
