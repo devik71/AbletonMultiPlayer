@@ -536,6 +536,25 @@ const sampleExists = (rel) => {
   }
 };
 
+// Пади Drum Rack. У справжньому Live семпл на паді народжує новий ланцюг
+// усередині рака, і дифф девайсів його навмисно пропускає -- інакше партнер
+// дістав би голий Simpler без звуку. Тому пади мають власний шлях.
+const padsOf = (device) => (device.drum_pads || (device.drum_pads = {}));
+const isDrumRack = (device) => device.class_name === 'DrumGroupDevice';
+
+const findDeviceByRef = (container, ref) => {
+  if (!ref) return null;
+  let ordinal = 0;
+  for (const device of container.devices || []) {
+    if (device.class_name === ref.class_name &&
+        device.class_display_name === ref.class_display_name) {
+      if (ordinal === (ref.ordinal || 0)) return device;
+      ordinal += 1;
+    }
+  }
+  return null;
+};
+
 const fullState = () => ({
   version: 1,
   script: arg('script', '0.19.0-dev-fake'),
@@ -1258,9 +1277,21 @@ function apply(type, payload, gseq) {
       break;
     }
     case 'SampleLoad': {
+      const rel = payload.sample?.path;
+      if (payload.target?.kind === 'drum_pad') {
+        const dt = deviceTrackByRef(payload.track);
+        if (!dt) return reject('невідомий трек');
+        if (!sampleExists(rel)) return reject(`семпла ${rel} ще немає в теці проєкту`);
+        const device = findDeviceByRef(dt, payload.target.device);
+        if (!device || !isDrumRack(device)) return reject('Drum Rack не знайдено за адресою');
+        const note = payload.target.note;
+        if (!Number.isInteger(note)) return reject('некоректна нота пада');
+        if (padsOf(device)[note]) break;   // ідемпотентність
+        padsOf(device)[note] = rel;
+        break;
+      }
       const t = trackById(payload.track?.id);
       const s = sceneIdx(payload.scene?.id);
-      const rel = payload.sample?.path;
       if (!t) return reject('невідомий трек');
       if (payload.target?.kind !== 'slot') return reject(`невідома ціль ${payload.target?.kind}`);
       if (s < 0) return reject('невідома сцена');
@@ -1685,6 +1716,27 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log('прибрано з Arrangement');
       break;
     }
+    case 'droppad': {
+      // Дзеркало живої дії: людина тягне семпл на пад Drum Rack.
+      // Ціль -- перший Drum Rack на треку: саме його бачить людина, коли
+      // тягне туди семпл, і двозначності тут не буває.
+      const t = deviceTrackFromArg(rest[0]);
+      const device = t && (t.devices || []).find(isDrumRack);
+      const note = Number(rest[1]);
+      const rel = rest.slice(2).join(' ');
+      if (!device || !isDrumRack(device)) return console.log('на цій позиції не Drum Rack');
+      if (!Number.isInteger(note) || note < 0 || note > 127) return console.log('некоректна нота');
+      if (!sampleExists(rel)) return console.log(`немає файлу ${rel} у теці проєкту`);
+      if (padsOf(device)[note]) return console.log('на паді вже щось лежить');
+      padsOf(device)[note] = rel;
+      emit('SampleLoad', {
+        track: deviceTrackRef(t),
+        target: { kind: 'drum_pad', device: deviceRef(t, device), note },
+        sample: { path: rel, name: String(rel).split('/').pop() },
+      });
+      console.log(`поклав ${rel} на пад ${note}`);
+      break;
+    }
     case 'dropsample': {
       // Дзеркало живої дії: людина тягне семпл із теки проєкту у слот.
       // Live створює audio-кліп сам, а ми лише повідомляємо партнера, ЩО
@@ -1713,17 +1765,27 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       // взагалі) породжує вже діфф -- рівно як у справжньому Live.
       const t = deviceTrackFromArg(rest[0]);
       if (!t) return console.log('немає такого треку');
-      const wanted = String(rest[1] || '');
-      const found = Object.entries(BROWSER)
-        .flatMap(([category, list]) => list.map((item) => ({ category, item })))
-        .filter((m) => m.item.name.toLowerCase() === wanted.toLowerCase());
-      if (!found.length) return console.log(`немає девайса ${wanted}`);
+      const catalog = Object.entries(BROWSER)
+        .flatMap(([category, list]) => list.map((item) => ({ category, item })));
+      const pick = (name) => catalog.filter((m) =>
+        m.item.name.toLowerCase() === String(name).toLowerCase());
+      // Назва девайса може містити пробіл ("Drum Rack"), тож спершу
+      // пробуємо весь хвіст як назву, і лише потім -- перше слово плюс пресет.
+      const whole = rest.slice(1).join(' ');
+      let found = pick(whole);
+      let presetFrom = rest.length;
+      if (!found.length) {
+        found = pick(rest[1] || '');
+        presetFrom = 2;
+      }
+      if (!found.length) return console.log(`немає девайса ${whole}`);
       const device = {
         class_name: found[0].item.class_name,
         class_display_name: found[0].item.name,
         parameters: [fakeParam('Device On', 1, true)],
       };
-      if (rest[2]) device.name = rest.slice(2).join(' ');   // пресет
+      // Пресет -- лише те, що лишилось ПІСЛЯ назви девайса
+      if (rest[presetFrom]) device.name = rest.slice(presetFrom).join(' ');
       t.devices.push(device);
       refreshChainIds();
       onDevices(false);

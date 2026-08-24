@@ -1089,10 +1089,33 @@ try {
     await waitFor(l2, /SampleLoad ВІДХИЛЕНО \(семпла Samples\/якого-немає\.wav ще немає/, 6000, from);
   });
 
-  await check('журнал: 82 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('семпл на паді Drum Rack доїжджає, а не перетворюється на голий Simpler', async () => {
+    // У живому Live семпл на паді народжує НОВИЙ ланцюг усередині рака,
+    // а дифф девайсів нові контейнери навмисно пропускає. Перевірено на
+    // 12.3.5: без окремого шляху там повна тиша, і партнер не дістає нічого.
+    const made = l2.out.length;
+    l1.stdin.write('adddevice 0 Drum Rack\n');
+    await waitFor(l2, /<- #\d+ DeviceInsert .*Drum Rack/, 8000, made);
+
+    const from = l2.out.length;
+    l1.stdin.write('droppad 0 38 Samples/kick.wav\n');
+    await waitFor(l1, /поклав Samples\/kick\.wav на пад 38/, 8000);
+    await waitFor(l2, /<- #\d+ SampleLoad .*"kind":"drum_pad".*"note":38/, 8000, from);
+    const seen = l2.out.slice(from);
+    if (/SampleLoad ВІДХИЛЕНО/.test(seen)) throw new Error('партнер відхилив семпл на пад');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    if (!/"38": "Samples\/kick\.wav"/.test(l2.out.slice(shown))) {
+      throw new Error('на паді 38 у партнера семпла немає');
+    }
+  });
+
+  await check('журнал: 84 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 82) throw new Error(`очікував 82 події, у журналі ${lines.length}`);
+    if (lines.length !== 84) throw new Error(`очікував 84 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

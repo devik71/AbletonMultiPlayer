@@ -155,7 +155,7 @@ class AbletonMP(ControlSurface):
         self._mirror = {
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
-            "loop": {}, "device_tree": {},
+            "loop": {}, "device_tree": {}, "drum_pads": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -510,6 +510,9 @@ class AbletonMP(ControlSurface):
         if self._registry_ready:
             if not self._suppress_struct:
                 self._safe(self._diff_devices)
+                # Окремо від _diff_devices: семпл на паді народжує новий
+                # ланцюг, а нові контейнери дифф девайсів пропускає.
+                self._safe(self._diff_drum_pads)
             # Значення параметрів після структурної зміни -- нова базова лінія,
             # інакше поява девайса дала б залп DeviceParamSet на кожну ручку.
             self._prime_devices()
@@ -2858,6 +2861,9 @@ class AbletonMP(ControlSurface):
             # Файл ще не доїхав або лежить не там: черга спробує ще раз
             return False
         target = payload.get("target") or {}
+        if target.get("kind") == "drum_pad":
+            self._apply_sample_to_pad(payload, target, item, gseq)
+            return True
         if target.get("kind") != "slot":
             self._warn("gseq %s: невідома ціль для семпла %r"
                        % (gseq, target.get("kind")))
@@ -2918,6 +2924,185 @@ class AbletonMP(ControlSurface):
         payload["target"] = {"kind": "slot"}
         payload["sample"] = {"path": rel, "name": rel.rsplit("/", 1)[-1]}
         self._emit("SampleLoad", payload)
+
+    def _pad_sample_path(self, pad):
+        """Шлях семпла на паді, або None. Порожній пад -- теж None."""
+        try:
+            chains = list(pad.chains)
+        except Exception:
+            return None
+        for chain in chains:
+            try:
+                devices = list(chain.devices)
+            except Exception:
+                continue
+            for device in devices:
+                sample = self._safe_attr(device, "sample")
+                if sample is None:
+                    continue
+                path = self._safe_attr(sample, "file_path")
+                if path:
+                    return str(path)
+        return None
+
+    def _iter_drum_racks(self):
+        """(track, track_ref, container, device, chain_path) для кожного Drum Rack."""
+        for track in self._doc.tracks:
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
+                continue
+            for container, device, chain_path in self._iter_track_devices(track):
+                try:
+                    if not device.can_have_drum_pads or not device.has_drum_pads:
+                        continue
+                except Exception:
+                    continue
+                yield track, track_ref, container, device, chain_path
+
+    def _drum_pad_map(self):
+        """Знімок вмісту падів: адреса рака -> {нота: шлях семплу}.
+
+        Ключ адреси -- рівно те, чим подія адресує рак у партнера, тож
+        розбіжність між знімком і подією неможлива за побудовою.
+        """
+        state = {}
+        for _track, track_ref, container, device, chain_path in self._iter_drum_racks():
+            device_ref = self._device_ref(container, device)
+            if device_ref is None:
+                continue
+            key = (track_ref.get("id"), track_ref.get("kind"),
+                   tuple(c.get("id") for c in chain_path),
+                   device_ref["class_name"], device_ref["class_display_name"],
+                   device_ref["ordinal"])
+            pads = {}
+            try:
+                drum_pads = list(device.drum_pads)
+            except Exception:
+                drum_pads = []
+            for pad in drum_pads:
+                path = self._pad_sample_path(pad)
+                if not path:
+                    continue
+                note = self._safe_attr(pad, "note")
+                if isinstance(note, int):
+                    pads[note] = path
+            state[key] = pads
+        return state
+
+    def _prime_drum_pads(self):
+        self._mirror["drum_pads"] = self._drum_pad_map()
+
+    def _diff_drum_pads(self):
+        """Семпл, що зʼявився на паді -> SampleLoad.
+
+        Окремий шлях, а не гілка _diff_devices, і на те є причина. Семпл на
+        паді народжує НОВИЙ ланцюг, а нові контейнери дифф девайсів навмисно
+        пропускає -- інакше копія треку сипала б подіями. Без цього правила
+        партнер отримав би DeviceInsert на голий OriginalSimpler, тобто
+        девайс без звуку. Перевірено на живому: сьогодні там тиша.
+        """
+        previous = self._mirror.get("drum_pads")
+        if not previous:
+            return
+        current = self._drum_pad_map()
+        for key, pads in current.items():
+            was = previous.get(key)
+            if was is None:
+                continue  # новий рак: його вміст приїде знімком
+            for note, path in sorted(pads.items()):
+                if was.get(note) == path:
+                    continue
+                rel = self._sample_rel_path(path)
+                if rel is None:
+                    self._warn("семпл на паді %s лежить поза текою проєкту і не "
+                               "синхронізується; File > Collect All and Save" % (note,))
+                    continue
+                track_id, kind, chain_ids, class_name, display_name, ordinal = key
+                track_ref = {"id": track_id}
+                if kind:
+                    track_ref["kind"] = kind
+                payload = {
+                    "track": track_ref,
+                    "target": {
+                        "kind": "drum_pad",
+                        "device": {"class_name": class_name,
+                                   "class_display_name": display_name,
+                                   "ordinal": ordinal},
+                        "note": note,
+                    },
+                    "sample": {"path": rel, "name": rel.rsplit("/", 1)[-1]},
+                }
+                if chain_ids:
+                    payload["target"]["chain_path"] = [{"id": cid} for cid in chain_ids]
+                self._emit("SampleLoad", payload)
+
+    def _apply_sample_to_pad(self, payload, target, item, gseq):
+        """Семпл на пад Drum Rack. Прицілювання пряме -- перевірено на 12.3.5.
+
+        Довідник LOM позначає selected_drum_pad як R, і це неправда: сеттер
+        є, а семпл лягає САМЕ на виділений пад, а не на перший вільний.
+        """
+        note = target.get("note")
+        if not isinstance(note, int) or not (0 <= note <= 127):
+            self._warn("gseq %s: некоректна нота пада %r" % (gseq, note))
+            return
+        container, track = self._resolve_device_container(
+            payload.get("track") or {}, target.get("chain_path"), gseq)
+        if container is None:
+            return
+        device = None
+        for candidate in (list(container.devices) if container is not None else []):
+            if self._device_matches(candidate, target.get("device") or {}):
+                device = candidate
+                break
+        if device is None:
+            self._warn("gseq %s: Drum Rack не знайдено за адресою" % (gseq,))
+            return
+        try:
+            pads = list(device.drum_pads)
+        except Exception:
+            self._warn("gseq %s: девайс за адресою -- не Drum Rack" % (gseq,))
+            return
+        pad = None
+        for candidate in pads:
+            if self._safe_attr(candidate, "note") == note:
+                pad = candidate
+                break
+        if pad is None:
+            self._warn("gseq %s: пада %s у раку немає" % (gseq, note))
+            return
+        if self._pad_sample_path(pad):
+            return  # ідемпотентність: на паді вже щось лежить
+
+        view = getattr(self._doc, "view", None)
+        if view is None:
+            return
+        saved_track = self._safe_attr(view, "selected_track")
+        struct_was = self._suppress_struct
+        self._suppress_struct = True
+        self._suppress_view = True
+        self._view_applied_at = time.time()
+        try:
+            view.selected_track = track
+            device.view.selected_drum_pad = pad
+            Live.Application.get_application().browser.load_item(item)
+        except Exception as e:
+            self._warn("gseq %s: семпл не ліг на пад: %r" % (gseq, e))
+        finally:
+            try:
+                if saved_track is not None:
+                    view.selected_track = saved_track
+            except Exception:
+                pass
+            self._view_applied_at = time.time()
+            self._suppress_view = False
+            self._mirror["view"] = self._view_signature()
+            self._rewire_tracks()
+            self._refresh_chains()
+            self._persist_registry()
+            self._prime_devices()
+            self._prime_drum_pads()
+            self._suppress_struct = struct_was
 
     def _scan_samples(self):
         """РЇРєС– СЃРµРјРїР»Рё Р»РµР¶Р°С‚СЊ РїРѕР·Р° С‚РµРєРѕСЋ РїСЂРѕС”РєС‚Сѓ С– СЏРєРёС… Р±СЂР°РєСѓС” Р»РѕРєР°Р»СЊРЅРѕ.
@@ -3737,6 +3922,7 @@ class AbletonMP(ControlSurface):
         # Дерево оновлюється тут же: так кожен наявний виклик _prime_devices
         # автоматично лишається точкою відліку для _diff_devices.
         self._mirror["device_tree"] = self._device_tree()
+        self._mirror["drum_pads"] = self._drum_pad_map()
 
     def _mix_slots(self, track):
         slots = [("volume", None), ("panning", None)]
