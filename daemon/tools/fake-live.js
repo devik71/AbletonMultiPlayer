@@ -14,7 +14,8 @@
 import { createSocket } from 'node:dgram';
 import { createHash, randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
+import { join as joinPath } from 'node:path';
 import { noteRegionsFor, stateToOps } from './state-ops.js';
 
 function arg(name, fallback) {
@@ -311,7 +312,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove').split(','),
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad').split(','),
   });
 
 function emit(type, payload) {
@@ -516,6 +517,23 @@ const structuralGaps = (state) => {
     }
   }
   return gaps;
+};
+
+// ----------------------------------------------------------------- семпли
+//
+// Портативна адреса -- шлях відносно теки проєкту. Байти возить filesync
+// окремо від події, тож подія цілком може приїхати раніше за файл: у bridge
+// на цей випадок черга з очікуванням, тут -- чесна відмова.
+
+const projectRoot = arg('project', '');
+
+const sampleExists = (rel) => {
+  if (!projectRoot || !rel || rel.includes('..')) return false;
+  try {
+    return statSync(joinPath(projectRoot, ...String(rel).split('/'))).isFile();
+  } catch {
+    return false;
+  }
 };
 
 const fullState = () => ({
@@ -1239,6 +1257,26 @@ function apply(type, payload, gseq) {
       clip.notes.sort((a, b) => a.start_time - b.start_time || a.pitch - b.pitch);
       break;
     }
+    case 'SampleLoad': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      const rel = payload.sample?.path;
+      if (!t) return reject('невідомий трек');
+      if (payload.target?.kind !== 'slot') return reject(`невідома ціль ${payload.target?.kind}`);
+      if (s < 0) return reject('невідома сцена');
+      // Подія могла випередити файл -- це не помилка, а гонка з filesync
+      if (!sampleExists(rel)) return reject(`семпла ${rel} ще немає в теці проєкту`);
+      if (t.clips[s]) break;   // ідемпотентність: у слоті вже щось є
+      t.clips[s] = {
+        kind: 'audio',
+        length: NOTE_TIME_SPAN,
+        name: String(rel).split('/').pop(),
+        color: 0x777777,
+        notes: [],
+        file_path: rel,
+      };
+      break;
+    }
     case 'ClipNotesSet': {
       const t = trackById(payload.track?.id);
       const s = sceneIdx(payload.scene?.id);
@@ -1645,6 +1683,29 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       arrOf(t).splice(idx, 1);
       onArrangement(false);
       console.log('прибрано з Arrangement');
+      break;
+    }
+    case 'dropsample': {
+      // Дзеркало живої дії: людина тягне семпл із теки проєкту у слот.
+      // Live створює audio-кліп сам, а ми лише повідомляємо партнера, ЩО
+      // саме і КУДИ покласти -- байти вже їдуть filesync-ом.
+      const t = song.tracks[Number(rest[0]) || 0];
+      const s = Number(rest[1]) || 0;
+      const rel = rest.slice(2).join(' ');
+      if (!t || !song.scenes[s]) return console.log('немає такого треку або сцени');
+      if (!sampleExists(rel)) return console.log(`немає файлу ${rel} у теці проєкту`);
+      if (t.clips[s]) return console.log('слот зайнятий');
+      t.clips[s] = {
+        kind: 'audio', length: NOTE_TIME_SPAN, name: String(rel).split('/').pop(),
+        color: 0x777777, notes: [], file_path: rel,
+      };
+      emit('SampleLoad', {
+        track: trackRef(t),
+        scene: sceneRef(song.scenes[s]),
+        target: { kind: 'slot' },
+        sample: { path: rel, name: String(rel).split('/').pop() },
+      });
+      console.log(`поклав ${rel} у слот ${s}`);
       break;
     }
     case 'adddevice': {

@@ -127,12 +127,13 @@ try {
   const d2 = mkDaemon('p2', 19947, 19948);
   await Promise.all([waitFor(d1, /relay: head=/), waitFor(d2, /relay: head=/)]);
 
-  const mkLive = (n, inPort, outPort) =>
+  const mkLive = (n, inPort, outPort, author = 'p1') =>
     launch(`live-${n}`, join(root, 'daemon/tools/fake-live.js'),
-      ['--udp-in', String(inPort), '--udp-out', String(outPort)], { cwd: join(root, 'daemon') });
+      ['--udp-in', String(inPort), '--udp-out', String(outPort),
+       '--project', projectOf(author)], { cwd: join(root, 'daemon') });
 
   const l1 = mkLive(1, 19945, 19946);
-  const l2 = mkLive(2, 19947, 19948);
+  const l2 = mkLive(2, 19947, 19948, 'p2');
   await Promise.all([waitFor(d1, /bridge підключився/), waitFor(d2, /bridge підключився/)]);
 
   // Live, запущений ДО daemon: hello летить у порожнечу, лишається тільки heartbeat.
@@ -1047,10 +1048,51 @@ try {
     }
   });
 
-  await check('журнал: 80 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('семпл у слоті доїжджає адресою, а не байтами', async () => {
+    // Байти вже привіз filesync попередньою перевіркою -- kick.wav лежить
+    // в обох проєктах. Подія несе лише шлях відносно теки проєкту: саме він
+    // портативний, на відміну від абсолютного шляху й машинних FileId.
+    const from = l2.out.length;
+    l1.stdin.write('dropsample 2 5 Samples/kick.wav\n');
+    await waitFor(l1, /поклав Samples\/kick\.wav у слот 5/, 8000);
+    await waitFor(l2, /<- #\d+ SampleLoad .*"path":"Samples\/kick\.wav"/, 8000, from);
+    const seen = l2.out.slice(from);
+    if (/SampleLoad ВІДХИЛЕНО/.test(seen)) throw new Error('партнер відхилив семпл');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    const state = l2.out.slice(shown);
+    if (!/"kind": "audio"/.test(state)) throw new Error('audio-кліп у партнера не створився');
+    if (!/"file_path": "Samples\/kick\.wav"/.test(state)) {
+      throw new Error('кліп створився без посилання на семпл');
+    }
+  });
+
+  await check('подія без файлу не вигадує кліп', async () => {
+    // Подія цілком може випередити filesync. Чесна відмова краща за порожній
+    // кліп: у bridge на цей випадок черга з очікуванням, тут -- ВІДХИЛЕНО.
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const track = state.tracks[0];
+    const busy = new Set((track.clips || []).map((c) => c.scene?.id));
+    const scene = [...state.scenes].reverse().find((s) => !busy.has(s.id));
+
+    const from = l2.out.length;
+    await inject({
+      type: 'SampleLoad',
+      payload: {
+        track: { id: track.id }, scene: { id: scene.id },
+        target: { kind: 'slot' },
+        sample: { path: 'Samples/якого-немає.wav', name: 'якого-немає.wav' },
+      },
+    });
+    await waitFor(l2, /SampleLoad ВІДХИЛЕНО \(семпла Samples\/якого-немає\.wav ще немає/, 6000, from);
+  });
+
+  await check('журнал: 82 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 80) throw new Error(`очікував 80 подій, у журналі ${lines.length}`);
+    if (lines.length !== 82) throw new Error(`очікував 82 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

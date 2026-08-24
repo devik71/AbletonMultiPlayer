@@ -47,6 +47,7 @@ APPLY_TYPES = [
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
     "DeviceLoad",
     "DeviceInsert", "DeviceDelete", "DeviceMove",
+    "SampleLoad",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
@@ -76,7 +77,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -111,6 +112,9 @@ CLIP_LOOP_PROPS = ("looping", "loop_start", "loop_end", "start_marker", "end_mar
 # показали, що їхні uri ідентичні, а вміст адресується локальними FileId.
 BROWSER_CATEGORIES = ("audio_effects", "instruments", "midi_effects")
 LOAD_QUEUE_MAX_SEC = 60.0
+# Семпл може ще їхати filesync-ом (перескан раз на 10 с), та й браузер Live
+# помічає новий файл не миттєво. Тож чекаємо довше, ніж на девайс.
+SAMPLE_QUEUE_MAX_SEC = 180.0
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -1530,7 +1534,7 @@ class AbletonMP(ControlSurface):
             elif current is None and previous is not None:
                 self._emit("ClipDelete", refs)
             elif current == "audio":
-                self._warn("audio clip creation is not synchronized; collect the sample and copy the .als structure")
+                self._safe(self._emit_sample_load_slot, clip, refs)
 
         # has_clip changed: the old clip listener is dead or a new one is needed.
         self._rewire_tracks()
@@ -2405,6 +2409,9 @@ class AbletonMP(ControlSurface):
                 self._prime_metadata()
                 self._prime_clip_loops()
 
+        elif etype == "SampleLoad":
+            self._queue_device_struct(etype, payload, gseq)
+
         elif etype == "DeviceLoad":
             # У чергу, а не одразу: завантаження блокує Live на сотні мілісекунд
             # і рухає виділення, а під запис виділений трек чіпати не можна.
@@ -2760,6 +2767,157 @@ class AbletonMP(ControlSurface):
                         yield clip
             except Exception:
                 pass
+
+    # ---------------------------------------------------------------- семпли
+    #
+    # Портативна адреса семпла -- шлях відносно теки проєкту. Виміряно на
+    # живому 12.3: вміст проєкту адресується в браузері як
+    # query:CurrentProject#Samples:Imported:file.wav, тобто шляхом, а не
+    # машинним FileId (той -- доля Core Library). Байти возить filesync,
+    # структуру -- ця подія.
+
+    def _project_root(self):
+        try:
+            path = str(self._doc.file_path)
+        except Exception:
+            return ""
+        return os.path.dirname(path) if path else ""
+
+    def _sample_rel_path(self, path):
+        """Шлях семпла відносно проєкту, або None, якщо він зовні.
+
+        Зовнішній семпл не має портативної адреси взагалі: абсолютний шлях
+        у партнера не існує. Тому ми його не анонсуємо, а показуємо в звіті
+        _scan_samples із порадою Collect All and Save.
+        """
+        root = self._project_root()
+        if not root or not path:
+            return None
+        try:
+            root_abs = os.path.abspath(root)
+            path_abs = os.path.abspath(str(path))
+        except Exception:
+            return None
+        prefix = os.path.normcase(root_abs)
+        if not prefix.endswith(os.sep):
+            prefix += os.sep
+        if not os.path.normcase(path_abs).startswith(prefix):
+            return None
+        try:
+            rel = os.path.relpath(path_abs, root_abs)
+        except Exception:
+            return None
+        return rel.replace(os.sep, "/")
+
+    def _project_browser_item(self, rel_path):
+        """BrowserItem за шляхом відносно проєкту, або None.
+
+        Обхід за назвами: назви вузлів у браузері збігаються з іменами файлів
+        разом із розширенням (перевірено). Збирати uri самотужки не варто --
+        він потребує url-кодування, а помилка в ньому мовчазна.
+        """
+        parts = [p for p in str(rel_path or "").split("/") if p]
+        if not parts:
+            return None
+        try:
+            node = Live.Application.get_application().browser.current_project
+        except Exception:
+            return None
+        for part in parts:
+            try:
+                children = list(node.children)
+            except Exception:
+                return None
+            found = None
+            for child in children:
+                try:
+                    if str(child.name) == part:
+                        found = child
+                        break
+                except Exception:
+                    continue
+            if found is None:
+                return None
+            node = found
+        try:
+            return node if node.is_loadable else None
+        except Exception:
+            return None
+
+    def _apply_sample_load(self, payload, gseq):
+        """Кладе семпл у виділену ціль. Механізм перевірений на живому 12.3.
+
+        Стадія 1 -- слот Session. Прицілювання через highlighted_clip_slot,
+        далі browser.load_item, і Live сам створює audio-кліп. Той самий
+        шлях, що робить рука.
+        """
+        sample = payload.get("sample") or {}
+        rel = sample.get("path")
+        item = self._project_browser_item(rel)
+        if item is None:
+            # Файл ще не доїхав або лежить не там: черга спробує ще раз
+            return False
+        target = payload.get("target") or {}
+        if target.get("kind") != "slot":
+            self._warn("gseq %s: невідома ціль для семпла %r"
+                       % (gseq, target.get("kind")))
+            return True
+        track, scene, slot = self._resolve_clip_slot(payload, gseq)
+        if slot is None:
+            return True
+        try:
+            if slot.has_clip:
+                return True  # ідемпотентність: у слоті вже щось є
+        except Exception:
+            return True
+
+        view = getattr(self._doc, "view", None)
+        if view is None:
+            return True
+        # Глушіння те саме, що у DeviceLoad: load_item рухає виділення, і без
+        # цього власний рух полетів би партнеру як присутність, а створений
+        # кліп -- назад як подія.
+        saved_slot = self._safe_attr(view, "highlighted_clip_slot")
+        saved_track = self._safe_attr(view, "selected_track")
+        struct_was = self._suppress_struct
+        self._suppress_struct = True
+        self._suppress_view = True
+        self._view_applied_at = time.time()
+        try:
+            view.selected_track = track
+            view.highlighted_clip_slot = slot
+            Live.Application.get_application().browser.load_item(item)
+        except Exception as e:
+            self._warn("gseq %s: семпл не завантажився: %r" % (gseq, e))
+        finally:
+            try:
+                if saved_slot is not None:
+                    view.highlighted_clip_slot = saved_slot
+                elif saved_track is not None:
+                    view.selected_track = saved_track
+            except Exception:
+                pass
+            self._view_applied_at = time.time()
+            self._suppress_view = False
+            self._mirror["view"] = self._view_signature()
+            self._rewire_tracks()
+            self._prime_metadata()
+            self._prime_clip_loops()
+            self._suppress_struct = struct_was
+        return True
+
+    def _emit_sample_load_slot(self, clip, refs):
+        """Audio-кліп у слоті -> SampleLoad, якщо семпл усередині проєкту."""
+        path = self._safe_attr(clip, "file_path")
+        rel = self._sample_rel_path(str(path) if path else "")
+        if rel is None:
+            self._warn("audio-кліп із семплом поза текою проєкту не синхронізується; "
+                       "полагодь через File > Collect All and Save")
+            return
+        payload = dict(refs)
+        payload["target"] = {"kind": "slot"}
+        payload["sample"] = {"path": rel, "name": rel.rsplit("/", 1)[-1]}
+        self._emit("SampleLoad", payload)
 
     def _scan_samples(self):
         """РЇРєС– СЃРµРјРїР»Рё Р»РµР¶Р°С‚СЊ РїРѕР·Р° С‚РµРєРѕСЋ РїСЂРѕС”РєС‚Сѓ С– СЏРєРёС… Р±СЂР°РєСѓС” Р»РѕРєР°Р»СЊРЅРѕ.
@@ -4615,7 +4773,7 @@ class AbletonMP(ControlSurface):
         etype = entry.get("etype", "DeviceLoad")
         # Чекає на зупинку транспорту лише DeviceLoad: тільки він рухає виділення.
         # insert_device і move_device беруть індекс явно, тож під запис безпечні.
-        if etype == "DeviceLoad" and self._recording_guard():
+        if etype in ("DeviceLoad", "SampleLoad") and self._recording_guard():
             if time.time() - entry["since"] < LOAD_QUEUE_MAX_SEC:
                 return  # чекаємо, доки транспорт зупиниться
             self._load_queue.pop(0)
@@ -4623,6 +4781,19 @@ class AbletonMP(ControlSurface):
                        % (entry["gseq"],))
             return
         self._load_queue.pop(0)
+        if etype == "SampleLoad":
+            # Єдиний тип, який може чесно сказати "ще не готовий": файл
+            # їде filesync-ом окремо від події, і чекати його -- нормально.
+            done = self._safe(self._apply_sample_load, entry["payload"], entry["gseq"])
+            if done:
+                return
+            if time.time() - entry["since"] < SAMPLE_QUEUE_MAX_SEC:
+                self._load_queue.append(entry)
+                return
+            self._warn("gseq %s: семпл %r так і не зʼявився в теці проєкту"
+                       % (entry["gseq"],
+                          ((entry["payload"] or {}).get("sample") or {}).get("path")))
+            return
         handler = {"DeviceLoad": self._load_device,
                    "DeviceInsert": self._apply_device_insert,
                    "DeviceMove": self._apply_device_move}.get(etype)
