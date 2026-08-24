@@ -11,6 +11,8 @@
     "test:compact": "node --test test/compact.mjs",
     "test:locks": "node --test test/locks.mjs",
     "test:state": "node --test test/state.mjs",
-    "test:presence": "node --test test/presence.mjs"
+    "test:presence": "node --test test/presence.mjs",
+    "memory": "node tools/memory.mjs",
+    "check-install": "node tools/check-install.mjs"
   }
 }

@@ -32,6 +32,11 @@ jobs:
       - name: Node test suite
         run: npm test
 
+      # Лише формат і цілісність. `verify` тут не місце: він питає локальний
+      # Live, якого в CI немає, -- і завалив би збірку на кожній машині.
+      - name: Project memory
+        run: node tools/memory.mjs check
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
