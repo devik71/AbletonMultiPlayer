@@ -96,3 +96,11 @@ test('петля і ноти того самого кліпу діляться �
   assert.equal(loop.object, notes.object, 'редагування нот і петлі -- один обʼєкт');
   assert.equal(loop.object, 'clip:t1:s1');
 });
+
+test('кожна властивість пісні бере власний лок', () => {
+  const sig = lockTarget('SongPropSet', { prop: 'signature_numerator', value: 6 }, registry);
+  const root = lockTarget('SongPropSet', { prop: 'root_note', value: 5 }, registry);
+  assert.equal(sig.object, 'song:signature_numerator');
+  assert.notEqual(sig.object, root.object, 'метр і тональність -- не той самий обʼєкт');
+  assert.equal(lockTarget('SongPropSet', {}, registry), null, 'без prop лок не береться');
+});

@@ -47,7 +47,7 @@ APPLY_TYPES = [
     "ClipCreate", "ClipDelete", "ClipNotesSet", "ClipLoopSet",
     "DeviceLoad",
     "DeviceInsert", "DeviceDelete", "DeviceMove",
-    "SampleLoad",
+    "SampleLoad", "SongPropSet",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
@@ -77,7 +77,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -111,6 +111,14 @@ CLIP_LOOP_PROPS = ("looping", "loop_start", "loop_end", "start_marker", "end_mar
 # Портативні лише стокові девайси першого рівня: дампи браузера з двох машин
 # показали, що їхні uri ідентичні, а вміст адресується локальними FileId.
 BROWSER_CATEGORIES = ("audio_effects", "instruments", "midi_effects")
+# Скалярні властивості пісні, спільні для всіх учасників. Метроном
+# і midi_recording_quantization сюди НЕ входять навмисно: перший --
+# особиста річ, як гучність навушників, а друга впливає лише на власний
+# запис, і партнер уже дістає ноти квантованими, тобто розсинхрону з неї
+# не буває.
+SONG_PROPS = ("signature_numerator", "signature_denominator",
+              "clip_trigger_quantization", "root_note", "scale_name",
+              "scale_mode")
 LOAD_QUEUE_MAX_SEC = 60.0
 # Семпл може ще їхати filesync-ом (перескан раз на 10 с), та й браузер Live
 # помічає новий файл не миттєво. Тож чекаємо довше, ніж на девайс.
@@ -155,7 +163,7 @@ class AbletonMP(ControlSurface):
         self._mirror = {
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
-            "loop": {}, "device_tree": {}, "drum_pads": {},
+            "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -207,6 +215,14 @@ class AbletonMP(ControlSurface):
 
         self._doc.add_is_playing_listener(self._cb_is_playing)
         self._doc.add_tempo_listener(self._cb_tempo)
+        self._song_prop_cbs = {}
+        for prop in SONG_PROPS:
+            cb = self._make_song_prop_cb(prop)
+            try:
+                getattr(self._doc, "add_%s_listener" % prop)(cb)
+                self._song_prop_cbs[prop] = cb
+            except Exception:
+                pass  # властивості немає в цій збірці Live
         self._doc.add_tracks_listener(self._cb_tracks)
         self._doc.add_scenes_listener(self._cb_scenes)
         # РїРѕСЏРІР°/Р·РЅРёРєРЅРµРЅРЅСЏ return-С‚СЂРµРєСѓ Р·РјС–РЅСЋС” РєС–Р»СЊРєС–СЃС‚СЊ send-С–РІ РЅР° РєРѕР¶РЅРѕРјСѓ С‚СЂРµРєСѓ,
@@ -271,6 +287,12 @@ class AbletonMP(ControlSurface):
                         getattr(self._doc, "remove_%s_listener" % name)(cb)
                 except Exception:
                     pass
+        for prop, cb in list(getattr(self, "_song_prop_cbs", {}).items()):
+            try:
+                if getattr(self._doc, "%s_has_listener" % prop)(cb):
+                    getattr(self._doc, "remove_%s_listener" % prop)(cb)
+            except Exception:
+                pass
         if self._link is not None:
             self._link.send({"m": "bye"})
             self._link.close()
@@ -456,6 +478,78 @@ class AbletonMP(ControlSurface):
         self._mirror["tempo"] = bpm
         self._defer("tempo", "TempoSet", {"bpm": bpm})
 
+    def _song_prop_value(self, prop, raw):
+        """Нормалізоване значення властивості пісні, або None.
+
+        Валідація тут, а не в місці застосування: та сама перевірка потрібна
+        і при емісії (щоб не слати сміття), і при прийомі (щоб не записати
+        чуже сміття в LOM).
+        """
+        try:
+            if prop == "scale_name":
+                text = self._doc_str(raw)
+                return text if text and len(text) <= 64 else None
+            if prop == "scale_mode":
+                return bool(raw)
+            value = int(raw)
+        except Exception:
+            return None
+        if prop == "signature_numerator":
+            return value if 1 <= value <= 99 else None
+        if prop == "signature_denominator":
+            # Live приймає лише степені двійки; інше він мовчки округлить,
+            # і партнери розійдуться, не помітивши.
+            return value if value in (1, 2, 4, 8, 16) else None
+        if prop == "clip_trigger_quantization":
+            return value if 0 <= value <= 13 else None
+        if prop == "root_note":
+            return value if 0 <= value <= 11 else None
+        return None
+
+    def _prime_song_props(self):
+        state = {}
+        for prop in SONG_PROPS:
+            value = self._song_prop_value(prop, self._safe_attr(self._doc, prop))
+            if value is not None:
+                state[prop] = value
+        self._mirror["song"] = state
+
+    def _make_song_prop_cb(self, prop):
+        def cb():
+            self._safe(self._on_song_prop, prop)
+        return cb
+
+    def _on_song_prop(self, prop):
+        value = self._song_prop_value(prop, self._safe_attr(self._doc, prop))
+        if value is None:
+            return
+        if self._mirror["song"].get(prop) == value:
+            return
+        self._mirror["song"][prop] = value
+        # Дебаунс спільний із темпом: розмір такту й квантизацію теж тягнуть
+        # мишею, і один жест має дати одну подію.
+        self._defer("song:%s" % prop, "SongPropSet", {"prop": prop, "value": value})
+
+    def _apply_song_prop(self, payload, gseq):
+        prop = payload.get("prop")
+        if prop not in SONG_PROPS:
+            self._warn("gseq %s: невідома властивість пісні %r" % (gseq, prop))
+            return
+        value = self._song_prop_value(prop, payload.get("value"))
+        if value is None:
+            self._warn("gseq %s: некоректне значення %r для %s"
+                       % (gseq, payload.get("value"), prop))
+            return
+        self._mirror["song"][prop] = value   # ДО запису в LOM -- глушимо ехо
+        try:
+            setattr(self._doc, prop, value)
+        except Exception as e:
+            self._warn("gseq %s: %s не встановився: %r" % (gseq, prop, e))
+        # Live міг клампнути або відхилити -- перечитуємо, як в ObjectMetaSet
+        actual = self._song_prop_value(prop, self._safe_attr(self._doc, prop))
+        if actual is not None:
+            self._mirror["song"][prop] = actual
+
     def _on_tracks(self):
         # СЃС‚СЂСѓРєС‚СѓСЂР° С‚СЂРµРєС–РІ Р·РјС–РЅРёР»Р°СЃСЊ: РїРµСЂРµРїС–РґРїРёСЃСѓС”РјРѕСЃСЊ С– СЃРєРёРґР°С”РјРѕ РґР·РµСЂРєР°Р»Рѕ СЃР»РѕС‚С–РІ,
         # С–РЅР°РєС€Рµ Р·СЃСѓРІ С–РЅРґРµРєСЃС–РІ РїРѕСЂРѕРґРёС‚СЊ С„Р°РЅС‚РѕРјРЅС– ClipLaunch
@@ -569,6 +663,7 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_song_props()
         self._prime_arrangement()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
@@ -646,6 +741,7 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_song_props()
         self._prime_arrangement()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
@@ -2141,6 +2237,9 @@ class AbletonMP(ControlSurface):
                 self._doc.start_playing()
             else:
                 self._doc.stop_playing()
+
+        elif etype == "SongPropSet":
+            self._apply_song_prop(payload, gseq)
 
         elif etype == "TempoSet":
             bpm = float(payload.get("bpm"))
@@ -5772,6 +5871,9 @@ class AbletonMP(ControlSurface):
         return {
             "playing": bool(self._doc.is_playing),
             "tempo": round(float(self._doc.tempo), 6),
+        "song": dict((p, self._song_prop_value(p, self._safe_attr(self._doc, p)))
+                     for p in SONG_PROPS
+                     if self._song_prop_value(p, self._safe_attr(self._doc, p)) is not None),
             "file_path": file_path,  # daemon РІРёРІРѕРґРёС‚СЊ С–Р· РЅСЊРѕРіРѕ С‚РµРєСѓ РїСЂРѕС”РєС‚Сѓ
             "samples": self._safe(self._scan_samples) or {},
             "tracks": tracks,

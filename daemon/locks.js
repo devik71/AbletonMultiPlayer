@@ -14,6 +14,8 @@
 const CONTINUOUS = new Set([
   'TempoSet', 'MixerSet', 'DeviceParamSet', 'ClipNotesSet', 'ClipLoopSet',
   'ArrangementClipMove', 'ArrangementClipNotesSet',
+  'SongPropSet',
+  'SongPropSet',
 ]);
 
 function trackName(registry, id, kind) {
@@ -32,6 +34,22 @@ export function lockTarget(type, payload, registry) {
   const p = payload || {};
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
+
+  if (type === 'SongPropSet') {
+    // Своя адреса на кожну властивість: двоє можуть одночасно правити
+    // розмір такту й тональність, і це не конфлікт.
+    const prop = p.prop;
+    if (!prop) return null;
+    return { object: `song:${prop}`, label: prop };
+  }
+
+  if (type === 'SongPropSet') {
+    // Своя адреса на кожну властивість: двоє можуть одночасно правити
+    // розмір такту й тональність, і це не конфлікт.
+    const prop = p.prop;
+    if (!prop) return null;
+    return { object: `song:${prop}`, label: prop };
+  }
 
   if (type === 'ArrangementClipMove' || type === 'ArrangementClipNotesSet') {
     // Кліп в Arrangement має власний uuid -- ні сцени, ні слоту в нього немає.

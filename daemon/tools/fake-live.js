@@ -86,9 +86,23 @@ const fakeDevices = () => [
 
 // Фейковий стан "проєкту" -- дзеркало того, що тримає справжній bridge.
 // id заповнюються на бутстрапі: або генеруємо, або приймаємо чужі.
+// Скалярні властивості пісні. Метроном і midi_recording_quantization
+// сюди не входять навмисно -- це особисті налаштування, не документ.
+const SONG_PROPS = {
+  signature_numerator: (v) => (Number.isInteger(v) && v >= 1 && v <= 99 ? v : null),
+  signature_denominator: (v) => ([1, 2, 4, 8, 16].includes(v) ? v : null),
+  clip_trigger_quantization: (v) => (Number.isInteger(v) && v >= 0 && v <= 13 ? v : null),
+  root_note: (v) => (Number.isInteger(v) && v >= 0 && v <= 11 ? v : null),
+  scale_name: (v) => (typeof v === 'string' && v && v.length <= 64 ? v : null),
+  scale_mode: (v) => Boolean(v),
+};
+
 const song = {
   playing: false,
   tempo: 120,
+  props: { signature_numerator: 4, signature_denominator: 4,
+           clip_trigger_quantization: 4, root_note: 0,
+           scale_name: 'Major', scale_mode: false },
   tracks: [
     { id: null, name: '1-MIDI', color: 0xff8c00, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
     { id: null, name: '2-MIDI', color: 0x33aa55, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
@@ -312,7 +326,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad').split(','),
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet').split(','),
   });
 
 function emit(type, payload) {
@@ -327,6 +341,7 @@ function emit(type, payload) {
 const snapshot = () => ({
   playing: song.playing,
   tempo: song.tempo,
+  song: { ...song.props },
   tracks: song.tracks.map((t, idx) => ({ ...t, idx })),
   scenes: song.scenes.map((s, idx) => ({ ...s, idx })),
 });
@@ -573,6 +588,7 @@ const fullState = () => ({
   at: Date.now() / 1000,
   tempo: song.tempo,
   playing: song.playing,
+  song: { ...song.props },
   tracks: song.tracks.filter((t) => t.id).map((t, idx) => ({
     id: t.id,
     idx,
@@ -1002,6 +1018,14 @@ function apply(type, payload, gseq) {
     case 'TransportSet':
       song.playing = !!payload.playing;
       break;
+    case 'SongPropSet': {
+      const check = SONG_PROPS[payload.prop];
+      if (!check) return reject(`невідома властивість пісні ${payload.prop}`);
+      const value = check(payload.value);
+      if (value === null) return reject(`некоректне значення ${payload.value} для ${payload.prop}`);
+      song.props[payload.prop] = value;
+      break;
+    }
     case 'TempoSet':
       song.tempo = payload.bpm;
       break;
@@ -1408,6 +1432,19 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       song.playing = false;
       emit('TransportSet', { playing: false });
       break;
+    case 'songprop': {
+      const prop = rest[0];
+      const check = SONG_PROPS[prop];
+      if (!check) return console.log(`невідома властивість ${prop}`);
+      const raw = prop === 'scale_name' ? rest.slice(1).join(' ')
+        : prop === 'scale_mode' ? rest[1] === 'true' : Number(rest[1]);
+      const value = check(raw);
+      if (value === null) return console.log(`некоректне значення ${rest[1]}`);
+      song.props[prop] = value;
+      emit('SongPropSet', { prop, value });
+      console.log(`${prop} = ${value}`);
+      break;
+    }
     case 'tempo':
       song.tempo = Number(rest[0]);
       emit('TempoSet', { bpm: song.tempo });

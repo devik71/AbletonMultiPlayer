@@ -99,6 +99,11 @@ const clipOps = (ref, clips) => clips.flatMap((entry) => {
 export function stateToOps(state) {
   const ops = [];
   if (typeof state.tempo === 'number') ops.push(['TempoSet', { bpm: state.tempo }]);
+  // Розмір такту й тональність -- частина документа, а не смак: без них
+  // ті самі позиції нот означають у партнера інше.
+  for (const [prop, value] of Object.entries(state.song || {})) {
+    ops.push(['SongPropSet', { prop, value }]);
+  }
   for (const track of state.tracks || []) {
     if (!track.id) continue;
     const ref = { id: track.id };

@@ -1136,10 +1136,40 @@ try {
     if (!/"start_time": 32/.test(state)) throw new Error('кліпа на 32-й долі в партнера немає');
   });
 
-  await check('журнал: 86 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('розмір такту й тональність доїжджають, сміття -- ні', async () => {
+    // Без цього партнери в різному метрі: ті самі позиції нот і меж кліпів
+    // означають у них різне, і ClipLaunch спрацьовує в різний момент.
+    const from = l2.out.length;
+    l1.stdin.write('songprop signature_numerator 6\n');
+    await waitFor(l2, /<- #\d+ SongPropSet .*"signature_numerator".*"value":6/, 8000, from);
+    l1.stdin.write('songprop clip_trigger_quantization 2\n');
+    await waitFor(l2, /<- #\d+ SongPropSet .*"clip_trigger_quantization".*"value":2/, 8000, from);
+    l1.stdin.write('songprop root_note 5\n');
+    await waitFor(l2, /<- #\d+ SongPropSet .*"root_note".*"value":5/, 8000, from);
+    if (/SongPropSet ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер відхилив властивість');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    const state = l2.out.slice(shown);
+    if (!/"signature_numerator": 6/.test(state)) throw new Error('метр у партнера не змінився');
+    if (!/"root_note": 5/.test(state)) throw new Error('тональність у партнера не змінилась');
+
+    // Знаменник розміру Live приймає лише степенем двійки: п'ятірку він
+    // мовчки округлив би, і партнери розійшлись би, не помітивши
+    const bad = l2.out.length;
+    await inject({ type: 'SongPropSet', payload: { prop: 'signature_denominator', value: 5 } });
+    await waitFor(l2, /SongPropSet ВІДХИЛЕНО \(некоректне значення 5/, 6000, bad);
+
+    const unknown = l2.out.length;
+    await inject({ type: 'SongPropSet', payload: { prop: 'metronome', value: true } });
+    await waitFor(l2, /SongPropSet ВІДХИЛЕНО \(невідома властивість пісні metronome\)/, 6000, unknown);
+  });
+
+  await check('журнал: 91 подія, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 86) throw new Error(`очікував 86 подій, у журналі ${lines.length}`);
+    if (lines.length !== 91) throw new Error(`очікував 91 подію, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

@@ -187,3 +187,17 @@ test('переїзд кліпу в Arrangement згортається, а ств
   ]);
   assert.equal(structural.dropped, 0);
 });
+
+test('властивості пісні згортаються кожна у своїй адресі', () => {
+  gseq = 0;
+  const set = (prop, value) => ev('SongPropSet', { prop, value });
+  const out = compactTail([set('signature_numerator', 3), set('signature_numerator', 6),
+    set('signature_numerator', 7)]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.value, 7);
+
+  gseq = 0;
+  // Розмір такту не перекриває тональність: різні властивості -- різні адреси
+  const mixed = compactTail([set('signature_numerator', 3), set('root_note', 5)]);
+  assert.equal(mixed.dropped, 0);
+});

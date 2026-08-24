@@ -37,6 +37,14 @@ export function supersedeKey(ev) {
       return 'tempo';
     case 'TransportSet':
       return 'transport';
+    case 'SongPropSet':
+      // Кожна властивість -- власна адреса: розмір такту не перекриває
+      // тональність, а серія рухів однієї доїжджає останньою.
+      return `song:${p.prop}`;
+    case 'SongPropSet':
+      // Кожна властивість -- власна адреса: розмір такту не перекриває
+      // тональність, а серія рухів однієї доїжджає останньою.
+      return `song:${p.prop}`;
     case 'MixerSet':
       return `mixer:${trackKey(p.track)}:${p.param}:${p.index ?? ''}`;
     case 'TrackToggle':
