@@ -207,6 +207,7 @@ class AbletonMP(ControlSurface):
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._unshared_tracks = set()  # групи: uuid є, але в мережу не йдуть
         self._group_warned = set()
+        self._exc_seen = set()   # про кожне місце -- один рядок партнеру
         self._view_cbs = []      # підписки на song.view, окремо від _obj_cbs
         self._view_pending = None
         self._suppress_view = False
@@ -7150,6 +7151,19 @@ class AbletonMP(ControlSurface):
 
     def _log_exc(self, where):
         self._log("EXC in %s:\n%s" % (where, traceback.format_exc()))
+        # Виняток усередині Live -- найдорожчий різновид мовчання: усе
+        # виглядає живим, а частина синхронізації просто не працює. Тому
+        # коротким рядком він іде й у вікно daemon, де людина дивиться.
+        # Один рядок на місце: залп однакових винятків на кожному тіку
+        # сам став би другим потоком навантаження.
+        if where in self._exc_seen:
+            return
+        self._exc_seen.add(where)
+        try:
+            first = traceback.format_exc().strip().splitlines()[-1]
+        except Exception:
+            first = "?"
+        self._warn("виняток у %s: %s (подробиці в bridge.log)" % (where, first))
 
     def _log(self, text):
         line = "[%s] %s" % (time.strftime("%H:%M:%S"), text)
