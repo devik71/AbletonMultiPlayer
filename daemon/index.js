@@ -312,6 +312,11 @@ function sendStateToPeer(state) {
 function pullFromPeer(author, mode = 'apply') {
   if (!connected) return log('немає звʼязку з relay');
   if (!author) return log(`кого просити? ${mode} <author>`);
+  if (pullFrom) {
+    // Один запит за раз: інакше другий перемкнув би режим першого,
+    // і pull тихо перетворився б на diff або навпаки.
+    return log(`вже чекаю знімок від ${pullFrom} — дай йому дочекатись`);
+  }
   pullMode = mode;
   peerCollector.reset();
   pullFrom = author;
