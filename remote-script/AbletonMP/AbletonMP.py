@@ -203,7 +203,6 @@ class AbletonMP(ControlSurface):
         self._rec_pending = {}   # clip key -> кліп, що зараз пишеться
         self._load_queue = []    # DeviceLoad: по одному за тік
         self._browser_cache = None
-        self._browser_named_cache = None
         self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
         self._unshared_tracks = set()  # групи: uuid є, але в мережу не йдуть
         self._group_warned = set()
@@ -6028,22 +6027,6 @@ class AbletonMP(ControlSurface):
         name = ref.get("name")
         return by_name.get(name.lower()) if isinstance(name, str) else None
 
-    def _browser_named(self):
-        """Назва девайса -> [(категорія, айтем)]. Зворотний бік _browser_index.
-
-        Автоемісії нема з чого будувати uri: Device не віддає його взагалі.
-        Єдина ниточка назад у браузер -- class_display_name, і саме тому
-        неоднозначна назва означає відмову, а не вибір навмання.
-        """
-        if self._browser_named_cache is not None:
-            return self._browser_named_cache
-        named = {}
-        for category, (_by_uri, by_name) in self._browser_index().items():
-            for key, item in by_name.items():
-                named.setdefault(key, []).append((category, item))
-        self._browser_named_cache = named
-        return named
-
     def _device_is_bare(self, device):
         """Девайс щойно з браузера, без власного вмісту.
 
@@ -6070,28 +6053,6 @@ class AbletonMP(ControlSurface):
             pass
         return True
 
-    def _device_browser_ref(self, device):
-        """Адреса девайса в бібліотеці партнера -- або None, якщо не певні.
-
-        Фільтр навмисно суворий: рівно один айтем першого рівня з такою назвою
-        в усіх трьох категоріях разом. Розбіжність відновна знімком, а мовчки
-        покладений не той девайс -- ні.
-        """
-        signature = self._device_signature(device)
-        if signature is None or not self._device_is_bare(device):
-            return None
-        class_name, display_name = signature
-        matches = self._browser_named().get(display_name.lower(), [])
-        if len(matches) != 1:
-            return None
-        category, item = matches[0]
-        try:
-            return {"uri": str(item.uri), "name": str(item.name),
-                    "category": category, "class_name": class_name}
-        except Exception:
-            return None
-
-    @staticmethod
     def _device_tree_sig(device):
         """Сигнатура для діффу структури -- разом із name.
 
@@ -6427,10 +6388,6 @@ class AbletonMP(ControlSurface):
             except Exception:
                 return False
         return True
-
-    def _struct_guard(self):
-        """Контекст, у якому власна структурна правка не летить назад автоемісією."""
-        return self._suppress_struct
 
     def _after_struct_change(self):
         self._rewire_tracks()
