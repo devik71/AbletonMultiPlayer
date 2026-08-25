@@ -149,6 +149,11 @@ export function stateToOps(state) {
       if (clip.loop) {
         ops.push(['ClipLoopSet', { track: ref, clip: { id: clip.id }, ...clip.loop }]);
       }
+      for (const prop of ['name', 'color']) {
+        if (clip[prop] === undefined || clip[prop] === null) continue;
+        ops.push(['ObjectMetaSet', { object: 'clip', track: ref, clip: { id: clip.id },
+                                     prop, value: clip[prop] }]);
+      }
     }
   }
   for (const scene of state.scenes || []) {

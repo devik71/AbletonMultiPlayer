@@ -140,6 +140,30 @@ console.log(`  журнал: ${live.length} подій, head #${head?.gseq ?? 0}
 console.log(`  архів: ${archive.length} подій${archive.length ? ` до #${archive[archive.length - 1].gseq}` : ''}`);
 for (const note of notes) console.log(`  · ${note}`);
 
+// Розкладка журналу по типах і авторах. Після сесії це перше, на що
+// дивишся: чого було багато, хто це слав і чи не роздувся якийсь тип.
+const all = archive.length ? archive : live;
+if (all.length) {
+  const byType = new Map();
+  const byAuthor = new Map();
+  let biggest = null;
+  for (const ev of all) {
+    const size = JSON.stringify(ev.payload ?? {}).length;
+    const t = byType.get(ev.type) || { n: 0, bytes: 0 };
+    t.n += 1; t.bytes += size;
+    byType.set(ev.type, t);
+    byAuthor.set(ev.author, (byAuthor.get(ev.author) || 0) + 1);
+    if (!biggest || size > biggest.size) biggest = { size, type: ev.type, gseq: ev.gseq };
+  }
+  const top = [...byType].sort((a, b) => b[1].n - a[1].n).slice(0, 8);
+  console.log('  типи: ' + top.map(([type, x]) => `${type}×${x.n}`).join(', ') +
+              (byType.size > top.length ? `, ще ${byType.size - top.length} типів` : ''));
+  console.log('  автори: ' + [...byAuthor].map(([a, n]) => `${a}×${n}`).join(', '));
+  if (biggest) {
+    console.log(`  найбільша подія: ${biggest.type} #${biggest.gseq}, ${biggest.size} символів`);
+  }
+}
+
 if (problems.length) {
   console.log('');
   for (const problem of problems) console.log(`  ПРОБЛЕМА: ${problem}`);

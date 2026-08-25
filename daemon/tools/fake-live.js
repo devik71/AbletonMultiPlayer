@@ -152,6 +152,8 @@ const metadataTarget = (payload) => {
   if (payload.object === 'track') return deviceTrackByRef(payload.track);
   if (payload.object === 'scene') return song.scenes.find((s) => s.id === payload.scene?.id);
   if (payload.object === 'clip') {
+    // Кліп у лінійці має власний uuid; сесійний адресується сценою.
+    if (payload.clip?.id) return arrClipById(payload.clip.id)?.clip || null;
     const t = trackById(payload.track?.id);
     const sidx = sceneIdx(payload.scene?.id);
     return t && sidx >= 0 ? t.clips[sidx] : null;
