@@ -6350,20 +6350,23 @@ class AbletonMP(ControlSurface):
             self._warn("gseq %s: девайс не завантажено -- запис триває надто довго"
                        % (entry["gseq"],))
             return True
-        self._load_queue.pop(0)
         if etype == "SampleLoad":
             # Єдиний тип, який може чесно сказати "ще не готовий": файл
             # їде filesync-ом окремо від події, і чекати його -- нормально.
+            # З черги знімаємо ЛИШЕ коли зробили: інакше ротація викликача
+            # прокрутила б не того, кого щойно пробували.
             done = self._safe(self._apply_sample_load, entry["payload"], entry["gseq"])
             if done:
+                self._load_queue.pop(0)
                 return True
             if time.time() - entry["since"] < SAMPLE_QUEUE_MAX_SEC:
-                self._load_queue.append(entry)
                 return False  # файл ще їде -- хай інші йдуть попереду
+            self._load_queue.pop(0)
             self._warn("gseq %s: семпл %r так і не зʼявився в теці проєкту"
                        % (entry["gseq"],
                           ((entry["payload"] or {}).get("sample") or {}).get("path")))
             return True
+        self._load_queue.pop(0)
         handler = {"DeviceLoad": self._load_device,
                    "DeviceInsert": self._apply_device_insert,
                    "DeviceMove": self._apply_device_move}.get(etype)
