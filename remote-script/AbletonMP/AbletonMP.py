@@ -6315,6 +6315,17 @@ class AbletonMP(ControlSurface):
         сотні мілісекунд, і залп підвісив би Live."""
         if not self._load_queue:
             return
+        # Голова черги може чекати -- локатор до паузи транспорту, семпл
+        # до приїзду файлу. Тримати за нею всю чергу не можна: одна подія,
+        # що чекає пʼять хвилин, зупинила б і завантаження девайсів. Тому
+        # той, хто не може зараз, іде в кінець, а ми пробуємо наступного.
+        for _ in range(len(self._load_queue)):
+            if self._flush_one():
+                return
+            self._load_queue.append(self._load_queue.pop(0))
+
+    def _flush_one(self):
+        """True -- щось зроблено або відкинуто; False -- голова ще чекає."""
         entry = self._load_queue[0]
         etype = entry.get("etype", "DeviceLoad")
         # Чекає на зупинку транспорту лише DeviceLoad: тільки він рухає виділення.
@@ -6322,42 +6333,43 @@ class AbletonMP(ControlSurface):
         if etype in ("CueSet", "CueDelete"):
             if self._safe_attr(self._doc, "is_playing"):
                 if time.time() - entry["since"] < CUE_QUEUE_MAX_SEC:
-                    return  # чекаємо, доки транспорт зупиниться
+                    return False  # чекаємо, доки транспорт зупиниться
                 self._load_queue.pop(0)
                 self._warn("gseq %s: локатор не поставлено -- відтворення "
                            "триває надто довго" % (entry["gseq"],))
-                return
+                return True
             self._load_queue.pop(0)
             handler = (self._apply_cue_set if etype == "CueSet"
                        else self._apply_cue_delete)
             self._safe(handler, entry["payload"], entry["gseq"])
-            return
+            return True
         if etype in ("DeviceLoad", "SampleLoad") and self._recording_guard():
             if time.time() - entry["since"] < LOAD_QUEUE_MAX_SEC:
-                return  # чекаємо, доки транспорт зупиниться
+                return False  # чекаємо, доки транспорт зупиниться
             self._load_queue.pop(0)
             self._warn("gseq %s: девайс не завантажено -- запис триває надто довго"
                        % (entry["gseq"],))
-            return
+            return True
         self._load_queue.pop(0)
         if etype == "SampleLoad":
             # Єдиний тип, який може чесно сказати "ще не готовий": файл
             # їде filesync-ом окремо від події, і чекати його -- нормально.
             done = self._safe(self._apply_sample_load, entry["payload"], entry["gseq"])
             if done:
-                return
+                return True
             if time.time() - entry["since"] < SAMPLE_QUEUE_MAX_SEC:
                 self._load_queue.append(entry)
-                return
+                return False  # файл ще їде -- хай інші йдуть попереду
             self._warn("gseq %s: семпл %r так і не зʼявився в теці проєкту"
                        % (entry["gseq"],
                           ((entry["payload"] or {}).get("sample") or {}).get("path")))
-            return
+            return True
         handler = {"DeviceLoad": self._load_device,
                    "DeviceInsert": self._apply_device_insert,
                    "DeviceMove": self._apply_device_move}.get(etype)
         if handler is not None:
             self._safe(handler, entry["payload"], entry["gseq"])
+        return True
 
     def _resolve_device_container(self, ref, chain_path, gseq):
         """Трек + ланцюг -> контейнер, у якому живуть девайси.
