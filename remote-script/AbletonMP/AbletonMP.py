@@ -5888,7 +5888,14 @@ class AbletonMP(ControlSurface):
             return
         if not self._suppress_struct:
             self._safe(self._diff_arrangement)
-        if self._prime_arrangement():
+        changed = self._prime_arrangement()
+        # Новий кліп у лінійці ще не має жодної підписки: без перепідключення
+        # його ноти й властивості не поїхали б доти, доки щось інше не смикне
+        # _rewire_tracks. Перепідписуємось цілком, бо часткове вішання
+        # накопичило б дублі -- кожен виклик робить НОВІ callback-обʼєкти.
+        self._rewire_tracks()
+        self._prime_arrangement_clips()
+        if changed:
             self._persist_registry()
 
     def _structural_gaps(self, state):
