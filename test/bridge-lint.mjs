@@ -94,3 +94,27 @@ test('усе, що _apply вміє застосувати, оголошено в
   assert.deepEqual(undeclared, [],
     `застосовуємо, але не оголошуємо -- партнер не знатиме: ${undeclared.join(', ')}`);
 });
+
+test('праймери, що ЧИСТЯТЬ дзеркало, завжди тягнуть за собою лінійку', () => {
+  // Тонке місце. _prime_notes, _prime_all_clip_props і _prime_all_clip_warp
+  // починаються з очищення свого словника -- а в тих самих словниках живуть
+  // записи кліпів ЛІНІЙКИ під ключем arr:<uuid>. Пропустити після них
+  // _prime_arrangement_clips означає лишити лінійку без базової лінії,
+  // і найгірший наслідок саме в нотах: правка виглядатиме як базова лінія
+  // і не поїде взагалі.
+  const wipers = ['_prime_notes', '_prime_all_clip_props', '_prime_all_clip_warp'];
+  for (const name of wipers) {
+    const body = src.slice(src.indexOf(`    def ${name}(self`));
+    assert.match(body.slice(0, 400), /= \{\}/, `${name} мав би чистити словник`);
+  }
+
+  const lines = src.split('\n');
+  const orphans = [];
+  lines.forEach((line, i) => {
+    if (!wipers.includes(line.trim().replace(/^self\.|\(\)$/g, ''))) return;
+    const near = lines.slice(i, i + 12).join('\n');
+    if (!near.includes('_prime_arrangement_clips()')) orphans.push(i + 1);
+  });
+  assert.deepEqual(orphans, [],
+    `чистять дзеркало без відновлення лінійки, рядки: ${orphans.join(', ')}`);
+});
