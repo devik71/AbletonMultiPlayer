@@ -48,7 +48,7 @@ APPLY_TYPES = [
     "DeviceLoad",
     "DeviceInsert", "DeviceDelete", "DeviceMove",
     "SampleLoad", "SongPropSet", "SceneTimingSet", "ClipPropSet",
-    "CueSet", "CueDelete",
+    "CueSet", "CueDelete", "ReturnCreate", "ReturnDelete",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
@@ -78,7 +78,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -184,7 +184,7 @@ class AbletonMP(ControlSurface):
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
-            "scene_timing": {}, "clip_props": {}, "cues": None,
+            "scene_timing": {}, "clip_props": {}, "cues": None, "returns": None,
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -725,6 +725,8 @@ class AbletonMP(ControlSurface):
         if self._registry_ready:
             self._diff_tracks(emit=not self._suppress_struct)
             aux_changed = self._refresh_aux_tracks()
+            if not self._suppress_struct:
+                self._safe(self._diff_returns)
             if self._refresh_chains() or aux_changed:
                 self._persist_registry()
             self._prime_mixer()  # listener'Рё РјС–РєС€РµСЂР° РїРµСЂРµРІС–С€Р°РЅС– РЅР° РЅРѕРІС– РѕР±'С”РєС‚Рё
@@ -834,6 +836,7 @@ class AbletonMP(ControlSurface):
         self._prime_scene_timing()
         self._prime_all_clip_props()
         self._prime_cues()
+        self._prime_returns()
         self._prime_arrangement()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
@@ -916,6 +919,7 @@ class AbletonMP(ControlSurface):
         self._prime_scene_timing()
         self._prime_all_clip_props()
         self._prime_cues()
+        self._prime_returns()
         self._prime_arrangement()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
@@ -2006,6 +2010,102 @@ class AbletonMP(ControlSurface):
         self._toggle_cue_at(time, gseq)
         self._mirror["cues"] = self._cue_map()
 
+    def _return_ids(self):
+        """uuid Return-треків у порядку позицій."""
+        out = []
+        try:
+            returns = list(self._doc.return_tracks)
+        except Exception:
+            return out
+        for track in returns:
+            out.append(self._aux_tracks_reg.id_of(track, create=False))
+        return out
+
+    def _diff_returns(self):
+        """Поява й зникнення Return-треків -> ReturnCreate/ReturnDelete.
+
+        Без цього набір Return-треків між машинами розходиться, а сенди
+        адресуються ПОЗИЦІЄЮ -- отже той самий index означає інший ревер.
+        Контрольна сума в MixerSet це ловить, але ловити краще те, чого
+        не можна уникнути, а не те, що можна синхронізувати.
+        """
+        previous = self._mirror.get("returns")
+        current = self._return_ids()
+        if previous is None:
+            self._mirror["returns"] = current
+            return
+        self._mirror["returns"] = current
+        prev_set = set(x for x in previous if x)
+        cur_set = set(x for x in current if x)
+        for idx, rid in enumerate(current):
+            if rid and rid not in prev_set:
+                name = ""
+                try:
+                    name = self._safe_name(list(self._doc.return_tracks)[idx])
+                except Exception:
+                    pass
+                self._emit("ReturnCreate", {"track": {"id": rid, "kind": "return"},
+                                            "idx": idx, "name": name})
+        for rid in previous:
+            if rid and rid not in cur_set:
+                self._emit("ReturnDelete", {"track": {"id": rid, "kind": "return"}})
+
+    def _prime_returns(self):
+        self._mirror["returns"] = self._return_ids()
+
+    def _apply_return_create(self, payload, gseq):
+        ref = payload.get("track") or {}
+        uid = ref.get("id")
+        if not uid:
+            return
+        if self._aux_tracks_reg.obj_of(uid) is not None:
+            return  # ідемпотентність: такий Return уже є
+        self._suppress_struct = True
+        try:
+            self._doc.create_return_track()
+            returns = list(self._doc.return_tracks)
+            if not returns:
+                return
+            created = returns[-1]   # LOM додає лише в кінець
+            name = self._doc_str(payload.get("name") or "")
+            if name:
+                try:
+                    created.name = name
+                except Exception:
+                    pass
+            self._aux_tracks_reg.bind(uid, created)
+        except Exception as e:
+            self._warn("gseq %s: Return-трек не створився: %r" % (gseq, e))
+        finally:
+            self._suppress_struct = False
+            self._after_returns_changed()
+
+    def _apply_return_delete(self, payload, gseq):
+        uid = (payload.get("track") or {}).get("id")
+        target = self._aux_tracks_reg.obj_of(uid) if uid else None
+        if target is None:
+            return  # tombstone: такого Return уже немає
+        try:
+            idx = list(self._doc.return_tracks).index(target)
+        except Exception:
+            return
+        self._suppress_struct = True
+        try:
+            self._doc.delete_return_track(idx)
+        except Exception as e:
+            self._warn("gseq %s: Return-трек не видалився: %r" % (gseq, e))
+        finally:
+            self._suppress_struct = False
+            self._after_returns_changed()
+
+    def _after_returns_changed(self):
+        """Зміна набору Return-треків зсуває ВСІ сенди на всіх треках."""
+        self._rewire_tracks()
+        self._refresh_aux_tracks()
+        self._prime_mixer()
+        self._prime_returns()
+        self._persist_registry()
+
     def _clip_key(self, track, scene):
         if not self._registry_ready:
             return None
@@ -2674,6 +2774,12 @@ class AbletonMP(ControlSurface):
                 self._doc.start_playing()
             else:
                 self._doc.stop_playing()
+
+        elif etype == "ReturnCreate":
+            self._apply_return_create(payload, gseq)
+
+        elif etype == "ReturnDelete":
+            self._apply_return_delete(payload, gseq)
 
         elif etype == "CueSet":
             self._queue_cue("CueSet", payload, gseq)

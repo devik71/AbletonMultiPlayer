@@ -1311,10 +1311,33 @@ try {
     await waitFor(l2, /MixerSet ВІДХИЛЕНО \(сенд 0 веде в різні Return-треки/, 6000, bad);
   });
 
-  await check('журнал: 109 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('Return-трек доїжджає, і сенди після нього лишаються на місці', async () => {
+    // Набір Return-треків визначає, ЩО означає index сенда. Доки він
+    // не синхронізувався, той самий index на двох машинах вів у різні ревери.
+    const from = l2.out.length;
+    l1.stdin.write('addreturn C-Tape\n');
+    await waitFor(l2, /<- #\d+ ReturnCreate .*C-Tape/, 8000, from);
+    if (/ReturnCreate ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер відхилив Return');
+    }
+
+    // Тепер сенд у новий Return має пройти контрольну суму з обох боків
+    const sent = l2.out.length;
+    l1.stdin.write('send 0 2 0.55\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"value":0\.55.*"index":2/, 8000, sent);
+    if (/MixerSet ВІДХИЛЕНО/.test(l2.out.slice(sent))) {
+      throw new Error('сенд у щойно створений Return відхилено — набори розійшлись');
+    }
+
+    const gone = l2.out.length;
+    l1.stdin.write('delreturn 2\n');
+    await waitFor(l2, /<- #\d+ ReturnDelete/, 8000, gone);
+  });
+
+  await check('журнал: 112 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 109) throw new Error(`очікував 109 подій, у журналі ${lines.length}`);
+    if (lines.length !== 112) throw new Error(`очікував 112 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

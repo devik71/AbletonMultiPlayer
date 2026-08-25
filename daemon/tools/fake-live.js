@@ -338,7 +338,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,' +
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,' +
       'ArrangementClipCreate,ArrangementClipMove,ArrangementClipDelete,ArrangementClipNotesSet').split(','),
   });
 
@@ -1073,6 +1073,24 @@ function apply(type, payload, gseq) {
     case 'TransportSet':
       song.playing = !!payload.playing;
       break;
+    case 'ReturnCreate': {
+      const id = payload.track?.id;
+      if (!id) return reject('Return без uuid');
+      if (song.return_tracks.some((t) => t.id === id)) break;   // ідемпотентність
+      song.return_tracks.push({
+        id, kind: 'return', name: payload.name || `${String.fromCharCode(65 + song.return_tracks.length)}-Return`,
+        color: 0x777777, devices: [], mix: {}, mute: false, solo: false,
+      });
+      refreshChainIds();
+      break;
+    }
+    case 'ReturnDelete': {
+      const i = song.return_tracks.findIndex((t) => t.id === payload.track?.id);
+      if (i < 0) break;   // tombstone
+      song.return_tracks.splice(i, 1);
+      refreshChainIds();
+      break;
+    }
     case 'CueSet': {
       const t = Number(payload.time);
       if (!(t >= 0)) return reject(`некоректна позиція локатора ${payload.time}`);
@@ -1530,6 +1548,26 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       song.playing = false;
       emit('TransportSet', { playing: false });
       break;
+    case 'addreturn': {
+      const t = {
+        id: newId(), kind: 'return', name: rest.slice(0).join(' ') || `${String.fromCharCode(65 + song.return_tracks.length)}-Return`,
+        color: 0x777777, devices: [], mix: {}, mute: false, solo: false,
+      };
+      song.return_tracks.push(t);
+      refreshChainIds();
+      emit('ReturnCreate', { track: { id: t.id, kind: 'return' }, idx: song.return_tracks.length - 1, name: t.name });
+      console.log(`Return ${t.name} додано`);
+      break;
+    }
+    case 'delreturn': {
+      const t = song.return_tracks[Number(rest[0]) || 0];
+      if (!t) return console.log('немає такого Return');
+      song.return_tracks.splice(song.return_tracks.indexOf(t), 1);
+      refreshChainIds();
+      emit('ReturnDelete', { track: { id: t.id, kind: 'return' } });
+      console.log(`Return ${t.name} прибрано`);
+      break;
+    }
     case 'cue': {
       const t = Number(rest[0]);
       if (!(t >= 0)) return console.log('некоректна позиція');
