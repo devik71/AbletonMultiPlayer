@@ -135,6 +135,11 @@ export function stateToOps(state) {
       if (chain[param] === undefined) continue;
       ops.push(['ChainMixerSet', { chain: { id: chain.id }, param, value: chain[param] }]);
     }
+
+    for (const prop of ['name', 'color']) {
+      if (chain[prop] === undefined || chain[prop] === null) continue;
+      ops.push(['ObjectMetaSet', { object: 'chain', chain: { id: chain.id }, prop, value: chain[prop] }]);
+    }
   }
   // Локатори -- структура документа: «Verse», «Drop». Партнер без них
   // бачить голу лінійку.

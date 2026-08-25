@@ -676,7 +676,7 @@ const fullState = () => ({
   playing: song.playing,
   song: { ...song.props },
   cues: Object.entries(song.cues).map(([time, name]) => ({ time: Number(time), name })),
-  chains: chainRecords.map((rec) => { const c = chainById(rec.id); return { id: rec.id, ...(c?.mix || {}), mute: !!c?.mute, solo: !!c?.solo }; }),
+  chains: chainRecords.map((rec) => { const c = chainById(rec.id); return { id: rec.id, ...(c?.mix || {}), mute: !!c?.mute, solo: !!c?.solo, name: c?.name, color: c?.color }; }),
   tracks: song.tracks.filter((t) => t.id).map((t, idx) => ({
     id: t.id,
     idx,

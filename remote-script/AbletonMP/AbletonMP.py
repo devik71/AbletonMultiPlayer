@@ -2513,6 +2513,14 @@ class AbletonMP(ControlSurface):
             value = self._safe_attr(chain, prop)
             if value is not None:
                 state[prop] = bool(value)
+        # Назва й колір -- метадані, вони їдуть ObjectMetaSet, але в знімку
+        # мають бути поруч: інакше pull лишав би пади без підписів.
+        name = self._safe_name(chain)
+        if name:
+            state["name"] = name
+        color = self._safe_color(chain)
+        if color is not None:
+            state["color"] = color
         return state
 
     def _make_chain_cb(self, chain, uid, key):
