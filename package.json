@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/announce.mjs test/compact.mjs test/locks.mjs test/presence.mjs test/state.mjs test/hardening.mjs test/recovery.mjs && node test/e2e.mjs",
+    "test": "node --test --test-concurrency=1 test/announce.mjs test/compare.mjs test/compact.mjs test/locks.mjs test/presence.mjs test/state.mjs test/hardening.mjs test/recovery.mjs && node test/e2e.mjs",
     "test:hardening": "node --test test/hardening.mjs",
     "test:recovery": "node --test test/recovery.mjs",
     "test:e2e": "node test/e2e.mjs",
@@ -14,6 +14,7 @@
     "test:presence": "node --test test/presence.mjs",
     "memory": "node tools/memory.mjs",
     "check-install": "node tools/check-install.mjs",
-    "test:announce": "node --test test/announce.mjs"
+    "test:announce": "node --test test/announce.mjs",
+    "test:compare": "node --test test/compare.mjs"
   }
 }

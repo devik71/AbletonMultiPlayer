@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { FileSync } from './filesync.js';
+import { compareStates } from './compare.js';
 import { LockKeeper } from './locks.js';
 import { PresenceKeeper, describePresence, shouldFollow } from './presence.js';
 import { StateCollector, stateDigest, summarize } from './state.js';
@@ -157,6 +158,9 @@ const stateCollector = new StateCollector({
 // Керування з терміналу: daemon і так живе у відкритому вікні, тож окремий
 // канал керування йому не потрібен.
 let applyId = 0;
+// pull застосовує чужий знімок, diff лише порівнює -- діагностика не має
+// змінювати те, що діагностує.
+let pullMode = 'apply';
 
 createInterface({ input: process.stdin }).on('line', (line) => {
   const [cmd, ...rest] = line.trim().split(/\s+/);
@@ -179,6 +183,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     return toBridge({ m: 'state_apply', path, id: applyId });
   }
   if (cmd === 'pull') return pullFromPeer(rest[0]);
+  if (cmd === 'diff') return pullFromPeer(rest[0], 'diff');
   if (cmd === 'follow') return startFollow(rest[0]);
   if (cmd === 'undo') {
     if (!connected) return log('немає звʼязку з relay');
@@ -191,7 +196,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     return log(line ? 'дивляться: ' + line : 'ніхто нікуди не дивиться');
   }
   if (cmd === 'refresh') return requestFullState();
-  log('команди: state | apply [файл] | pull <author> | follow <author>|off | who | undo [author] | refresh');
+  log('команди: state | apply [файл] | pull <author> | diff <author> | ' +
+      'follow <author>|off | who | undo [author] | refresh');
 });
 
 // Обмін знімками між учасниками. Relay тут труба: знімок не подія, у журнал
@@ -220,6 +226,23 @@ const peerCollector = new StateCollector({
     const counts = summarize(state);
     log(`знімок ${author} отримано (${info.chars} символів, digest ${stateDigest(state)}): ` +
         `${counts.tracks} треків, ${counts.parameters} параметрів, ${counts.notes} нот`);
+
+    if (pullMode === 'diff') {
+      pullMode = 'apply';
+      if (!lastState) return log(`свого знімка ще немає — знімок ${author} лежить у ${path}`);
+      if (stateDigest(lastState) === stateDigest(state)) {
+        return log(`стан збігається з ${author} повністю (digest ${stateDigest(state)})`);
+      }
+      const lines = compareStates(lastState, state);
+      if (!lines.length) {
+        return log(`digest різні, але предметних розбіжностей не видно — ` +
+                   `швидше за все відрізняється те, чого порівняння не дивиться`);
+      }
+      log(`розбіжності з ${author} (${lines.length}):`);
+      for (const line of lines) log(`  · ${line}`);
+      return;
+    }
+
     if (!bridgeInfo?.features?.includes('state_apply')) {
       return log(`bridge не вміє state_apply — знімок лежить у ${path}`);
     }
@@ -246,9 +269,10 @@ function sendStateToPeer(state) {
   log(`віддав знімок ${author}: ${blob.length} символів у ${chunks.length} чанках`);
 }
 
-function pullFromPeer(author) {
+function pullFromPeer(author, mode = 'apply') {
   if (!connected) return log('немає звʼязку з relay');
-  if (!author) return log('кого просити? pull <author>');
+  if (!author) return log(`кого просити? ${mode} <author>`);
+  pullMode = mode;
   peerCollector.reset();
   pullFrom = author;
   clearTimeout(pullTimer);
@@ -258,7 +282,7 @@ function pullFromPeer(author) {
     pullFrom = null;
   }, PULL_TIMEOUT_MS);
   ws.send(JSON.stringify({ m: 'peer_state_request', to: author }));
-  log(`прошу знімок у ${author}`);
+  log(`прошу знімок у ${author}${mode === 'diff' ? ' (лише порівняти)' : ''}`);
 }
 
 /** Прогалина у структурі -- людським рядком, а не JSON-ом. */

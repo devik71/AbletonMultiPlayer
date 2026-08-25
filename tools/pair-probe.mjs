@@ -115,6 +115,20 @@ try {
     await waitFor(d2, /знімок застосовано: \d+ з \d+|знімок від p1/, 30000, from);
   });
 
+  await check('diff називає розбіжність, не змінюючи стану', async () => {
+    // Діагностика не має чіпати те, що діагностує: pull застосовує чужий
+    // знімок, diff лише порівнює.
+    const from = d2.out.length;
+    d2.stdin.write('diff p1\n');
+    await waitFor(d2, /розбіжності з p1 \(\d+\)|стан збігається з p1/, 30000, from);
+    const said = d2.out.slice(from);
+    if (/знімок застосовано/.test(said)) {
+      throw new Error('diff застосував знімок замість порівняння');
+    }
+    const shown = (said.match(/  · [^\n]+/g) || []).slice(0, 3);
+    for (const line of shown) console.log(`     ${line.trim()}`);
+  });
+
   await check('undo: p2 відкочує зміну p1', async () => {
     // Відкотити можна лише туди, де в журналі Є попереднє значення за тією
     // ж адресою. Одна зміна темпу цього не дає: попереднє лежить у .als,
