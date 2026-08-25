@@ -17,6 +17,7 @@
     "test:announce": "node --test test/announce.mjs",
     "test:compare": "node --test test/compare.mjs",
     "probe:pair": "node tools/pair-probe.mjs",
-    "test:lint": "node --test test/bridge-lint.mjs"
+    "test:lint": "node --test test/bridge-lint.mjs",
+    "preflight": "node tools/preflight.mjs"
   }
 }

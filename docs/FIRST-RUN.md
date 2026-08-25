@@ -144,7 +144,7 @@ relay: head=..., у сесії p1, p2
 Дві команди, які економлять половину сесії:
 
 ```bash
-node tools/memory.mjs verify      # чи той код у Live, що в репозиторії
+npm run preflight                 # памʼять, скрипт у Live і всі тести
 node tools/pair-probe.mjs         # весь протокольний бік -- з емулятором замість другої машини
 ```
 
