@@ -1107,10 +1107,11 @@ function apply(type, payload, gseq) {
     }
     case 'ClipWarpSet': {
       const t = trackById(payload.track?.id);
+      const arrW = payload.clip?.id ? arrClipById(payload.clip.id) : null;
       const s = sceneIdx(payload.scene?.id);
       if (!t) return reject('невідомий трек');
-      if (s < 0) return reject('невідома сцена');
-      const clip = t.clips[s];
+      if (!arrW && s < 0) return reject('невідома сцена');
+      const clip = arrW ? arrW.clip : t.clips[s];
       if (!clip) break;   // tombstone
       if (clip.kind !== 'audio') return reject('warp-маркерів у MIDI-кліпа немає');
       const markers = payload.markers;
@@ -1128,14 +1129,15 @@ function apply(type, payload, gseq) {
     }
     case 'ClipPropSet': {
       const t = trackById(payload.track?.id);
+      const arrTarget = payload.clip?.id ? arrClipById(payload.clip.id) : null;
       const s = sceneIdx(payload.scene?.id);
       if (!t) return reject('невідомий трек');
-      if (s < 0) return reject('невідома сцена');
+      if (!arrTarget && s < 0) return reject('невідома сцена');
       const check = CLIP_PROPS[payload.prop];
       if (!check) return reject(`невідома властивість кліпу ${payload.prop}`);
       const value = check(payload.value);
       if (value === null) return reject(`некоректне значення ${payload.value} для ${payload.prop}`);
-      const clip = t.clips[s];
+      const clip = arrTarget ? arrTarget.clip : t.clips[s];
       if (!clip) break;   // tombstone: кліпа немає, подія мовчки не діє
       clip[payload.prop] = value;
       break;
@@ -1401,10 +1403,11 @@ function apply(type, payload, gseq) {
     }
     case 'ClipLoopSet': {
       const t = trackById(payload.track?.id);
+      const arrL = payload.clip?.id ? arrClipById(payload.clip.id) : null;
       const s = sceneIdx(payload.scene?.id);
       if (!t) return reject('невідомий трек');
-      if (s < 0) return reject('невідома сцена');
-      const clip = t.clips[s];
+      if (!arrL && s < 0) return reject('невідома сцена');
+      const clip = arrL ? arrL.clip : t.clips[s];
       if (!clip) return reject('кліпу немає');
       for (const prop of ['looping', 'loop_start', 'loop_end', 'start_marker', 'end_marker']) {
         if (payload[prop] !== undefined) clip[prop] = payload[prop];

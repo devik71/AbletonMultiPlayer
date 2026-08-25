@@ -1392,10 +1392,41 @@ try {
     await waitFor(l2, /ClipWarpSet ВІДХИЛЕНО \(warp-маркерів у MIDI-кліпа немає\)/, 6000, midi);
   });
 
-  await check('журнал: 117 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('властивості кліпа в лінійці адресуються uuid, не сценою', async () => {
+    // У лінійці сцен немає, зате є uuid. Одна подія має вміти в обидва
+    // способи -- інакше аранжування лишалось би без gain, warp і меж.
+    const dropped = l2.out.length;
+    l1.stdin.write('dropsample 3 7 Samples/kick.wav\n');
+    await waitFor(l2, /<- #\d+ SampleLoad .*"kind":"slot"/, 8000, dropped);
+
+    const born = l2.out.length;
+    l1.stdin.write('arr 3 7 40\n');
+    await waitFor(l2, /<- #\d+ SampleLoad .*"kind":"arrangement"/, 8000, born);
+
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const from = d1.out.length;
+    l1.stdin.write('fullstate\n');
+    await waitFor(d1, /state: знімок \d+ зібрано/, 10000, from);
+    const mine = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const arrClip = mine.tracks.flatMap((t) => t.arrangement || []).find((c) => c.id);
+    if (!arrClip) throw new Error('кліпа в лінійці немає у знімку');
+
+    const sent = l2.out.length;
+    await inject({
+      type: 'ClipPropSet',
+      payload: { track: { id: mine.tracks.find((t) => (t.arrangement || []).length).id },
+                 clip: { id: arrClip.id }, prop: 'gain', value: 0.31 },
+    });
+    await waitFor(l2, /<- #\d+ ClipPropSet .*"gain".*0\.31/, 8000, sent);
+    if (/ClipPropSet ВІДХИЛЕНО/.test(l2.out.slice(sent))) {
+      throw new Error('партнер не знайшов кліп у лінійці за uuid');
+    }
+  });
+
+  await check('журнал: 120 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 117) throw new Error(`очікував 117 подій, у журналі ${lines.length}`);
+    if (lines.length !== 120) throw new Error(`очікував 120 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

@@ -47,11 +47,11 @@ export function supersedeKey(ev) {
     case 'ClipWarpSet':
       // Маркери описують ВІДОБРАЖЕННЯ цілком, тож набір перезаписується
       // повністю: із серії рухів доїжджає останній.
-      return `warp:${p.track?.id}:${p.scene?.id}`;
+      return `warp:${p.track?.id}:${p.clip?.id ?? p.scene?.id}`;
     case 'ClipPropSet':
       // Своя адреса на пару (кліп, властивість): gain тягнуть мишею, тож
       // серія доїжджає останньою -- але gain не перекриває warp_mode.
-      return `clipprop:${p.track?.id}:${p.scene?.id}:${p.prop}`;
+      return `clipprop:${p.track?.id}:${p.clip?.id ?? p.scene?.id}:${p.prop}`;
     case 'SceneTimingSet':
       // Увесь блок перевизначень сцени перезаписується цілком, тож серія
       // рухів доїжджає останньою -- як у ClipLoopSet.
@@ -69,7 +69,7 @@ export function supersedeKey(ev) {
     case 'TrackToggle':
       return `toggle:${trackKey(p.track)}:${p.param}`;
     case 'ObjectMetaSet':
-      return `meta:${p.object}:${trackKey(p.track)}:${p.scene?.id ?? ''}:${p.prop}`;
+      return `meta:${p.object}:${trackKey(p.track)}:${p.clip?.id ?? p.scene?.id ?? ''}:${p.prop}`;
     case 'DeviceParamSet':
       return `device:${trackKey(p.track)}` +
         `:${(p.chain_path || []).map((c) => c.id).join('/')}` +
@@ -78,7 +78,7 @@ export function supersedeKey(ev) {
     case 'ClipLoopSet':
       // Межі кліпу перезаписуються цілком, тож серія рухів брекета
       // згортається в останню -- і подія стає відкотною через undo.
-      return `loop:${p.track?.id}:${p.scene?.id}`;
+      return `loop:${p.track?.id}:${p.clip?.id ?? p.scene?.id}`;
     case 'ClipNotesSet':
       // Регіон -- частина ключа: подія замінює ноти лише всередині нього,
       // тож два різні регіони одного кліпу не перекривають одне одного.

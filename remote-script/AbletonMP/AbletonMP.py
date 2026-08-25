@@ -1322,6 +1322,24 @@ class AbletonMP(ControlSurface):
             if refs["track"].get("id") and refs["scene"].get("id"):
                 refs["object"] = kind
                 return refs
+        if kind == "clip" and obj is not None:
+            # Кліп у лінійці: сцени немає, зате є власний uuid
+            uid = self._arr_reg.id_of(obj, create=False)
+            if uid:
+                ref = self._arr_track_ref(obj)
+                if ref:
+                    return {"object": kind, "track": ref, "clip": {"id": uid}}
+        return None
+
+    def _arr_track_ref(self, clip):
+        """Трек, якому належить Arrangement-кліп."""
+        for track in self._doc.tracks:
+            try:
+                for candidate in self._arr_clips(track):
+                    if candidate == clip:
+                        return self._device_track_ref(track)
+            except Exception:
+                continue
         return None
 
     @staticmethod
@@ -2312,11 +2330,32 @@ class AbletonMP(ControlSurface):
             for prop in CLIP_PROPS:
                 self._listen(clip, prop, self._make_arr_prop_cb(track_ref, clip, uid, prop))
             self._listen(clip, "warp_markers", self._make_arr_warp_cb(track_ref, clip, uid))
+            loop_cb = self._make_arr_loop_cb(track_ref, clip, uid)
+            for prop in CLIP_LOOP_PROPS:
+                self._listen(clip, prop, loop_cb)
+            self._wire_metadata("clip", clip)
 
     def _make_arr_prop_cb(self, track_ref, clip, uid, prop):
         def cb():
             self._safe(self._on_arr_prop, track_ref, clip, uid, prop)
         return cb
+
+    def _make_arr_loop_cb(self, track_ref, clip, uid):
+        def cb():
+            self._safe(self._on_arr_loop, track_ref, clip, uid)
+        return cb
+
+    def _on_arr_loop(self, track_ref, clip, uid):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        state = self._clip_loop_state(clip)
+        key = "arr:" + uid
+        if state is None or self._mirror["loop"].get(key) == state:
+            return
+        self._mirror["loop"][key] = state
+        payload = {"track": track_ref, "clip": {"id": uid}}
+        payload.update(state)
+        self._defer("loop:" + key, "ClipLoopSet", payload)
 
     def _make_arr_warp_cb(self, track_ref, clip, uid):
         def cb():
@@ -2362,6 +2401,9 @@ class AbletonMP(ControlSurface):
                     continue
                 key = "arr:" + uid
                 self._mirror["clip_props"][key] = self._clip_props_state(clip)
+                loop = self._clip_loop_state(clip)
+                if loop is not None:
+                    self._mirror["loop"][key] = loop
                 markers = self._warp_markers(clip)
                 if markers is not None:
                     self._mirror["warp"][key] = markers
@@ -3254,11 +3296,15 @@ class AbletonMP(ControlSurface):
                 if sidx is not None:
                     target = scene = self._doc.scenes[sidx]
             elif kind == "clip":
-                track, scene, slot = self._resolve_clip_slot(payload, gseq)
-                try:
-                    target = slot.clip if slot is not None and slot.has_clip else None
-                except Exception:
-                    target = None
+                # Кліп у лінійці адресується власним uuid: сцен там немає.
+                if (payload.get("clip") or {}).get("id"):
+                    track, target = self._resolve_arr_clip(payload)
+                else:
+                    track, scene, slot = self._resolve_clip_slot(payload, gseq)
+                    try:
+                        target = slot.clip if slot is not None and slot.has_clip else None
+                    except Exception:
+                        target = None
             else:
                 self._warn("gseq %s: metadata object %r is unknown" % (gseq, kind))
                 return
@@ -3377,15 +3423,10 @@ class AbletonMP(ControlSurface):
             self._apply_arr_notes(payload, gseq)
 
         elif etype == "ClipLoopSet":
-            track, scene, slot = self._resolve_clip_slot(payload, gseq)
-            if slot is None:
-                return
-            try:
-                if not slot.has_clip:
-                    self._warn("gseq %s: кліпу немає, межі нема на що класти" % (gseq,))
-                    return
-                clip = slot.clip
-            except Exception:
+            # Кліп у лінійці адресується uuid, сесійний -- сценою.
+            clip, _key = self._resolve_any_clip(payload, gseq)
+            if clip is None:
+                self._warn("gseq %s: кліпу немає, межі нема на що класти" % (gseq,))
                 return
 
             # Спершу повна валідація, і лише потім записи: частковий запис
@@ -3412,9 +3453,8 @@ class AbletonMP(ControlSurface):
                 if lo in state and hi in state and state[hi] <= state[lo]:
                     return self._warn("gseq %s: %s не більший за %s" % (gseq, hi, lo))
 
-            key = self._clip_key(track, scene)
-            if key is not None:
-                self._mirror["loop"][key] = dict(state)
+            if _key is not None:
+                self._mirror["loop"][_key] = dict(state)
             # Порядок незвертальний: якщо нова пара цілком правіша за поточну,
             # спершу треба посунути кінець, інакше Live клампне початок.
             for lo, hi in (("start_marker", "end_marker"), ("loop_start", "loop_end")):
@@ -3436,10 +3476,10 @@ class AbletonMP(ControlSurface):
                 except Exception:
                     self._warn("gseq %s: looping не записався" % (gseq,))
             # Live міг клампнути -- дзеркало має відповідати тому, що вийшло
-            if key is not None:
+            if _key is not None:
                 actual = self._clip_loop_state(clip)
                 if actual is not None:
-                    self._mirror["loop"][key] = actual
+                    self._mirror["loop"][_key] = actual
 
         elif etype == "ClipNotesSet":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -5603,6 +5643,9 @@ class AbletonMP(ControlSurface):
             markers = self._warp_markers(clip)
             if markers:
                 entry["warp"] = markers
+            loop = self._clip_loop_state(clip)
+            if loop:
+                entry["loop"] = loop
             entries.append(entry)
         return entries
 

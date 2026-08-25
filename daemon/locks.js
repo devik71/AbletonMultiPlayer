@@ -42,7 +42,8 @@ export function lockTarget(type, payload, registry) {
     // Лок на кліп цілком, а не на властивість: людина крутить один кліп,
     // і показувати «зайнято» краще про нього, а не про окреме поле.
     const track = p.track?.id;
-    const scene = p.scene?.id;
+    // Кліп у лінійці має власний uuid і не має сцени
+    const scene = p.clip?.id || p.scene?.id;
     if (!track || !scene) return null;
     const names = [trackName(registry, track), sceneName(registry, scene)].filter(Boolean);
     return { object: `clip:${track}:${scene}`, label: names.join(' / ') || null };
@@ -80,7 +81,8 @@ export function lockTarget(type, payload, registry) {
 
   if (type === 'ClipNotesSet' || type === 'ClipLoopSet') {
     const track = p.track?.id;
-    const scene = p.scene?.id;
+    // Кліп у лінійці має власний uuid і не має сцени
+    const scene = p.clip?.id || p.scene?.id;
     if (!track || !scene) return null;
     const names = [trackName(registry, track), sceneName(registry, scene)].filter(Boolean);
     return { object: `clip:${track}:${scene}`, label: names.join(' / ') || null };

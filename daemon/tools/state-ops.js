@@ -146,6 +146,9 @@ export function stateToOps(state) {
       if (clip.warp?.length) {
         ops.push(['ClipWarpSet', { track: ref, clip: { id: clip.id }, markers: clip.warp }]);
       }
+      if (clip.loop) {
+        ops.push(['ClipLoopSet', { track: ref, clip: { id: clip.id }, ...clip.loop }]);
+      }
     }
   }
   for (const scene of state.scenes || []) {

@@ -277,3 +277,26 @@ test('warp-маркери згортаються в останній набір,
   assert.equal(compactTail([warp('s1', [{ beat_time: 0, sample_time: 0 }]),
     warp('s2', [{ beat_time: 0, sample_time: 0 }])]).dropped, 0);
 });
+
+test('кліп у лінійці має власну адресу згортання, окрему від сесійної', () => {
+  gseq = 0;
+  const inSlot = (v) => ev('ClipPropSet', {
+    track: { id: 't1' }, scene: { id: 's1' }, prop: 'gain', value: v,
+  });
+  const inArr = (v) => ev('ClipPropSet', {
+    track: { id: 't1' }, clip: { id: 'a1' }, prop: 'gain', value: v,
+  });
+  // той самий трек і та сама властивість, але різні кліпи -- не перекривають
+  assert.equal(compactTail([inSlot(0.2), inArr(0.8)]).dropped, 0);
+
+  gseq = 0;
+  const out = compactTail([inArr(0.2), inArr(0.5), inArr(0.9)]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.value, 0.9);
+
+  gseq = 0;
+  const loopArr = (end) => ev('ClipLoopSet', {
+    track: { id: 't1' }, clip: { id: 'a1' }, looping: true, loop_start: 0, loop_end: end,
+  });
+  assert.equal(compactTail([loopArr(4), loopArr(8)]).events.length, 1);
+});
