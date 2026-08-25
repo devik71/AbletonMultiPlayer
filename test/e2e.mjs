@@ -1469,10 +1469,27 @@ try {
     }
   });
 
-  await check('журнал: 124 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('ноти в кліпі лінійки редагуються, а не лише приїжджають раз', async () => {
+    // Досі ArrangementClipNotesSet емітився тільки при створенні кліпа:
+    // перетягнути в аранжування партнер бачив, а домалювати ноту -- ні.
+    const notes = l1.out.length;
+    l1.stdin.write('note 2 2 62 0 1 100\n');
+    await waitFor(l2, /<- #\d+ ClipNotesSet .*"pitch":62/, 8000, notes);
+    l1.stdin.write('arr 2 2 56\n');
+    await waitFor(l2, /<- #\d+ ArrangementClipCreate .*"start_time":56/, 8000, notes);
+
+    const edited = l2.out.length;
+    l1.stdin.write('arrnote 2 0 67 2 1\n');
+    await waitFor(l2, /<- #\d+ ArrangementClipNotesSet .*"pitch":67/, 8000, edited);
+    if (/ArrangementClipNotesSet ВІДХИЛЕНО/.test(l2.out.slice(edited))) {
+      throw new Error('партнер відхилив правку нот у лінійці');
+    }
+  });
+
+  await check('журнал: 129 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 124) throw new Error(`очікував 124 події, у журналі ${lines.length}`);
+    if (lines.length !== 129) throw new Error(`очікував 129 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

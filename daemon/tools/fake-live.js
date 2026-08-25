@@ -2106,6 +2106,31 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log(`в Arrangement ${t.name}: кліп на ${start}-й долі`);
       break;
     }
+    case 'arrnote': {
+      // Домалювати ноту в кліпі, який уже лежить у лінійці. Досі ноти
+      // звідти їхали лише разом зі створенням кліпа.
+      const t = song.tracks[Number(rest[0]) || 0];
+      const clip = t && arrOf(t)[Number(rest[1]) || 0];
+      if (!clip) return console.log('немає такого кліпу в лінійці');
+      const pitch = Number(rest[2]);
+      const start = Number(rest[3]);
+      const duration = Number(rest[4] ?? 1);
+      if (!Number.isInteger(pitch) || pitch < 0 || pitch > 127 ||
+          !Number.isFinite(start) || !(duration > 0)) {
+        return console.log('формат: arrnote <track> <idx> <pitch> <start> [dur]');
+      }
+      clip.notes = clip.notes || [];
+      clip.notes.push({ pitch, start_time: start, duration, velocity: 100, mute: false });
+      clip.notes.sort((a, b) => a.start_time - b.start_time || a.pitch - b.pitch);
+      const region = { from_pitch: 0, pitch_span: 128, from_time: 0,
+                       time_span: Math.max(clip.length, start + duration) };
+      emit('ArrangementClipNotesSet', {
+        track: trackRef(t), clip: { id: clip.id }, region,
+        notes: clip.notes.filter((n) => noteInRegion(n, region)),
+      });
+      console.log(`нота ${pitch} у кліпі лінійки ${clip.id}`);
+      break;
+    }
     case 'movearr': {
       // Прямого сеттера start_time немає, тож переїзд -- це копія плюс видалення.
       // Тут це видно як зміна на місці, але uuid зберігається саме тому,
