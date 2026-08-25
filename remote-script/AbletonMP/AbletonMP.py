@@ -1349,6 +1349,19 @@ class AbletonMP(ControlSurface):
             pass
         return None
 
+    def _send_return_ref(self, idx):
+        """uuid Return-треку за позицією сенда, або None."""
+        if not isinstance(idx, int) or idx < 0:
+            return None
+        try:
+            returns = list(self._doc.return_tracks)
+        except Exception:
+            return None
+        if idx >= len(returns):
+            return None
+        rid = self._aux_tracks_reg.id_of(returns[idx], create=False)
+        return {"id": rid} if rid else None
+
     @staticmethod
     def _mix_track_key(track_ref):
         if not isinstance(track_ref, dict):
@@ -1378,6 +1391,14 @@ class AbletonMP(ControlSurface):
         payload = {"track": track_ref, "param": param, "value": value}
         if idx is not None:
             payload["index"] = idx
+        if param == "send":
+            # Індекс сенда -- позиція, а позиція між машинами не збігається,
+            # щойно в когось інша кількість чи інший порядок Return-треків.
+            # Тому поруч їде uuid цільового Return: не адреса, а контрольна
+            # сума. Краще гучна відмова, ніж сенд, що поїхав не в той ревер.
+            ret = self._send_return_ref(idx)
+            if ret:
+                payload["return"] = ret
         # РЅРµРїРµСЂРµСЂРІРЅР° РІРµР»РёС‡РёРЅР° -- РґРµР±Р°СѓРЅСЃРёРјРѕ, СЏРє tempo: СЂСѓС… С„РµР№РґРµСЂР° С†Рµ РѕРґРёРЅ Р¶РµСЃС‚
         self._defer("mix:" + key, "MixerSet", payload)
 
@@ -3051,6 +3072,19 @@ class AbletonMP(ControlSurface):
                 return
             param = payload.get("param")
             idx = payload.get("index")
+            if param == "send":
+                want = (payload.get("return") or {}).get("id")
+                mine = (self._send_return_ref(idx) or {}).get("id")
+                if want and mine and want != mine:
+                    self._warn("gseq %s: сенд %s веде в РІЗНІ Return-треки: "
+                               "у партнера %s, у тебе %s -- набір Return-треків "
+                               "розійшовся, вирівняй його вручну"
+                               % (gseq, idx, want, mine))
+                    return
+                if want and not mine:
+                    self._warn("gseq %s: сенда %s у тебе немає -- у партнера "
+                               "більше Return-треків" % (gseq, idx))
+                    return
             p = self._mix_param(track, param, idx)
             if p is None:
                 self._warn("gseq %s: РїР°СЂР°РјРµС‚СЂ %r/%r РІС–РґСЃСѓС‚РЅС–Р№" % (gseq, param, idx))
@@ -4674,7 +4708,11 @@ class AbletonMP(ControlSurface):
             except Exception:
                 continue
             if param == "send":
-                mixer.setdefault("sends", []).append({"index": idx, "value": value})
+                entry = {"index": idx, "value": value}
+                ret = self._send_return_ref(idx)
+                if ret:
+                    entry["return"] = ret
+                mixer.setdefault("sends", []).append(entry)
             else:
                 mixer[param] = value
         for prop in self._toggle_props(track):

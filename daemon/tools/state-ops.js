@@ -23,7 +23,11 @@ const mixerOps = (ref, mixer) => {
   }
   for (const send of mixer.sends || []) {
     if (send?.value === undefined) continue;
-    ops.push(['MixerSet', { track: ref, param: 'send', index: send.index, value: send.value }]);
+    const payload = { track: ref, param: 'send', index: send.index, value: send.value };
+    // uuid Return -- контрольна сума: індекс сенда між машинами не збігається,
+    // щойно набір Return-треків розійшовся.
+    if (send.return?.id) payload.return = send.return;
+    ops.push(['MixerSet', payload]);
   }
   for (const prop of ['mute', 'solo', 'arm']) {
     if (prop in mixer) ops.push(['TrackToggle', { track: ref, param: prop, value: !!mixer[prop] }]);

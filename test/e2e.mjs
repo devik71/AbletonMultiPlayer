@@ -1283,10 +1283,38 @@ try {
     }
   });
 
-  await check('журнал: 107 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('сенд у чужий Return відхиляється, а не їде не туди', async () => {
+    // Індекс сенда -- позиція, а не адреса. Щойно набір Return-треків
+    // розійшовся, той самий індекс означає інший ревер -- і мікс тихо
+    // псується. Контрольна сума робить це гучним.
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const track = state.tracks.find((t) => t.id);
+
+    const good = l2.out.length;
+    l1.stdin.write('send 0 0 0.33\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"param":"send".*0\.33/, 8000, good);
+    if (/MixerSet ВІДХИЛЕНО/.test(l2.out.slice(good))) {
+      throw new Error('нормальний сенд відхилено');
+    }
+    if (!/"return"/.test(l2.out.slice(good))) {
+      throw new Error('подія поїхала без контрольної суми Return');
+    }
+
+    const bad = l2.out.length;
+    await inject({
+      type: 'MixerSet',
+      payload: {
+        track: { id: track.id }, param: 'send', index: 0, value: 0.9,
+        return: { id: 'ffffffffffff' },
+      },
+    });
+    await waitFor(l2, /MixerSet ВІДХИЛЕНО \(сенд 0 веде в різні Return-треки/, 6000, bad);
+  });
+
+  await check('журнал: 109 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 107) throw new Error(`очікував 107 подій, у журналі ${lines.length}`);
+    if (lines.length !== 109) throw new Error(`очікував 109 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

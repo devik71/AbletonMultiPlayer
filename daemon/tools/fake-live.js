@@ -413,7 +413,9 @@ const mixerState = (track) => {
     const [param, idx] = key.split(':');
     if (param === 'send') {
       mixer.sends = mixer.sends || [];
-      mixer.sends.push({ index: Number(idx), value });
+      const target = song.return_tracks[Number(idx)];
+      mixer.sends.push({ index: Number(idx), value,
+        ...(target?.id ? { return: { id: target.id } } : {}) });
     } else {
       mixer[param] = value;
     }
@@ -1144,6 +1146,15 @@ function apply(type, payload, gseq) {
       if (!t) return reject('невідомий трек');
       const index = payload.index ?? null;
       if (!mixParamAllowed(t, payload.param, index)) return reject('недопустимий параметр mixer');
+      if (payload.param === 'send' && payload.return?.id) {
+        // Індекс сенда -- позиція, а не адреса. uuid Return поруч ловить
+        // випадок, коли набір Return-треків між машинами розійшовся.
+        const mine = song.return_tracks[index]?.id;
+        if (!mine) return reject(`сенда ${index} у тебе немає`);
+        if (mine !== payload.return.id) {
+          return reject(`сенд ${index} веде в різні Return-треки: ${payload.return.id} проти ${mine}`);
+        }
+      }
       t.mix[`${payload.param}:${index ?? '-'}`] = payload.value;
       break;
     }
@@ -1774,6 +1785,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       t.mix[`${param}:${idx ?? '-'}`] = value;
       const payload = { track: { id: t.id }, param, value };
       if (idx !== null) payload.index = idx;
+      // uuid Return -- контрольна сума до індексу сенда
+      if (param === 'send') {
+        const target = song.return_tracks[idx];
+        if (target?.id) payload.return = { id: target.id };
+      }
       emit('MixerSet', payload);
       break;
     }
