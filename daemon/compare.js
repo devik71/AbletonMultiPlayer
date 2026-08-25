@@ -51,6 +51,18 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     }
   }
 
+  // Ланцюги: у Drum Rack це гучність кожного пада
+  const myChains = new Map((mine?.chains || []).map((c) => [c.id, c]));
+  const theirChains = new Map((theirs?.chains || []).map((c) => [c.id, c]));
+  for (const [id, my] of myChains) {
+    const their = theirChains.get(id);
+    if (!their) continue;
+    for (const param of ['volume', 'panning', 'mute', 'solo']) {
+      if (num(my[param]) === num(their[param])) continue;
+      add(`ланцюг ${id}: ${param} ${my[param] ?? '—'} проти ${their[param] ?? '—'}`);
+    }
+  }
+
   for (const [kind, key] of [['трек', 'tracks'], ['сцена', 'scenes']]) {
     const my = byId(mine?.[key]);
     const their = byId(theirs?.[key]);

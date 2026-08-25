@@ -275,3 +275,12 @@ test('знімок вирівнює й властивості кліпів, і w
   const warps = ops.filter(([t]) => t === 'ClipWarpSet');
   assert.equal(warps.length, 2, 'warp і для слоту, і для лінійки');
 });
+
+test('знімок вирівнює й мікшер ланцюгів', () => {
+  const ops = stateToOps({
+    chains: [{ id: 'c1', volume: 0.6, panning: -0.2, mute: true, solo: false }],
+  });
+  const mine = ops.filter(([t]) => t === 'ChainMixerSet').map(([, p]) => [p.param, p.value]);
+  assert.deepEqual(mine.sort(), [['mute', true], ['panning', -0.2], ['solo', false], ['volume', 0.6]]);
+  assert.equal(ops.every(([, p]) => p.chain?.id === 'c1' || !p.chain), true);
+});

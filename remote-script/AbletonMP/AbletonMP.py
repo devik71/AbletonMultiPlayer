@@ -6973,6 +6973,12 @@ class AbletonMP(ControlSurface):
             "playing": bool(self._doc.is_playing),
             "tempo": round(float(self._doc.tempo), 6),
         "cues": [{"time": t, "name": n} for t, n in sorted(self._cue_map().items())],
+        # Мікшер ланцюгів окремим списком, а не всередині дерева девайсів:
+        # ланцюг адресується власним uuid, і в дереві він лише контейнер.
+        "chains": [dict({"id": rec["id"]},
+                        **self._chain_state(self._chains_reg.obj_of(rec["id"])))
+                   for rec in self._chain_records
+                   if self._chains_reg.obj_of(rec.get("id")) is not None],
         "song": dict((p, self._song_prop_value(p, self._safe_attr(self._doc, p)))
                      for p in SONG_PROPS
                      if self._song_prop_value(p, self._safe_attr(self._doc, p)) is not None),

@@ -128,6 +128,14 @@ export function stateToOps(state) {
     ops.push(...metaOps('track', ref, aux), ...mixerOps(ref, aux.mixer || {}),
       ...deviceOps(ref, aux.devices || []));
   }
+  // Мікшер ланцюгів: у Drum Rack це гучність кожного пада.
+  for (const chain of state.chains || []) {
+    if (!chain?.id) continue;
+    for (const param of ['volume', 'panning', 'mute', 'solo']) {
+      if (chain[param] === undefined) continue;
+      ops.push(['ChainMixerSet', { chain: { id: chain.id }, param, value: chain[param] }]);
+    }
+  }
   // Локатори -- структура документа: «Verse», «Drop». Партнер без них
   // бачить голу лінійку.
   for (const cue of state.cues || []) {
