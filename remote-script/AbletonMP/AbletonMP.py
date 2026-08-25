@@ -5837,7 +5837,7 @@ class AbletonMP(ControlSurface):
                        {"track": {"id": rec.get("track")}, "clip": {"id": uid}})
 
     def _state_arrangement(self, track):
-        """Arrangement-кліпи треку для знімка. Лише читання: подій ще немає."""
+        """Arrangement-кліпи треку для знімка."""
         entries = []
         track_ref = self._device_track_ref(track)
         if not track_ref:
@@ -5880,9 +5880,8 @@ class AbletonMP(ControlSurface):
     def _on_arrangement(self):
         """Структура Arrangement змінилась.
 
-        Подій ми поки не шлемо -- стадія A дає лише ідентичність і звіт про
-        розбіжність. Але uuid мусять зʼявитись одразу: без них кліп, який
-        приїде в наступній стадії, не буде чим адресувати.
+        uuid видається до будь-якої емісії: без нього кліп нічим адресувати,
+        а _diff_arrangement саме за uuid відрізняє переїзд від перестворення.
         """
         if not self._registry_ready:
             return
