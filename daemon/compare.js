@@ -160,10 +160,36 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       }
     }
 
-    const myArr = (my.arrangement || []).length;
-    const theirArr = (their.arrangement || []).length;
-    if (myArr !== theirArr) {
-      add(`${where}: кліпів у лінійці ${myArr} проти ${theirArr}`);
+    // Лінійка -- це вже аранжування, тож розбіжність тут чути найдужче.
+    // Порівнюємо не лише кількість, а кожен кліп за його uuid.
+    const myArrMap = new Map((my.arrangement || []).filter((c) => c.id).map((c) => [c.id, c]));
+    const theirArrMap = new Map((their.arrangement || []).filter((c) => c.id).map((c) => [c.id, c]));
+    for (const [id, clip] of theirArrMap) {
+      if (!myArrMap.has(id)) {
+        add(`${where}: кліп у лінійці на ${num(clip.start_time)}-й долі є в партнера, у тебе немає`);
+      }
+    }
+    for (const [id, clip] of myArrMap) {
+      const other = theirArrMap.get(id);
+      if (!other) {
+        add(`${where}: кліп у лінійці на ${num(clip.start_time)}-й долі є в тебе, у партнера немає`);
+        continue;
+      }
+      if (num(clip.start_time) !== num(other.start_time)) {
+        add(`${where}: кліп у лінійці на ${num(clip.start_time)}-й долі проти ${num(other.start_time)}-ї`);
+      }
+      for (const prop of new Set([...Object.keys(clip.props || {}),
+                                  ...Object.keys(other.props || {})])) {
+        if (num(clip.props?.[prop]) !== num(other.props?.[prop])) {
+          add(`${where}, лінійка: ${prop} ${clip.props?.[prop] ?? '—'} проти ${other.props?.[prop] ?? '—'}`);
+        }
+      }
+      if (warpKey(clip.warp) !== warpKey(other.warp)) {
+        add(`${where}, лінійка: warp-маркери різні`);
+      }
+      const mineN = (clip.notes || []).length;
+      const theirN = (other.notes || []).length;
+      if (mineN !== theirN) add(`${where}, лінійка: нот ${mineN} проти ${theirN}`);
     }
   }
 

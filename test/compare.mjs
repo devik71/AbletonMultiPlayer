@@ -103,3 +103,24 @@ test('розбіжність у Return-треках названа окремо:
   assert.match(lines, /return «B» є в тебе, у партнера немає/);
   assert.match(lines, /Return-треків 2 проти 1 — індекси сендів означають різне/);
 });
+
+test('розбіжність у кліпах лінійки називається поіменно, а не кількістю', () => {
+  const mk = (over) => ({
+    tracks: [{
+      id: 't1', name: 'Bass', clips: [],
+      arrangement: [{ id: 'a1', start_time: 16, props: { gain: 0.5 },
+                      warp: [{ beat_time: 0, sample_time: 0 }], notes: [], ...over }],
+    }],
+  });
+  const lines = compareStates(mk(), mk({ start_time: 32, props: { gain: 0.9 } })).join('\n');
+  assert.match(lines, /кліп у лінійці на 16-й долі проти 32-ї/);
+  assert.match(lines, /лінійка: gain 0\.5 проти 0\.9/);
+
+  // Кількість однакова, а кліпи різні -- старе порівняння цього не бачило
+  const other = compareStates(mk(), {
+    tracks: [{ id: 't1', name: 'Bass', clips: [],
+               arrangement: [{ id: 'a2', start_time: 16 }] }],
+  }).join('\n');
+  assert.match(other, /є в тебе, у партнера немає/);
+  assert.match(other, /є в партнера, у тебе немає/);
+});
