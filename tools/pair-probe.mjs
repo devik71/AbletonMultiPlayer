@@ -198,6 +198,39 @@ try {
     for (const line of shown) console.log(`     ${line.trim()}`);
   });
 
+  await check('пізній учасник дістає стиснутий хвіст, а не всю історію', async () => {
+    // Серія змін темпу -- шість подій за однією адресою. Той, хто приєднався
+    // пізніше, має отримати одну: стан той самий, але Live не проганяє
+    // пʼять проміжних положень фейдера.
+    for (const bpm of [110, 112, 114, 116, 118, 120]) {
+      await p1exec([{ op: 'set_tempo', bpm }]);
+      await new Promise((r) => setTimeout(r, 220));
+    }
+    await new Promise((r) => setTimeout(r, 800));
+
+    const lateState = join(STATE, 'late');
+    mkdirSync(join(lateState, 'Samples'), { recursive: true });
+    const d3 = launch('daemon-p3', join(root, 'daemon/index.js'), [
+      '--author', 'p3', '--session', SESSION, '--relay', RELAY,
+      '--udp-in', '19865', '--udp-out', '19866',
+      '--state-dir', lateState, '--project', lateState,
+    ]);
+    const l3 = launch('live-p3', join(root, 'daemon/tools/fake-live.js'), [
+      '--udp-in', '19865', '--udp-out', '19866', '--project', lateState,
+    ]);
+    try {
+      await waitFor(d3, /relay: head=/, 20000);
+      await waitFor(l3, /<- #\d+ TempoSet/, 20000);
+      await new Promise((r) => setTimeout(r, 1500));
+      const got = (l3.out.match(/<- #\d+ TempoSet/g) || []).length;
+      if (got > 2) throw new Error(`хвіст не стиснувся: ${got} подій TempoSet замість однієї`);
+      console.log(`       пізній учасник отримав ${got} TempoSet із шести`);
+    } finally {
+      d3.kill();
+      l3.kill();
+    }
+  });
+
   await check('undo: p2 відкочує зміну p1', async () => {
     // Відкотити можна лише туди, де в журналі Є попереднє значення за тією
     // ж адресою. Одна зміна темпу цього не дає: попереднє лежить у .als,
