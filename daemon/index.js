@@ -207,6 +207,16 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     } else {
       lines.push(`bridge: Live ${bridgeInfo.live}, script ${bridgeInfo.script}` +
                  (bridgeInfo.sha ? `, код ${bridgeInfo.sha}` : ', код невідомий'));
+      // Найважливіший рядок для прогону парою: версія між комітами не
+      // змінюється, тож тільки хеш каже, чи то справді той код.
+      const repoSha = repoScriptSha();
+      if (repoSha && bridgeInfo.sha) {
+        lines.push(bridgeInfo.sha === repoSha
+          ? '  код збігається з репозиторієм'
+          : `  УВАГА: у репозиторії ${repoSha} -- Live тримає СТАРИЙ код`);
+      } else if (repoSha && !bridgeInfo.sha) {
+        lines.push('  УВАГА: скрипт старіший за репозиторій (не вміє повідомити хеш)');
+      }
       lines.push(`  уміє застосовувати ${bridgeInfo.events.length} типів подій`);
     }
     const others = (presence.peers || []).filter((p) => p.author !== AUTHOR);
@@ -743,6 +753,16 @@ function reportSamples(s) {
   if (miss.length) {
     log(`УВАГА: ${miss.length} семплів взагалі немає на диску (missing media):`);
     for (const p of miss.slice(0, 5)) log(`  бракує: ${p}`);
+  }
+}
+
+/** Хеш скрипта в репозиторії, або null, якщо запущено не звідти. */
+function repoScriptSha() {
+  try {
+    const src = readFileSync(join(__dirname, '..', 'remote-script', 'AbletonMP', 'AbletonMP.py'));
+    return createHash('sha256').update(src).digest('hex').slice(0, 12);
+  } catch {
+    return null;
   }
 }
 
