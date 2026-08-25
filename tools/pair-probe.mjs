@@ -154,6 +154,22 @@ try {
     throw new Error(`файл не доїхав у ${target}`);
   });
 
+  await check('status відповідає на «у нас усе гаразд?» одним екраном', async () => {
+    const from = d2.out.length;
+    d2.stdin.write('status\n');
+    await waitFor(d2, /семпли: \d+ файлів/, 8000, from);
+    const said = d2.out.slice(from);
+    for (const [what, re] of [
+      ['сесію', /сесія /],
+      ['звʼязок із relay', /relay: підключено|relay: НЕМАЄ/],
+      ['стан bridge', /bridge: Live |bridge: не на звʼязку/],
+      ['партнерів', /партнери: /],
+    ]) {
+      if (!re.test(said)) throw new Error(`status не показав ${what}`);
+    }
+    if (!/партнери: p1/.test(said)) throw new Error('status не побачив p1');
+  });
+
   await check('diff називає розбіжність, не змінюючи стану', async () => {
     // Діагностика не має чіпати те, що діагностує: pull застосовує чужий
     // знімок, diff лише порівнює.

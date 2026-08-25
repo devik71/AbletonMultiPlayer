@@ -195,8 +195,37 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     const line = describePresence(presence.peers, AUTHOR);
     return log(line ? 'дивляться: ' + line : 'ніхто нікуди не дивиться');
   }
+  if (cmd === 'status') {
+    // Одна команда замість читання лога: під час прогону парою рядки
+    // прокручуються, а питання завжди те саме -- «у нас усе гаразд?».
+    const lines = [];
+    lines.push(`я: ${AUTHOR}, сесія ${SESSION}`);
+    lines.push(connected ? `relay: підключено, застосовано до #${state.lastGseq}`
+                         : 'relay: НЕМАЄ ЗВʼЯЗКУ');
+    if (!bridgeAlive || !bridgeInfo) {
+      lines.push('bridge: не на звʼязку — Live закритий або скрипт не запущено');
+    } else {
+      lines.push(`bridge: Live ${bridgeInfo.live}, script ${bridgeInfo.script}` +
+                 (bridgeInfo.sha ? `, код ${bridgeInfo.sha}` : ', код невідомий'));
+      lines.push(`  уміє застосовувати ${bridgeInfo.events.length} типів подій`);
+    }
+    const others = (presence.peers || []).filter((p) => p.author !== AUTHOR);
+    lines.push(others.length ? `партнери: ${others.map((p) => p.author).join(', ')}`
+                             : 'партнери: нікого');
+    if (outbox.length) lines.push(`НЕ ВІДПРАВЛЕНО: ${outbox.length} подій у буфері`);
+    lines.push(`семпли: ${filesync.manifest.size} файлів у теці проєкту`);
+    if (lastState) {
+      const counts = summarize(lastState);
+      lines.push(`знімок ${stateDigest(lastState)}: ${counts.tracks} треків, ` +
+                 `${counts.clips} кліпів, ${counts.notes} нот`);
+    } else {
+      lines.push('знімка ще немає — bridge його не віддавав');
+    }
+    for (const line of lines) log(line);
+    return;
+  }
   if (cmd === 'refresh') return requestFullState();
-  log('команди: state | apply [файл] | pull <author> | diff <author> | ' +
+  log('команди: status | state | apply [файл] | pull <author> | diff <author> | ' +
       'follow <author>|off | who | undo [author] | refresh');
 });
 
