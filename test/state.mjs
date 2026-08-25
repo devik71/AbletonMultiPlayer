@@ -240,3 +240,38 @@ test('кліп без петлі не породжує ClipLoopSet', () => {
   const ops = stateToOps({ tracks: [{ id: 't1', clips: [{ scene: { id: 's1' }, notes: [] }] }] });
   assert.ok(!ops.some(([type]) => type === 'ClipLoopSet'));
 });
+
+test('знімок вирівнює й властивості кліпів, і warp -- у слоті та в лінійці', () => {
+  const ops = stateToOps({
+    tracks: [{
+      id: 't1',
+      clips: [{
+        scene: { id: 's1' }, clip: { length: 4 }, notes: [],
+        props: { gain: 0.4, warping: true },
+        warp: [{ beat_time: 0, sample_time: 0 }, { beat_time: 4, sample_time: 2 }],
+      }],
+      arrangement: [{
+        id: 'a1', start_time: 16,
+        props: { gain: 0.9 },
+        warp: [{ beat_time: 0, sample_time: 0 }],
+      }],
+    }],
+  });
+  const types = ops.map(([type]) => type);
+
+  // порядок важливий: на порожній слот властивості не лягли б
+  const create = types.indexOf('ClipCreate');
+  const prop = types.indexOf('ClipPropSet');
+  assert.ok(create >= 0 && prop > create, 'властивості мають іти після створення');
+
+  const session = ops.find(([t, p]) => t === 'ClipPropSet' && p.scene)[1];
+  assert.equal(session.prop, 'gain');
+  assert.deepEqual(session.scene, { id: 's1' });
+
+  const arr = ops.find(([t, p]) => t === 'ClipPropSet' && p.clip?.id === 'a1')[1];
+  assert.equal(arr.value, 0.9);
+  assert.equal(arr.scene, undefined, 'кліп у лінійці адресується uuid, не сценою');
+
+  const warps = ops.filter(([t]) => t === 'ClipWarpSet');
+  assert.equal(warps.length, 2, 'warp і для слоту, і для лінійки');
+});

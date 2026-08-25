@@ -5179,6 +5179,12 @@ class AbletonMP(ControlSurface):
             loop = self._clip_loop_state(clip)
             if loop:
                 entry["loop"] = loop
+            props = self._clip_props_state(clip)
+            if props:
+                entry["props"] = props
+            markers = self._warp_markers(clip)
+            if markers:
+                entry["warp"] = markers
             try:
                 if clip.is_midi_clip:
                     entry["notes"] = self._clip_notes(clip)
@@ -5591,6 +5597,12 @@ class AbletonMP(ControlSurface):
                 entry["is_midi"] = bool(clip.is_midi_clip)
             except Exception:
                 pass
+            props = self._clip_props_state(clip)
+            if props:
+                entry["props"] = props
+            markers = self._warp_markers(clip)
+            if markers:
+                entry["warp"] = markers
             entries.append(entry)
         return entries
 

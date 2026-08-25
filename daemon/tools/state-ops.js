@@ -89,6 +89,14 @@ const clipOps = (ref, clips) => clips.flatMap((entry) => {
       ops.push(['ClipNotesSet', { track: ref, scene, clip: meta, region, notes: part }]);
     }
   }
+  // Властивості й warp -- після створення кліпу й нот: на порожній слот
+  // вони не лягли б, а warp вимагає ще й того, щоб кліп був audio.
+  for (const [prop, value] of Object.entries(entry.props || {})) {
+    ops.push(['ClipPropSet', { track: ref, scene, prop, value }]);
+  }
+  if (entry.warp?.length) {
+    ops.push(['ClipWarpSet', { track: ref, scene, markers: entry.warp }]);
+  }
   if (entry.loop) {
     ops.push(['ClipLoopSet', { track: ref, scene, ...entry.loop }]);
   }
@@ -125,6 +133,20 @@ export function stateToOps(state) {
   for (const cue of state.cues || []) {
     if (typeof cue?.time !== 'number') continue;
     ops.push(['CueSet', { time: cue.time, name: cue.name || '' }]);
+  }
+  // Кліпи в лінійці: структури знімок не створює, але значення вирівнює.
+  for (const track of state.tracks || []) {
+    if (!track?.id) continue;
+    for (const clip of track.arrangement || []) {
+      if (!clip?.id) continue;
+      const ref = { id: track.id };
+      for (const [prop, value] of Object.entries(clip.props || {})) {
+        ops.push(['ClipPropSet', { track: ref, clip: { id: clip.id }, prop, value }]);
+      }
+      if (clip.warp?.length) {
+        ops.push(['ClipWarpSet', { track: ref, clip: { id: clip.id }, markers: clip.warp }]);
+      }
+    }
   }
   for (const scene of state.scenes || []) {
     // Темп і метр сцени -- частина документа: сцена, що мовчки перемикає
