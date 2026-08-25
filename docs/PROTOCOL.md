@@ -572,9 +572,25 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `ClipNotesSet` | Track+Scene uuid + **регіон** (різні регіони не перекриваються) |
 | `ClipLaunch`, `ClipStop` | трек |
 | `SceneLaunch`, `StopAllClips` | барʼєр: усе, що запускалось раніше, зникає |
+| `ClipLoopSet` | кліп (Track+Scene **або** uuid у лінійці) |
+| `ClipPropSet` | кліп + `prop` |
+| `ClipWarpSet` | кліп -- увесь набір маркерів перезаписується цілком |
+| `ChainMixerSet` | uuid ланцюга + `param` |
+| `SongPropSet` | `prop` -- метр не перекриває тональність |
+| `SceneTimingSet` | сцена -- увесь блок перевизначень разом |
+| `CueSet`, `CueDelete` | час локатора: обидві події повністю визначають стан |
+| `ArrangementClipMove` | uuid кліпа |
+| `ArrangementClipNotesSet` | uuid кліпа + регіон |
 
-`RegistryInit` і структурні події (`TrackCreate/Delete`, `SceneCreate/Delete`,
-`ClipCreate/Delete`) не згортаються: їхній ефект не описується однією адресою.
+`RegistryInit` і структурні події не згортаються: їхній ефект не описується
+однією адресою. Це `TrackCreate/Delete/Duplicate`, `SceneCreate/Delete`,
+`ClipCreate/Delete`, `DeviceInsert/Delete/Move`, `DeviceLoad`, `SampleLoad`,
+`ReturnCreate/Delete`, `ArrangementClipCreate/Delete`.
+
+Кліп адресується двома способами, і ключ згортання це враховує: сесійний --
+парою Track+Scene, у лінійці -- власним uuid. `clip.id` має пріоритет над
+`scene.id`, тож той самий трек і та сама властивість на різних кліпах
+не перекривають одне одного.
 
 `MP_COMPACT_JOIN=0` вимикає стиснення -- клієнт отримує повну історію, як
 до його появи. `/health` показує `served_events` і `dropped_events` по сесії.
