@@ -94,3 +94,12 @@ test('однакова структура з різними значеннями
   // структура однакова -- отже жодного рядка про відсутні обʼєкти
   assert.ok(!/немає/.test(lines), `зайвий рядок про відсутність: ${lines}`);
 });
+
+test('розбіжність у Return-треках названа окремо: вона ламає сенди', () => {
+  const mine = { aux_tracks: [{ id: 'r1', kind: 'return', name: 'A' },
+                              { id: 'r2', kind: 'return', name: 'B' }] };
+  const theirs = { aux_tracks: [{ id: 'r1', kind: 'return', name: 'A' }] };
+  const lines = compareStates(mine, theirs).join('\n');
+  assert.match(lines, /return «B» є в тебе, у партнера немає/);
+  assert.match(lines, /Return-треків 2 проти 1 — індекси сендів означають різне/);
+});

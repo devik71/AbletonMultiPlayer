@@ -77,6 +77,22 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     }
   }
 
+  // Return-треки окремо: саме їхній набір визначає, ЩО означає index сенда.
+  // Розбіжність тут не косметична -- вона робить той самий сенд іншим ревером.
+  const myAux = byId(mine?.aux_tracks);
+  const theirAux = byId(theirs?.aux_tracks);
+  for (const [id, obj] of theirAux) {
+    if (!myAux.has(id)) add(`${obj.kind || "aux"} ${nameOf(obj, id)} є в партнера, у тебе немає`);
+  }
+  for (const [id, obj] of myAux) {
+    if (!theirAux.has(id)) add(`${obj.kind || "aux"} ${nameOf(obj, id)} є в тебе, у партнера немає`);
+  }
+  const myReturns = (mine?.aux_tracks || []).filter((t) => t.kind === "return").length;
+  const theirReturns = (theirs?.aux_tracks || []).filter((t) => t.kind === "return").length;
+  if (myReturns !== theirReturns) {
+    add(`Return-треків ${myReturns} проти ${theirReturns} — індекси сендів означають різне`);
+  }
+
   const myTracks = byId(mine?.tracks);
   const theirTracks = byId(theirs?.tracks);
   for (const [id, my] of myTracks) {
