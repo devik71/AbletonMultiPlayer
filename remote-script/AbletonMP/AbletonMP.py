@@ -1866,7 +1866,9 @@ class AbletonMP(ControlSurface):
         uid = (payload.get("clip") or {}).get("id")
         if uid:
             _track, clip = self._resolve_arr_clip(payload)
-            return clip, None
+            # Ключ дзеркала обовʼязковий: без нього застосування не глушить
+            # ехо, listener бачить "чужу" зміну і шле її назад по колу.
+            return clip, ("arr:" + uid if clip is not None else None)
         track, scene, slot = self._resolve_clip_slot(payload, gseq)
         if slot is None:
             return None, None
