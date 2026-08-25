@@ -135,7 +135,7 @@ BROWSER_CATEGORIES = ("audio_effects", "instruments", "midi_effects")
 #     дістає ноти вже квантованими, тож розсинхрону з неї не буває.
 SONG_PROPS = ("signature_numerator", "signature_denominator",
               "clip_trigger_quantization", "root_note", "scale_name",
-              "scale_mode", "loop", "loop_start", "loop_length",
+              "scale_mode", "loop", "loop_start", "loop_length", "groove_amount",
               "punch_in", "punch_out")
 LOAD_QUEUE_MAX_SEC = 60.0
 # Семпл може ще їхати filesync-ом (перескан раз на 10 с), та й браузер Live
@@ -354,6 +354,7 @@ class AbletonMP(ControlSurface):
             self._wire_devices(track)
             self._wire_note_slots(track)
             self._listen(track, "arrangement_clips", self._make_arrangement_cb())
+            self._wire_arrangement_clips(track)
         for track in self._device_aux_tracks():
             self._wire_metadata("track", track, track=track)
             self._wire_mixer(track)
@@ -748,6 +749,7 @@ class AbletonMP(ControlSurface):
             self._prime_clip_loops()
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
+            self._prime_arrangement_clips()
             # Набір треків змінився -- разом із ним і набір лінійок, які ми
             # обходимо. Без цього запис про кліп на видаленому треку висів би
             # у мапі до наступної зміни в Arrangement.
@@ -770,6 +772,7 @@ class AbletonMP(ControlSurface):
             self._prime_clip_loops()
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
+            self._prime_arrangement_clips()
             # Набір треків змінився -- разом із ним і набір лінійок, які ми
             # обходимо. Без цього запис про кліп на видаленому треку висів би
             # у мапі до наступної зміни в Arrangement.
@@ -847,10 +850,12 @@ class AbletonMP(ControlSurface):
         self._prime_clip_loops()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
+        self._prime_arrangement_clips()
         self._prime_song_props()
         self._prime_scene_timing()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
+        self._prime_arrangement_clips()
         self._prime_cues()
         self._prime_returns()
         self._prime_arrangement()
@@ -932,10 +937,12 @@ class AbletonMP(ControlSurface):
         self._prime_clip_loops()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
+        self._prime_arrangement_clips()
         self._prime_song_props()
         self._prime_scene_timing()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
+        self._prime_arrangement_clips()
         self._prime_cues()
         self._prime_returns()
         self._prime_arrangement()
@@ -1809,6 +1816,28 @@ class AbletonMP(ControlSurface):
 
     # ------------------------------------------------------------- MIDI clips
 
+    def _resolve_any_clip(self, payload, gseq):
+        """Кліп за адресою -- сесійний або з лінійки.
+
+        Сесійний адресується парою (трек, сцена), бо власного uuid у нього
+        немає. Кліп у лінійці навпаки: сцен там не буває, зате є uuid.
+        Одна подія має вміти в обидва, інакше audio-кліп у лінійці лишився
+        б без gain і warp -- саме там, де warp найпотрібніший.
+        """
+        uid = (payload.get("clip") or {}).get("id")
+        if uid:
+            _track, clip = self._resolve_arr_clip(payload)
+            return clip, None
+        track, scene, slot = self._resolve_clip_slot(payload, gseq)
+        if slot is None:
+            return None, None
+        try:
+            if not slot.has_clip:
+                return None, None
+            return slot.clip, self._clip_key(track, scene)
+        except Exception:
+            return None, None
+
     def _clip_prop_value(self, prop, raw):
         """Нормалізоване значення властивості кліпу, або None.
 
@@ -1818,6 +1847,9 @@ class AbletonMP(ControlSurface):
         try:
             if prop in ("warping", "muted", "legato", "ram_mode"):
                 return bool(raw)
+            if prop == "groove_amount":
+                value = round(float(raw), 6)
+                return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
             if prop in ("gain", "velocity_amount"):
                 value = round(float(raw), 6)
                 if not math.isfinite(value):
@@ -1907,16 +1939,9 @@ class AbletonMP(ControlSurface):
             self._warn("gseq %s: некоректне значення %r для %s"
                        % (gseq, payload.get("value"), prop))
             return
-        track, scene, slot = self._resolve_clip_slot(payload, gseq)
-        if slot is None:
-            return
-        try:
-            if not slot.has_clip:
-                return  # tombstone: кліпа немає, подія мовчки не діє
-            clip = slot.clip
-        except Exception:
-            return
-        key = self._clip_key(track, scene)
+        clip, key = self._resolve_any_clip(payload, gseq)
+        if clip is None:
+            return  # tombstone: кліпа немає, подія мовчки не діє
         if key is not None:
             self._mirror["clip_props"].setdefault(key, {})[prop] = value
         try:
@@ -2236,13 +2261,10 @@ class AbletonMP(ControlSurface):
             want.append({"beat_time": beat, "sample_time": sample})
         want.sort(key=lambda m: m["beat_time"])
 
-        track, scene, slot = self._resolve_clip_slot(payload, gseq)
-        if slot is None:
-            return
+        clip, key = self._resolve_any_clip(payload, gseq)
+        if clip is None:
+            return  # tombstone
         try:
-            if not slot.has_clip:
-                return  # tombstone
-            clip = slot.clip
             if not clip.is_audio_clip:
                 return  # warp-маркерів у MIDI немає: це різниця типів
         except Exception:
@@ -2251,7 +2273,6 @@ class AbletonMP(ControlSurface):
         current = self._warp_markers(clip)
         if current is None or current == want:
             return
-        key = self._clip_key(track, scene)
         if key is not None:
             self._mirror["warp"][key] = want   # ДО запису -- глушимо ехо
         have = dict((m["beat_time"], m["sample_time"]) for m in current)
@@ -2278,6 +2299,72 @@ class AbletonMP(ControlSurface):
             actual = self._warp_markers(clip)
             if actual is not None:
                 self._mirror["warp"][key] = actual
+
+    def _wire_arrangement_clips(self, track):
+        """Підписки на кліпи в лінійці. Адреса в них -- uuid, не сцена."""
+        track_ref = self._device_track_ref(track)
+        if not track_ref:
+            return
+        for clip in self._arr_clips(track):
+            uid = self._arr_reg.id_of(clip, create=False)
+            if not uid:
+                continue
+            for prop in CLIP_PROPS:
+                self._listen(clip, prop, self._make_arr_prop_cb(track_ref, clip, uid, prop))
+            self._listen(clip, "warp_markers", self._make_arr_warp_cb(track_ref, clip, uid))
+
+    def _make_arr_prop_cb(self, track_ref, clip, uid, prop):
+        def cb():
+            self._safe(self._on_arr_prop, track_ref, clip, uid, prop)
+        return cb
+
+    def _make_arr_warp_cb(self, track_ref, clip, uid):
+        def cb():
+            self._safe(self._on_arr_warp, track_ref, clip, uid)
+        return cb
+
+    def _on_arr_prop(self, track_ref, clip, uid, prop):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        value = self._clip_prop_value(prop, self._safe_attr(clip, prop))
+        if value is None:
+            return
+        key = "arr:" + uid
+        current = self._mirror["clip_props"].setdefault(key, {})
+        if current.get(prop) == value:
+            return
+        current[prop] = value
+        self._defer("clipprop:%s:%s" % (key, prop), "ClipPropSet", {
+            "track": track_ref, "clip": {"id": uid}, "prop": prop, "value": value,
+        })
+
+    def _on_arr_warp(self, track_ref, clip, uid):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        markers = self._warp_markers(clip)
+        key = "arr:" + uid
+        if markers is None or self._mirror["warp"].get(key) == markers:
+            return
+        self._mirror["warp"][key] = markers
+        self._defer("warp:" + key, "ClipWarpSet", {
+            "track": track_ref, "clip": {"id": uid}, "markers": markers,
+        })
+
+    def _prime_arrangement_clips(self):
+        """Базова лінія для кліпів у лінійці -- разом із сесійними."""
+        for track in self._doc.tracks:
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
+                continue
+            for clip in self._arr_clips(track):
+                uid = self._arr_reg.id_of(clip, create=False)
+                if not uid:
+                    continue
+                key = "arr:" + uid
+                self._mirror["clip_props"][key] = self._clip_props_state(clip)
+                markers = self._warp_markers(clip)
+                if markers is not None:
+                    self._mirror["warp"][key] = markers
 
     def _clip_key(self, track, scene):
         if not self._registry_ready:
@@ -2348,6 +2435,7 @@ class AbletonMP(ControlSurface):
         self._prime_clip_loops()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
+        self._prime_arrangement_clips()
         if current == "midi" and clip is not None:
             notes = self._clip_notes(clip)
             self._mirror["notes"][key] = notes
@@ -3088,6 +3176,7 @@ class AbletonMP(ControlSurface):
                 self._prime_clip_loops()
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
+                self._prime_arrangement_clips()
 
         elif etype == "TrackDelete":
             uid = (payload.get("track") or {}).get("id")
@@ -3229,6 +3318,7 @@ class AbletonMP(ControlSurface):
                 self._prime_clip_loops()
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
+                self._prime_arrangement_clips()
 
         elif etype == "ClipDelete":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -3254,6 +3344,7 @@ class AbletonMP(ControlSurface):
                 self._prime_clip_loops()
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
+                self._prime_arrangement_clips()
 
         elif etype == "SampleLoad":
             self._queue_device_struct(etype, payload, gseq)
@@ -3787,6 +3878,7 @@ class AbletonMP(ControlSurface):
             self._prime_clip_loops()
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
+            self._prime_arrangement_clips()
             self._suppress_struct = struct_was
         return True
 
