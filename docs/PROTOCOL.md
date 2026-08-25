@@ -681,7 +681,7 @@ endpoint читає Max for Live device `AbletonMP Multiplayer Status.maxpat`; �
 | `TrackDelete` | `{track: {id}}` | `song.delete_track(i)` |
 | `SceneCreate` | `{scene: {id, name?, color?}, idx}` | `song.create_scene(i)` |
 | `SceneDelete` | `{scene: {id}}` | `song.delete_scene(i)` |
-| `MixerSet` | `{track: {id, kind?: "return"\|"master"}, param, index?, value}` | `mixer_device.<param>.value = v` |
+| `MixerSet` | `{track: {id, kind?: "return"\|"master"}, param, index?, return?, value}` | `mixer_device.<param>.value = v` |
 | `TrackToggle` | `{track: {id, kind?: "return"}, param, value: bool}` | `track.<param> = v` |
 | `ObjectMetaSet` | `{object: "track"\|"scene"\|"clip", track?, scene?, prop: "name"\|"color", value}` | `<object>.<prop> = value` |
 | `DeviceParamSet` | `{track: {id, kind?: "return"|"master"}, chain_path?: [{id}], device: {class_name, class_display_name, ordinal}, parameter: {name, ordinal}, value}` | `device.parameters[i].value = v` |
@@ -708,6 +708,18 @@ endpoint читає Max for Live device `AbletonMP Multiplayer Status.maxpat`; �
 
 Для звичайного Track адреса лишається `{id}`; Return/Master використовують
 той самий aux-простір `{id, kind}`, що й `DeviceParamSet`.
+
+
+**Сенд возить uuid цільового Return-треку як контрольну суму.** Індекс
+сенда -- це позиція, а не адреса: щойно в когось інша кількість або інший
+порядок Return-треків, той самий `index: 2` означає **інший** ревер.
+Найгірше тут те, що нічого не ламається помітно -- мікс просто звучить
+не так, і знайти причину майже неможливо.
+
+Тому поруч з індексом їде `return: {id}`. Приймальний бік звіряє: збіг --
+застосовує, розбіжність -- відмовляє вголос і називає обидва uuid,
+відсутність -- каже, що Return-треків у нього менше. Той самий принцип,
+що з ординалом девайса: **індекс -- контрольна сума, не адреса**.
 
 ### Межі кліпу, дублювання і завантаження девайсів
 
