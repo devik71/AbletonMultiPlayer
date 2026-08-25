@@ -1453,10 +1453,26 @@ try {
     }
   });
 
-  await check('журнал: 123 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('назва ланцюга в раку доїжджає', async () => {
+    // Підписати пад Drum Rack -- звичайна робота. Ланцюг має власний uuid,
+    // тож ObjectMetaSet адресує його прямо, без треку й шляху.
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const nested = state.tracks.concat(state.aux_tracks)
+      .flatMap((t) => t.devices || []).find((d) => d.chain_path?.length);
+    const chainId = nested.chain_path[nested.chain_path.length - 1].id;
+
+    const from = l2.out.length;
+    l1.stdin.write(`chainname ${chainId} Kick Layer\n`);
+    await waitFor(l2, /<- #\d+ ObjectMetaSet .*"chain".*Kick Layer/, 8000, from);
+    if (/ObjectMetaSet ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер не знайшов ланцюг за uuid');
+    }
+  });
+
+  await check('журнал: 124 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 123) throw new Error(`очікував 123 події, у журналі ${lines.length}`);
+    if (lines.length !== 124) throw new Error(`очікував 124 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

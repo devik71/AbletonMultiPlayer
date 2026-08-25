@@ -151,6 +151,7 @@ const deviceTrackFromArg = (value) => {
 const metadataTarget = (payload) => {
   if (payload.object === 'track') return deviceTrackByRef(payload.track);
   if (payload.object === 'scene') return song.scenes.find((s) => s.id === payload.scene?.id);
+  if (payload.object === 'chain') return chainById(payload.chain?.id);
   if (payload.object === 'clip') {
     // Кліп у лінійці має власний uuid; сесійний адресується сценою.
     if (payload.clip?.id) return arrClipById(payload.clip.id)?.clip || null;
@@ -1679,6 +1680,24 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         track: trackRef(t), scene: sceneRef(song.scenes[s]), markers,
       });
       console.log(`warp ${rest[0]}/${s}: ${markers.length} маркерів`);
+      break;
+    }
+    case 'chainname': {
+      const all = [];
+      const collect = (container) => {
+        for (const rack of container.devices || []) {
+          for (const [, chains] of chainGroups(rack)) {
+            for (const c of chains) { all.push(c); collect(c); }
+          }
+        }
+      };
+      for (const t of allDeviceTracks()) collect(t);
+      const chain = all.find((c) => c.id === rest[0]) || all[Number(rest[0]) || 0];
+      if (!chain) return console.log('немає такого ланцюга');
+      const value = rest.slice(1).join(' ');
+      chain.name = value;
+      emit('ObjectMetaSet', { object: 'chain', chain: { id: chain.id }, prop: 'name', value });
+      console.log(`ланцюг ${chain.id}: name = ${value}`);
       break;
     }
     case 'chainmix': {

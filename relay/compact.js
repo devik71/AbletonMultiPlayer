@@ -73,7 +73,7 @@ export function supersedeKey(ev) {
     case 'TrackToggle':
       return `toggle:${trackKey(p.track)}:${p.param}`;
     case 'ObjectMetaSet':
-      return `meta:${p.object}:${trackKey(p.track)}:${p.clip?.id ?? p.scene?.id ?? ''}:${p.prop}`;
+      return `meta:${p.object}:${trackKey(p.track)}:${p.chain?.id ?? p.clip?.id ?? p.scene?.id ?? ''}:${p.prop}`;
     case 'DeviceParamSet':
       return `device:${trackKey(p.track)}` +
         `:${(p.chain_path || []).map((c) => c.id).join('/')}` +

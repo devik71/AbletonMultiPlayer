@@ -454,6 +454,7 @@ class AbletonMP(ControlSurface):
                     cid = self._chains_reg.id_of(chain, create=False)
                     if cid:
                         self._wire_chain_mixer(chain, cid)
+                        self._wire_metadata("chain", chain)
                     self._wire_device_container(track, chain, depth + 1)
 
     def _unwire_tracks(self):
@@ -1334,6 +1335,9 @@ class AbletonMP(ControlSurface):
             target = scene if scene is not None else obj
             uid = self._scenes_reg.id_of(target, create=False)
             return {"object": kind, "scene": {"id": uid}} if uid else None
+        if kind == "chain":
+            uid = self._chains_reg.id_of(obj, create=False)
+            return {"object": kind, "chain": {"id": uid}} if uid else None
         if kind == "clip" and track is not None and scene is not None:
             refs = self._clip_refs(track, scene)
             if refs["track"].get("id") and refs["scene"].get("id"):
@@ -3492,6 +3496,9 @@ class AbletonMP(ControlSurface):
                 sidx = self._resolve_scene(payload.get("scene"))
                 if sidx is not None:
                     target = scene = self._doc.scenes[sidx]
+            elif kind == "chain":
+                uid = (payload.get("chain") or {}).get("id")
+                target = self._chains_reg.obj_of(uid) if uid else None
             elif kind == "clip":
                 # Кліп у лінійці адресується власним uuid: сцен там немає.
                 if (payload.get("clip") or {}).get("id"):
