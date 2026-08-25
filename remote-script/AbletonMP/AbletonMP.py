@@ -5142,7 +5142,8 @@ class AbletonMP(ControlSurface):
         # Дерево оновлюється тут же: так кожен наявний виклик _prime_devices
         # автоматично лишається точкою відліку для _diff_devices.
         self._mirror["device_tree"] = self._device_tree()
-        self._mirror["drum_pads"] = self._drum_pad_map()
+        # Базову лінію падів тримає одна функція, а не дубльований рядок
+        self._prime_drum_pads()
 
     def _mix_slots(self, track):
         slots = [("volume", None), ("panning", None)]

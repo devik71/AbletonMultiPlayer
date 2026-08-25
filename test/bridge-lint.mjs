@@ -49,3 +49,48 @@ test('константи переліків не розійшлися з вал�
   const unchecked = names.filter((n) => !validator.includes(`"${n}"`));
   assert.deepEqual(unchecked, [], `у CLIP_PROPS без валідації: ${unchecked.join(', ')}`);
 });
+
+test('кожна базова лінія встановлюється в ОБОХ шляхах бутстрапу', () => {
+  // Дисципліна, що вже двічі коштувала нам мовчазного бага: дерево девайсів
+  // і властивості кліпів лишались без базової лінії там, де про них забули.
+  // Реєстр піднімається двома шляхами -- створення й прийняття чужого, --
+  // і пропуск в одному з них видно лише на живому Live.
+  const primes = new Set(
+    [...src.matchAll(/def (_prime_[a-z_]+)\(self\)/g)].map((m) => m[1]),
+  );
+  assert.ok(primes.size >= 8, `надто мало _prime_*: ${primes.size}`);
+
+  const bodyOf = (name) => {
+    const start = src.indexOf(`    def ${name}(self`);
+    assert.ok(start > 0, `${name} не знайдено`);
+    const end = src.indexOf('\n    def ', start + 10);
+    return src.slice(start, end > 0 ? end : undefined);
+  };
+  const build = bodyOf('_build_registry');
+  const adopt = bodyOf('_adopt_registry');
+
+  // Ті, що приймають аргументи, викликаються точково -- їх не рахуємо
+  const global = [...primes].filter((n) => new RegExp(`${n}\(\)`).test(src));
+  // Викликана з іншого праймера теж рахується: важлива базова лінія,
+  // а не те, звідки саме її встановили.
+  const reachable = (body) => {
+    const direct = global.filter((n) => body.includes(`${n}()`));
+    const nested = global.filter((n) => direct.some((d) => bodyOf(d).includes(`${n}()`)));
+    return new Set([...direct, ...nested]);
+  };
+  const inBuild = reachable(build);
+  const inAdopt = reachable(adopt);
+  const missing = global.filter((n) => !inBuild.has(n) || !inAdopt.has(n));
+  assert.deepEqual(missing.sort(), [],
+    `не в обох шляхах бутстрапу: ${missing.join(', ')}`);
+});
+
+test('усе, що _apply вміє застосувати, оголошено в APPLY_TYPES', () => {
+  const applied = new Set();
+  for (const m of src.matchAll(/etype == "([A-Za-z]+)"/g)) applied.add(m[1]);
+  const listed = src.match(/APPLY_TYPES = \[([\s\S]*?)\]/);
+  const declared = new Set([...listed[1].matchAll(/"([A-Za-z]+)"/g)].map((m) => m[1]));
+  const undeclared = [...applied].filter((t) => !declared.has(t)).sort();
+  assert.deepEqual(undeclared, [],
+    `застосовуємо, але не оголошуємо -- партнер не знатиме: ${undeclared.join(', ')}`);
+});
