@@ -340,7 +340,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,' +
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,ClipWarpSet,' +
       'ArrangementClipCreate,ArrangementClipMove,ArrangementClipDelete,ArrangementClipNotesSet').split(','),
   });
 
@@ -1105,6 +1105,27 @@ function apply(type, payload, gseq) {
       delete song.cues[t];
       break;
     }
+    case 'ClipWarpSet': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      if (!t) return reject('невідомий трек');
+      if (s < 0) return reject('невідома сцена');
+      const clip = t.clips[s];
+      if (!clip) break;   // tombstone
+      if (clip.kind !== 'audio') return reject('warp-маркерів у MIDI-кліпа немає');
+      const markers = payload.markers;
+      if (!Array.isArray(markers) || !markers.length || markers.length > 512) {
+        return reject('некоректний набір warp-маркерів');
+      }
+      for (const m of markers) {
+        if (!Number.isFinite(m?.beat_time) || !(m?.sample_time >= 0)) {
+          return reject(`маркер поза межами: ${JSON.stringify(m)}`);
+        }
+      }
+      clip.warp_markers = markers.map((m) => ({ ...m }))
+        .sort((a, b) => a.beat_time - b.beat_time);
+      break;
+    }
     case 'ClipPropSet': {
       const t = trackById(payload.track?.id);
       const s = sceneIdx(payload.scene?.id);
@@ -1588,6 +1609,28 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       delete song.cues[t];
       emit('CueDelete', { time: t });
       console.log(`локатор на ${t} прибрано`);
+      break;
+    }
+    case 'warp': {
+      // warp <track> <scene> <beat:sample> ... -- увесь набір разом,
+      // бо маркери описують відображення, а не окремі точки.
+      const t = song.tracks[Number(rest[0]) || 0];
+      const s = Number(rest[1]) || 0;
+      const clip = t && t.clips[s];
+      if (!clip) return console.log('немає кліпу в цьому слоті');
+      if (clip.kind !== 'audio') return console.log('warp лише для audio-кліпів');
+      const markers = rest.slice(2).map((pair) => {
+        const [b, sm] = pair.split(':').map(Number);
+        return { beat_time: b, sample_time: sm };
+      });
+      if (!markers.length || markers.some((m) => !Number.isFinite(m.beat_time))) {
+        return console.log('формат: warp <track> <scene> 0:0 4:1.5 ...');
+      }
+      clip.warp_markers = markers;
+      emit('ClipWarpSet', {
+        track: trackRef(t), scene: sceneRef(song.scenes[s]), markers,
+      });
+      console.log(`warp ${rest[0]}/${s}: ${markers.length} маркерів`);
       break;
     }
     case 'clipprop': {

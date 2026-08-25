@@ -1358,10 +1358,44 @@ try {
     await waitFor(l2, /MixerSet ВІДХИЛЕНО \(crossfade_assign 7 поза межами\)/, 6000, bad);
   });
 
-  await check('журнал: 114 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('warp-маркери доїжджають повним набором', async () => {
+    // Маркери описують ВІДОБРАЖЕННЯ файлу на долі. Частковий набір -- не
+    // «майже правильно», а інший ритм, тож вони їдуть разом.
+    const born = l2.out.length;
+    l1.stdin.write('dropsample 3 4 Samples/kick.wav\n');
+    await waitFor(l2, /<- #\d+ SampleLoad .*"kind":"slot"/, 8000, born);
+
+    const from = l2.out.length;
+    l1.stdin.write('warp 3 4 0:0 4:1.5 8:3.25\n');
+    await waitFor(l2, /<- #\d+ ClipWarpSet .*"beat_time":8/, 8000, from);
+    if (/ClipWarpSet ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер відхилив маркери');
+    }
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    if (!/"sample_time": 3\.25/.test(l2.out.slice(shown))) {
+      throw new Error('маркери в партнера не лягли');
+    }
+
+    // На MIDI-кліпі warp-маркерів немає -- це різниця типів, не помилка
+    const midi = l2.out.length;
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const withClip = state.tracks.find((t) => (t.clips || []).some((c) => c.notes));
+    const scene = withClip.clips.find((c) => c.notes).scene.id;
+    await inject({
+      type: 'ClipWarpSet',
+      payload: { track: { id: withClip.id }, scene: { id: scene },
+                 markers: [{ beat_time: 0, sample_time: 0 }] },
+    });
+    await waitFor(l2, /ClipWarpSet ВІДХИЛЕНО \(warp-маркерів у MIDI-кліпа немає\)/, 6000, midi);
+  });
+
+  await check('журнал: 117 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 114) throw new Error(`очікував 114 подій, у журналі ${lines.length}`);
+    if (lines.length !== 117) throw new Error(`очікував 117 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

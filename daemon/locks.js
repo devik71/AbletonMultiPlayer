@@ -17,6 +17,7 @@ const CONTINUOUS = new Set([
   'SongPropSet',
   'SceneTimingSet',
   'ClipPropSet',
+  'ClipWarpSet',
   'SongPropSet',
 ]);
 
@@ -37,7 +38,7 @@ export function lockTarget(type, payload, registry) {
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
 
-  if (type === 'ClipPropSet') {
+  if (type === 'ClipPropSet' || type === 'ClipWarpSet') {
     // Лок на кліп цілком, а не на властивість: людина крутить один кліп,
     // і показувати «зайнято» краще про нього, а не про окреме поле.
     const track = p.track?.id;

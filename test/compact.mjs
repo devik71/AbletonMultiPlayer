@@ -259,3 +259,21 @@ test('локатор адресується часом, і згортання к
   gseq = 0;
   assert.equal(compactTail([set(32, 'a'), set(64, 'b')]).dropped, 0);
 });
+
+test('warp-маркери згортаються в останній набір, кожен кліп окремо', () => {
+  gseq = 0;
+  const warp = (scene, markers) => ev('ClipWarpSet', {
+    track: { id: 't1' }, scene: { id: scene }, markers,
+  });
+  const out = compactTail([
+    warp('s1', [{ beat_time: 0, sample_time: 0 }]),
+    warp('s1', [{ beat_time: 0, sample_time: 0 }, { beat_time: 4, sample_time: 2 }]),
+    warp('s1', [{ beat_time: 0, sample_time: 0 }, { beat_time: 8, sample_time: 4 }]),
+  ]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.markers[1].beat_time, 8);
+
+  gseq = 0;
+  assert.equal(compactTail([warp('s1', [{ beat_time: 0, sample_time: 0 }]),
+    warp('s2', [{ beat_time: 0, sample_time: 0 }])]).dropped, 0);
+});
