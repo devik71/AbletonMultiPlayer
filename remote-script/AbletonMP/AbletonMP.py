@@ -394,6 +394,13 @@ class AbletonMP(ControlSurface):
                 self._listen(p, "value", self._make_mix_cb(track, param, idx))
         for prop in self._toggle_props(track):
             self._listen(track, prop, self._make_toggle_cb(track, prop))
+        # crossfade_assign -- звичайна int-властивість mixer_device, а не
+        # DeviceParameter, тож у цикл параметрів вище вона не потрапляє.
+        if self._aux_kind_of(track) != "master":
+            md = self._safe_attr(track, "mixer_device")
+            if md is not None:
+                self._listen(md, "crossfade_assign",
+                             self._make_mix_cb(track, "crossfade_assign", None))
 
     def _wire_metadata(self, kind, obj, track=None, scene=None):
         for prop in ("name", "color"):
@@ -1374,6 +1381,17 @@ class AbletonMP(ControlSurface):
         uid = track_ref.get("id")
         return "%s:%s" % (kind, uid) if kind else str(uid)
 
+    def _crossfade_assign(self, track):
+        """0 = A, 1 = none, 2 = B. None -- у цього треку його немає."""
+        md = self._safe_attr(track, "mixer_device")
+        if md is None:
+            return None
+        try:
+            value = int(md.crossfade_assign)
+        except Exception:
+            return None
+        return value if value in (0, 1, 2) else None
+
     def _mix_key(self, track_ref, param, idx):
         return "%s:%s:%s" % (self._mix_track_key(track_ref), param, idx)
 
@@ -1384,6 +1402,15 @@ class AbletonMP(ControlSurface):
         if not self._registry_ready:
             return
         track_ref = self._device_track_ref(track)
+        if param == "crossfade_assign":
+            value = self._crossfade_assign(track)
+            key = self._mix_key(track_ref, param, idx)
+            if not track_ref or value is None or self._mirror["mix"].get(key) == value:
+                return
+            self._mirror["mix"][key] = value
+            # дискретний перемикач A/none/B -- дебаунс лише додав би затримки
+            self._emit("MixerSet", {"track": track_ref, "param": param, "value": value})
+            return
         p = self._mix_param(track, param, idx)
         if not track_ref or p is None:
             return
@@ -3178,6 +3205,23 @@ class AbletonMP(ControlSurface):
                 return
             param = payload.get("param")
             idx = payload.get("index")
+            if param == "crossfade_assign":
+                try:
+                    want = int(payload.get("value"))
+                except Exception:
+                    return
+                if want not in (0, 1, 2):
+                    self._warn("gseq %s: crossfade_assign %r поза межами" % (gseq, want))
+                    return
+                md = self._safe_attr(track, "mixer_device")
+                if md is None:
+                    return
+                self._mirror["mix"][self._mix_key(track_ref, param, None)] = want
+                try:
+                    md.crossfade_assign = want
+                except Exception as e:
+                    self._warn("gseq %s: crossfade_assign не встановився: %r" % (gseq, e))
+                return
             if param == "send":
                 want = (payload.get("return") or {}).get("id")
                 mine = (self._send_return_ref(idx) or {}).get("id")
@@ -4625,6 +4669,9 @@ class AbletonMP(ControlSurface):
                         self._mirror["mix"][self._mix_key(track_ref, param, idx)] = round(float(p.value), 6)
                     except Exception:
                         pass
+            cross = self._crossfade_assign(track)
+            if cross is not None:
+                self._mirror["mix"][self._mix_key(track_ref, "crossfade_assign", None)] = cross
             for prop in self._toggle_props(track):
                 try:
                     self._mirror["mix"][self._toggle_key(track_ref, prop)] = bool(getattr(track, prop))
@@ -4821,6 +4868,9 @@ class AbletonMP(ControlSurface):
                 mixer.setdefault("sends", []).append(entry)
             else:
                 mixer[param] = value
+        cross = self._crossfade_assign(track)
+        if cross is not None:
+            mixer["crossfade_assign"] = cross
         for prop in self._toggle_props(track):
             try:
                 mixer[prop] = bool(getattr(track, prop))

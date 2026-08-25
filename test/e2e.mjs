@@ -1334,10 +1334,34 @@ try {
     await waitFor(l2, /<- #\d+ ReturnDelete/, 8000, gone);
   });
 
-  await check('журнал: 112 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('призначення кросфейдера доїжджає, сміття -- ні', async () => {
+    // Не DeviceParameter, а звичайна int-властивість mixer_device: у загальний
+    // цикл параметрів вона не потрапляє, тож потребує власного шляху.
+    const from = l2.out.length;
+    l1.stdin.write('xfade 0 2\n');
+    await waitFor(l2, /<- #\d+ MixerSet .*"crossfade_assign".*"value":2/, 8000, from);
+    if (/MixerSet ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер відхилив');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    if (!/"crossfade_assign:-": 2/.test(l2.out.slice(shown))) {
+      throw new Error('призначення в партнера не змінилось');
+    }
+
+    const bad = l2.out.length;
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    await inject({
+      type: 'MixerSet',
+      payload: { track: { id: state.tracks[0].id }, param: 'crossfade_assign', value: 7 },
+    });
+    await waitFor(l2, /MixerSet ВІДХИЛЕНО \(crossfade_assign 7 поза межами\)/, 6000, bad);
+  });
+
+  await check('журнал: 114 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 112) throw new Error(`очікував 112 подій, у журналі ${lines.length}`);
+    if (lines.length !== 114) throw new Error(`очікував 114 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

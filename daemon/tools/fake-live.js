@@ -183,9 +183,11 @@ const mixParamAllowed = (track, param, index) => {
   if (track?.kind === 'master') {
     return index == null && ['volume', 'panning', 'crossfader', 'cue_volume'].includes(param);
   }
-  if (track?.kind === 'return') return index == null && ['volume', 'panning'].includes(param);
+  if (track?.kind === 'return') {
+    return index == null && ['volume', 'panning', 'crossfade_assign'].includes(param);
+  }
   if (param === 'send') return Number.isInteger(index) && index >= 0;
-  return index == null && ['volume', 'panning'].includes(param);
+  return index == null && ['volume', 'panning', 'crossfade_assign'].includes(param);
 };
 const toggleAllowed = (track, param) => {
   if (track?.kind === 'master') return false;
@@ -1164,6 +1166,9 @@ function apply(type, payload, gseq) {
       if (!t) return reject('невідомий трек');
       const index = payload.index ?? null;
       if (!mixParamAllowed(t, payload.param, index)) return reject('недопустимий параметр mixer');
+      if (payload.param === 'crossfade_assign' && ![0, 1, 2].includes(payload.value)) {
+        return reject(`crossfade_assign ${payload.value} поза межами`);
+      }
       if (payload.param === 'send' && payload.return?.id) {
         // Індекс сенда -- позиція, а не адреса. uuid Return поруч ловить
         // випадок, коли набір Return-треків між машинами розійшовся.
@@ -1810,6 +1815,17 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       }
       t[param] = !t[param];
       emit('TrackToggle', { track: deviceTrackRef(t), param, value: t[param] });
+      break;
+    }
+    case 'xfade': {
+      // 0 = A, 1 = none, 2 = B
+      const t = deviceTrackFromArg(rest[0]);
+      const value = Number(rest[1]);
+      if (!t) return console.log('немає такого треку');
+      if (![0, 1, 2].includes(value)) return console.log('crossfade_assign: 0, 1 або 2');
+      t.mix['crossfade_assign:-'] = value;
+      emit('MixerSet', { track: deviceTrackRef(t), param: 'crossfade_assign', value });
+      console.log(`${t.name}: crossfade_assign = ${value}`);
       break;
     }
     case 'vol':

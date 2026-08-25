@@ -18,7 +18,7 @@ export const metaOps = (kind, ref, src) => ['name', 'color']
 
 const mixerOps = (ref, mixer) => {
   const ops = [];
-  for (const param of ['volume', 'panning', 'crossfader', 'cue_volume']) {
+  for (const param of ['volume', 'panning', 'crossfader', 'cue_volume', 'crossfade_assign']) {
     if (param in mixer) ops.push(['MixerSet', { track: ref, param, value: mixer[param] }]);
   }
   for (const send of mixer.sends || []) {
