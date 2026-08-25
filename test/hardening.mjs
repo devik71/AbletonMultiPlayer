@@ -908,3 +908,51 @@ test('undo дістає попереднє значення з холодног�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('однакова версія з різним кодом не проходить мовчки', async () => {
+  // Найдорожча помилка прогону парою: одна машина оновилась, друга ні,
+  // а `script` між комітами не змінюється -- виглядає все однаково.
+  const dir = mkdtempSync(join(tmpdir(), 'abletonmp-relay-sha-'));
+  const port = await freePort();
+  const relay = spawn(process.execPath, [join(root, 'relay/server.js')], {
+    cwd: join(root, 'relay'),
+    env: { ...process.env, MP_RELAY_PORT: String(port), MP_JOURNAL_DIR: dir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const ready = new Promise((resolve) => {
+    relay.stdout.on('data', (b) => { if (String(b).includes('relay слухає')) resolve(); });
+  });
+  await ready;
+
+  const peer = (author, sha) => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.compat = [];
+    ws.on('message', (raw) => {
+      const msg = JSON.parse(raw);
+      if (msg.m === 'welcome') {
+        ws.send(JSON.stringify({
+          m: 'client_info', live: '12.3.5', script: '0.19.0-dev',
+          sha, features: [], events: ['TempoSet'],
+        }));
+        resolve(ws);
+      } else if (msg.m === 'compat') ws.compat.push(msg.text);
+    });
+    ws.on('open', () => ws.send(JSON.stringify({
+      m: 'join', session: 'sha', author, since: 0, proto: 1,
+    })));
+  });
+
+  try {
+    const a = await peer('p1', 'aaaaaaaaaaaa');
+    const b = await peer('p2', 'bbbbbbbbbbbb');
+    await new Promise((r) => setTimeout(r, 600));
+    const said = [...a.compat, ...b.compat].join(' | ');
+    assert.match(said, /РІЗНИЙ код/, `реле промовчало: ${said}`);
+    assert.match(said, /aaaaaaaaaaaa/, 'у тексті немає хеша, за яким шукати');
+    a.close();
+    b.close();
+  } finally {
+    relay.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

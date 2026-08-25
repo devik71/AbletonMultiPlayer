@@ -973,6 +973,7 @@ wss.on('connection', (ws, req) => {
         client.info = {
           live: msg.live,
           script: msg.script,
+          sha: msg.sha || null,
           features: msg.features || [],
           events: msg.events || [],
         };
@@ -981,6 +982,15 @@ wss.on('connection', (ws, req) => {
 
           if (other.info.script !== client.info.script) {
             const t = `версії скрипта різні: ${client.author}=${client.info.script}, ${other.author}=${other.info.script}`;
+            log(`[${client.session.name}] ${t}`);
+            client.session.broadcast({ m: 'compat', text: t });
+          } else if (client.info.sha && other.info.sha && client.info.sha !== other.info.sha) {
+            // Версія між комітами не змінюється, тож однакове `script`
+            // нічого не доводить: у парі це найдорожча помилка -- одна
+            // машина оновилась, друга ні, а виглядає все однаково.
+            const t = `однакова версія ${client.info.script}, але РІЗНИЙ код: ` +
+              `${client.author}=${client.info.sha}, ${other.author}=${other.info.sha}` +
+              ` — оновіть скрипт і перезапустіть Live на тій машині, що відстала`;
             log(`[${client.session.name}] ${t}`);
             client.session.broadcast({ m: 'compat', text: t });
           }
