@@ -387,6 +387,9 @@ const CLIP_PROPS = {
   warp_mode: (v) => (Number.isInteger(v) && v >= 0 && v <= 6 ? v : null),
   launch_mode: (v) => (Number.isInteger(v) && v >= 0 && v <= 4 ? v : null),
   launch_quantization: (v) => (Number.isInteger(v) && v >= 0 && v <= 13 ? v : null),
+  // Кліп має власний розмір такту, окремий від пісні
+  signature_numerator: (v) => (Number.isInteger(v) && v >= 1 && v <= 99 ? v : null),
+  signature_denominator: (v) => ([1, 2, 4, 8, 16].includes(v) ? v : null),
   warping: (v) => Boolean(v),
   muted: (v) => Boolean(v),
   legato: (v) => Boolean(v),

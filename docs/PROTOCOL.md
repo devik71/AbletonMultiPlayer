@@ -1005,9 +1005,13 @@ Audio-кліпи цими подіями поки не створюються: `
   "track":{"id":"…"},"scene":{"id":"…"},"prop":"gain","value":0.42}}
 ```
 
-Одинадцять властивостей поза межами кліпу: `gain`, `pitch_coarse`,
+Тринадцять властивостей поза межами кліпу: `gain`, `pitch_coarse`,
 `pitch_fine`, `warping`, `warp_mode`, `ram_mode`, `muted`, `legato`,
-`velocity_amount`, `launch_mode`, `launch_quantization`.
+`velocity_amount`, `launch_mode`, `launch_quantization`, а також ВЛАСНИЙ
+розмір такту кліпа -- `signature_numerator` і `signature_denominator`.
+Він окремий від розміру пісні й визначає сітку кліпу, тобто те, як читаються
+позиції нот усередині нього. Знаменник, як і в пісні, приймається лише
+степенем двійки.
 
 Частина існує **лише в audio-кліпів**. На MIDI їх просто немає, і спроба
 записати -- не помилка партнера, а різниця типів: вона дає попередження,

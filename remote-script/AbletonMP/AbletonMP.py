@@ -113,7 +113,10 @@ CLIP_LOOP_PROPS = ("looping", "loop_start", "loop_end", "start_marker", "end_mar
 # немає, і це не помилка, а різниця типів.
 CLIP_PROPS = ("gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode",
               "ram_mode", "muted", "legato", "velocity_amount",
-              "launch_mode", "launch_quantization")
+              "launch_mode", "launch_quantization",
+              # Кліп має ВЛАСНИЙ розмір такту, окремий від пісні: він
+              # визначає сітку й те, як читаються позиції нот усередині.
+              "signature_numerator", "signature_denominator")
 
 # Портативні лише стокові девайси першого рівня: дампи браузера з двох машин
 # показали, що їхні uri ідентичні, а вміст адресується локальними FileId.
@@ -1886,6 +1889,11 @@ class AbletonMP(ControlSurface):
             return value if 0 <= value <= 4 else None
         if prop == "launch_quantization":
             return value if 0 <= value <= 13 else None
+        if prop == "signature_numerator":
+            return value if 1 <= value <= 99 else None
+        if prop == "signature_denominator":
+            # Live приймає лише степені двійки; інше округлить мовчки
+            return value if value in (1, 2, 4, 8, 16) else None
         return None
 
     def _clip_props_state(self, clip):
