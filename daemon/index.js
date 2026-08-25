@@ -605,7 +605,18 @@ function connect() {
           offset: (msg.t1 - msg.t0 + (msg.t2 - t3)) / 2,
           rtt: t3 - msg.t0 - (msg.t2 - msg.t1),
         };
-        log(`clock: offset=${(clock.offset * 1000).toFixed(1)}ms rtt=${(clock.rtt * 1000).toFixed(1)}ms`);
+        // Годинник цокає раз на 15 секунд, і за годину джему це 240 рядків
+        // ні про що. Пишемо, коли є що сказати: перший вимір, помітна зміна
+        // або раз на пʼять хвилин -- щоб було видно, що звʼязок живий.
+        const ms = (v) => Math.round(v * 1000);
+        const moved = !clockLogged
+          || Math.abs(ms(clock.offset) - ms(clockLogged.offset)) >= 5
+          || Math.abs(ms(clock.rtt) - ms(clockLogged.rtt)) >= 5;
+        if (moved || t3 - clockLoggedAt > 300) {
+          clockLogged = clock;
+          clockLoggedAt = t3;
+          log(`clock: offset=${ms(clock.offset)}ms rtt=${ms(clock.rtt)}ms`);
+        }
         break;
       }
       case 'files_manifest':
@@ -766,6 +777,8 @@ function repoScriptSha() {
   }
 }
 
+let clockLogged = null;
+let clockLoggedAt = 0;
 let staleWarned = null;
 
 /** Чи той самий код крутить Live, що лежить у репозиторії.
