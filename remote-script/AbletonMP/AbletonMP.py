@@ -4613,6 +4613,11 @@ class AbletonMP(ControlSurface):
 
     def _ai_target_track(self, action):
         ref = action.get("track")
+        # Голе число -- це індекс треку. Раніше воно провалювалось крізь усі
+        # гілки й мовчки бралось виділення: явний аргумент зникав безслідно,
+        # а операція йшла не туди, куди просили.
+        if isinstance(ref, int) and not isinstance(ref, bool):
+            return self._track_by_index(ref)
         if isinstance(ref, dict):
             if "index" in ref:
                 return self._track_by_index(ref.get("index"))

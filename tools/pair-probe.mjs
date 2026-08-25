@@ -175,7 +175,7 @@ try {
     // партнеру, щоб двоє не крутили той самий фейдер наосліп.
     const from = d2.out.length;
     for (let i = 0; i < 4; i += 1) {
-      await p1exec([{ op: 'set_mixer', track: 0, param: 'volume', value: 0.6 + i * 0.05 }]);
+      await p1exec([{ op: 'set_mixer', track_index: 0, param: 'volume', value: 0.6 + i * 0.05 }]);
       await new Promise((r) => setTimeout(r, 250));
     }
     await waitFor(d2, /редагують: p1/, 12000, from);
@@ -196,6 +196,35 @@ try {
     }
     const shown = (said.match(/  · [^\n]+/g) || []).slice(0, 3);
     for (const line of shown) console.log(`     ${line.trim()}`);
+  });
+
+  await check('Arrangement: MIDI-кліп доїжджає, переїжджає і зникає', async () => {
+    // Найтонше місце: у партнера кліп збирається в тимчасовому слоті Session
+    // і вже звідти дублюється в лінійку. Тимчасовий кліп не має протекти.
+    const from = l2.out.length;
+    await p1exec([{ op: 'create_midi_clip', track_index: 1, scene_index: 0, length: 4 }]);
+    await new Promise((r) => setTimeout(r, 700));
+    await p1exec([{ op: 'lom_call', path: ['song', 'tracks', 1], method: 'duplicate_clip_to_arrangement',
+                    args: [{ $path: ['song', 'tracks', 1, 'clip_slots', 0, 'clip'] }, 96.0] }]);
+    await waitFor(l2, /<- #\d+ ArrangementClipCreate .*"start_time":96/, 15000, from);
+    if (/ArrangementClipCreate ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер відхилив кліп у лінійці');
+    }
+
+    // Переїзд робиться як копія плюс видалення старої -- один DeviceMove
+    // тут не існує, зате uuid має лишитись тим самим
+    const moved = l2.out.length;
+    await p1exec([{ op: 'lom_call', path: ['song', 'tracks', 1], method: 'duplicate_clip_to_arrangement',
+                    args: [{ $path: ['song', 'tracks', 1, 'arrangement_clips', 0] }, 128.0] },
+                  { op: 'lom_call', path: ['song', 'tracks', 1], method: 'delete_clip',
+                    args: [{ $path: ['song', 'tracks', 1, 'arrangement_clips', 0] }] }]);
+    await waitFor(l2, /<- #\d+ ArrangementClip(Move|Create)/, 15000, moved);
+
+    // Прибираємо за собою: і в лінійці, і в слоті
+    await p1exec([{ op: 'lom_call', path: ['song', 'tracks', 1], method: 'delete_clip',
+                    args: [{ $path: ['song', 'tracks', 1, 'arrangement_clips', 0] }] },
+                  { op: 'lom_call', path: ['song', 'tracks', 1, 'clip_slots', 0], method: 'delete_clip' }]);
+    await waitFor(l2, /<- #\d+ ArrangementClipDelete/, 15000, moved);
   });
 
   await check('пізній учасник дістає стиснутий хвіст, а не всю історію', async () => {
