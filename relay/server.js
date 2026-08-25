@@ -373,6 +373,9 @@ class Session {
       idle_sec: Math.max(0, Math.round(now - c.lastSeen)),
       live: c.info?.live ?? null,
       script: c.info?.script ?? null,
+      // Хеш коду, а не лише версія: між комітами версія не змінюється,
+      // тож тільки він відрізняє оновлену машину від тієї, що відстала.
+      sha: c.info?.sha ?? null,
       features: c.info?.features ?? [],
       events: c.info?.events ?? [],
     })).filter((c) => c.author);
@@ -417,6 +420,7 @@ class Session {
       s.port = client.port;
       s.live = client.info?.live ?? null;
       s.script = client.info?.script ?? null;
+      s.sha = client.info?.sha ?? null;
       s.connected_at = client.connectedAt;
     }
 
