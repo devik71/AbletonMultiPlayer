@@ -1,0 +1,139 @@
+// Прогін «живий Live + емулятор» -- на одній машині.
+//
+// Половина того, що ми пишемо, вимагає ДВОХ учасників: присутність, follow,
+// undo, обмін знімками, узгодження можливостей. Другим учасником не мусить
+// бути Live -- fake-live говорить тим самим протоколом. Це не заміна прогону
+// парою (емулятор не має справжніх LOM-listener-ів), але воно перевіряє весь
+// протокольний бік із реальним bridge на одному кінці.
+//
+// Передумова: relay і daemon p1 на живому Live уже підняті.
+//
+//   node tools/pair-probe.mjs [--relay ws://127.0.0.1:19870] [--session pair]
+
+import { spawn } from 'node:child_process';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { homedir, tmpdir } from 'node:os';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const arg = (name, fallback) => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i > 0 ? process.argv[i + 1] : fallback;
+};
+const RELAY = arg('relay', 'ws://127.0.0.1:19870');
+const SESSION = arg('session', 'pair');
+const STATE = arg('state-dir', join(tmpdir(), 'abletonmp-pair'));
+const PROJECT = join(STATE, 'project-p2');
+
+/** Дія на боці p1 -- через HTTP API самого bridge. Інакше інструмент
+ *  залежав би від того, що людина щось устигла натиснути. */
+async function p1exec(actions) {
+  const token = readFileSync(join(homedir(), '.abletonmp', 'chat_token'), 'utf8').trim();
+  const res = await fetch('http://127.0.0.1:19847/api/exec', {
+    method: 'POST',
+    headers: { 'X-AbletonMP-Token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ actions }),
+  });
+  return res.json();
+}
+
+const procs = [];
+let failed = 0;
+
+function launch(name, file, args) {
+  const p = spawn(process.execPath, [file, ...args], { cwd: join(root, 'daemon') });
+  p.out = '';
+  const collect = (b) => { p.out += b.toString(); if (process.env.PAIR_VERBOSE) process.stdout.write(`[${name}] ${b}`); };
+  p.stdout.on('data', collect);
+  p.stderr.on('data', collect);
+  p.name = name;
+  procs.push(p);
+  return p;
+}
+
+function waitFor(p, pattern, ms = 15000, from = 0) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + ms;
+    const tick = setInterval(() => {
+      if (pattern.test(p.out.slice(from))) { clearInterval(tick); resolve(); }
+      else if (Date.now() > deadline) {
+        clearInterval(tick);
+        reject(new Error(`[${p.name}] не дочекався ${pattern}`));
+      }
+    }, 50);
+  });
+}
+
+async function check(label, fn) {
+  try { await fn(); console.log(`  ok   ${label}`); }
+  catch (e) { failed += 1; console.log(`  FAIL ${label}\n       ${e.message.split('\n')[0]}`); }
+}
+
+// ------------------------------------------------------------------ сценарій
+
+mkdirSync(join(PROJECT, 'Samples'), { recursive: true });
+
+const d2 = launch('daemon-p2', join(root, 'daemon/index.js'), [
+  '--author', 'p2', '--session', SESSION, '--relay', RELAY,
+  '--udp-in', '19855', '--udp-out', '19856',
+  '--state-dir', STATE, '--project', PROJECT,
+]);
+const l2 = launch('live-p2', join(root, 'daemon/tools/fake-live.js'), [
+  '--udp-in', '19855', '--udp-out', '19856', '--project', PROJECT,
+]);
+
+try {
+  console.log(`сесія ${SESSION}, relay ${RELAY}\n`);
+  await waitFor(d2, /relay: head=/);
+  await waitFor(d2, /bridge підключився/);
+
+  await check('обидва учасники бачать один одного', async () => {
+    await waitFor(d2, /у сесії:.*p1/, 20000);
+  });
+
+  await check('розбіжність можливостей називається поіменно', async () => {
+    // Це головна цінність двох учасників: relay звіряє переліки типів
+    // і каже, ЩО саме в партнера не спрацює -- замість «щось не так».
+    await waitFor(d2, /НЕСУМІСНІСТЬ: p1 не вміє застосовувати: /, 20000);
+    const line = (d2.out.match(/p1 не вміє застосовувати: ([^\n]+)/) || [])[1] || '';
+    console.log(`       p1 не вміє: ${line.split(' —')[0]}`);
+  });
+
+  await check('присутність: p2 бачить, куди дивиться p1', async () => {
+    const from = d2.out.length;
+    d2.stdin.write('who\n');
+    await waitFor(d2, /дивляться: p1|ніхто нікуди не дивиться/, 8000, from);
+    if (/ніхто нікуди не дивиться/.test(d2.out.slice(from))) {
+      throw new Error('p1 не повідомив свій вид');
+    }
+  });
+
+  await check('знімок p1 доїжджає до p2 через relay', async () => {
+    const from = d2.out.length;
+    d2.stdin.write('pull p1\n');
+    await waitFor(d2, /знімок застосовано: \d+ з \d+|знімок від p1/, 30000, from);
+  });
+
+  await check('undo: p2 відкочує зміну p1', async () => {
+    // Відкотити можна лише туди, де в журналі Є попереднє значення за тією
+    // ж адресою. Одна зміна темпу цього не дає: попереднє лежить у .als,
+    // а не в сесії. Тому робимо дві.
+    await p1exec([{ op: 'set_tempo', bpm: 121 }]);
+    await new Promise((r) => setTimeout(r, 700));
+    await p1exec([{ op: 'set_tempo', bpm: 133 }]);
+    await new Promise((r) => setTimeout(r, 700));
+
+    const from = d2.out.length;
+    d2.stdin.write('undo p1\n');
+    await waitFor(d2, /відкочую \w+ від p1/, 15000, from);
+  });
+} catch (e) {
+  failed += 1;
+  console.log(`\nсценарій обірвався: ${e.message}`);
+} finally {
+  for (const p of procs) { try { p.kill(); } catch {} }
+}
+
+console.log(failed ? `\n${failed} перевірок впало` : '\nусі перевірки пройшли');
+process.exit(failed ? 1 : 0);
