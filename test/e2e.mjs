@@ -1423,10 +1423,40 @@ try {
     }
   });
 
-  await check('журнал: 120 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('гучність і mute ланцюга в раку доїжджають', async () => {
+    // У Drum Rack кожен пад -- це ланцюг. Його гучність і панорама -- частина
+    // звучання, і досі вони не їхали взагалі.
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const nested = state.tracks.concat(state.aux_tracks)
+      .flatMap((t) => t.devices || []).find((d) => d.chain_path?.length);
+    if (!nested) throw new Error('у знімку немає девайса всередині ланцюга');
+    const chainId = nested.chain_path[nested.chain_path.length - 1].id;
+
+    const from = l2.out.length;
+    l1.stdin.write(`chainmix ${chainId} volume 0.37\n`);
+    await waitFor(l2, /<- #\d+ ChainMixerSet .*"volume".*0\.37/, 8000, from);
+    l1.stdin.write(`chainmix ${chainId} mute true\n`);
+    await waitFor(l2, /<- #\d+ ChainMixerSet .*"mute".*true/, 8000, from);
+    if (/ChainMixerSet ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер не знайшов ланцюг за uuid');
+    }
+
+    // Ланцюга з таким uuid немає -- це tombstone, а не помилка
+    const ghost = l2.out.length;
+    await inject({
+      type: 'ChainMixerSet',
+      payload: { chain: { id: 'ffffffffffff' }, param: 'volume', value: 0.5 },
+    });
+    await waitFor(l2, /<- #\d+ ChainMixerSet/, 6000, ghost);
+    if (/ChainMixerSet ВІДХИЛЕНО/.test(l2.out.slice(ghost))) {
+      throw new Error('зниклий ланцюг має бути tombstone, а не відмовою');
+    }
+  });
+
+  await check('журнал: 123 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 120) throw new Error(`очікував 120 подій, у журналі ${lines.length}`);
+    if (lines.length !== 123) throw new Error(`очікував 123 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

@@ -272,6 +272,30 @@ function refreshChainIds(preferredRecords = []) {
   };
   for (const track of allDeviceTracks()) walk(track, track, null, 0);
 }
+// Мікшер ланцюга: у Drum Rack кожен пад -- це ланцюг, тож його гучність
+// і панорама -- частина звучання.
+const CHAIN_MIX = ['volume', 'panning'];
+const CHAIN_TOGGLES = ['mute', 'solo'];
+const chainById = (id) => {
+  const walk = (container) => {
+    for (const rack of container.devices || []) {
+      for (const [, chains] of chainGroups(rack)) {
+        for (const chain of chains) {
+          if (chain.id === id) return chain;
+          const deeper = walk(chain);
+          if (deeper) return deeper;
+        }
+      }
+    }
+    return null;
+  };
+  for (const t of allDeviceTracks()) {
+    const found = walk(t);
+    if (found) return found;
+  }
+  return null;
+};
+
 const chainInContainer = (container, id) => {
   for (const rack of container.devices || []) {
     for (const [_kind, chains] of chainGroups(rack)) {
@@ -342,7 +366,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,ClipWarpSet,' +
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,ClipWarpSet,ChainMixerSet,' +
       'ArrangementClipCreate,ArrangementClipMove,ArrangementClipDelete,ArrangementClipNotesSet').split(','),
   });
 
@@ -1110,6 +1134,21 @@ function apply(type, payload, gseq) {
       delete song.cues[t];
       break;
     }
+    case 'ChainMixerSet': {
+      const chain = chainById(payload.chain?.id);
+      if (!chain) break;   // tombstone: ланцюга немає
+      if (CHAIN_TOGGLES.includes(payload.param)) {
+        if (typeof payload.value !== 'boolean') return reject(`${payload.param} має бути булевим`);
+        chain[payload.param] = payload.value;
+        break;
+      }
+      if (!CHAIN_MIX.includes(payload.param)) {
+        return reject(`невідомий параметр ланцюга ${payload.param}`);
+      }
+      if (typeof payload.value !== 'number') return reject('значення має бути числом');
+      (chain.mix || (chain.mix = {}))[payload.param] = payload.value;
+      break;
+    }
     case 'ClipWarpSet': {
       const t = trackById(payload.track?.id);
       const arrW = payload.clip?.id ? arrClipById(payload.clip.id) : null;
@@ -1639,6 +1678,36 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         track: trackRef(t), scene: sceneRef(song.scenes[s]), markers,
       });
       console.log(`warp ${rest[0]}/${s}: ${markers.length} маркерів`);
+      break;
+    }
+    case 'chainmix': {
+      // chainmix <uuid|idx> <param> <value>
+      const all = [];
+      const collect = (container) => {
+        for (const rack of container.devices || []) {
+          for (const [, chains] of chainGroups(rack)) {
+            for (const c of chains) { all.push(c); collect(c); }
+          }
+        }
+      };
+      for (const t of allDeviceTracks()) collect(t);
+      const chain = all.find((c) => c.id === rest[0]) || all[Number(rest[0]) || 0];
+      if (!chain) return console.log('немає такого ланцюга');
+      const param = rest[1];
+      if (CHAIN_TOGGLES.includes(param)) {
+        const value = rest[2] === 'true';
+        chain[param] = value;
+        emit('ChainMixerSet', { chain: { id: chain.id }, param, value });
+        console.log(`ланцюг ${chain.name}: ${param} = ${value}`);
+        break;
+      }
+      const value = Number(rest[2]);
+      if (!CHAIN_MIX.includes(param) || !Number.isFinite(value)) {
+        return console.log('chainmix <ланцюг> volume|panning|mute|solo <значення>');
+      }
+      (chain.mix || (chain.mix = {}))[param] = value;
+      emit('ChainMixerSet', { chain: { id: chain.id }, param, value });
+      console.log(`ланцюг ${chain.name}: ${param} = ${value}`);
       break;
     }
     case 'clipprop': {

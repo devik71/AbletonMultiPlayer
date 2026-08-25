@@ -49,6 +49,7 @@ APPLY_TYPES = [
     "DeviceInsert", "DeviceDelete", "DeviceMove",
     "SampleLoad", "SongPropSet", "SceneTimingSet", "ClipPropSet",
     "CueSet", "CueDelete", "ReturnCreate", "ReturnDelete", "ClipWarpSet",
+    "ChainMixerSet",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
@@ -78,7 +79,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -148,6 +149,10 @@ SAMPLE_QUEUE_MAX_SEC = 180.0
 CUE_QUEUE_MAX_SEC = 300.0
 # Стеля на набір warp-маркерів: подія має лишатись подією, а не файлом.
 WARP_MARKERS_MAX = 512
+# Мікшер ланцюга рака: у Drum Rack кожен пад -- це ланцюг, тож його
+# гучність і панорама -- частина звучання, а не оздоблення.
+CHAIN_MIX_PARAMS = ("volume", "panning")
+CHAIN_TOGGLES = ("mute", "solo")
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -190,7 +195,7 @@ class AbletonMP(ControlSurface):
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
             "scene_timing": {}, "clip_props": {}, "cues": None, "returns": None,
-            "warp": {},
+            "warp": {}, "chain": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -446,6 +451,9 @@ class AbletonMP(ControlSurface):
             for kind, chains in self._rack_chain_groups(device):
                 self._listen(device, kind, self._make_devices_cb())
                 for chain in chains:
+                    cid = self._chains_reg.id_of(chain, create=False)
+                    if cid:
+                        self._wire_chain_mixer(chain, cid)
                     self._wire_device_container(track, chain, depth + 1)
 
     def _unwire_tracks(self):
@@ -753,6 +761,7 @@ class AbletonMP(ControlSurface):
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
             self._prime_arrangement_clips()
+            self._prime_chains_mix()
             # Набір треків змінився -- разом із ним і набір лінійок, які ми
             # обходимо. Без цього запис про кліп на видаленому треку висів би
             # у мапі до наступної зміни в Arrangement.
@@ -776,6 +785,7 @@ class AbletonMP(ControlSurface):
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
             self._prime_arrangement_clips()
+            self._prime_chains_mix()
             # Набір треків змінився -- разом із ним і набір лінійок, які ми
             # обходимо. Без цього запис про кліп на видаленому треку висів би
             # у мапі до наступної зміни в Arrangement.
@@ -854,11 +864,13 @@ class AbletonMP(ControlSurface):
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
+        self._prime_chains_mix()
         self._prime_song_props()
         self._prime_scene_timing()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
+        self._prime_chains_mix()
         self._prime_cues()
         self._prime_returns()
         self._prime_arrangement()
@@ -941,11 +953,13 @@ class AbletonMP(ControlSurface):
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
+        self._prime_chains_mix()
         self._prime_song_props()
         self._prime_scene_timing()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
+        self._prime_chains_mix()
         self._prime_cues()
         self._prime_returns()
         self._prime_arrangement()
@@ -2416,6 +2430,115 @@ class AbletonMP(ControlSurface):
                 if markers is not None:
                     self._mirror["warp"][key] = markers
 
+    def _chain_mix_param(self, chain, param):
+        """DeviceParameter мікшера ланцюга, або None."""
+        md = self._safe_attr(chain, "mixer_device")
+        if md is None:
+            return None
+        return self._safe_attr(md, param)
+
+    def _chain_state(self, chain):
+        """Гучність, панорама й перемикачі ланцюга -- усе, що чути."""
+        state = {}
+        for param in CHAIN_MIX_PARAMS:
+            p = self._chain_mix_param(chain, param)
+            if p is None:
+                continue
+            try:
+                state[param] = round(float(p.value), 6)
+            except Exception:
+                continue
+        for prop in CHAIN_TOGGLES:
+            value = self._safe_attr(chain, prop)
+            if value is not None:
+                state[prop] = bool(value)
+        return state
+
+    def _make_chain_cb(self, chain, uid, key):
+        def cb():
+            self._safe(self._on_chain, chain, uid, key)
+        return cb
+
+    def _on_chain(self, chain, uid, key):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        if key in CHAIN_TOGGLES:
+            value = self._safe_attr(chain, key)
+            if value is None:
+                return
+            value = bool(value)
+        else:
+            p = self._chain_mix_param(chain, key)
+            if p is None:
+                return
+            try:
+                value = round(float(p.value), 6)
+            except Exception:
+                return
+        mirror = self._mirror["chain"].setdefault(uid, {})
+        if mirror.get(key) == value:
+            return
+        mirror[key] = value
+        payload = {"chain": {"id": uid}, "param": key, "value": value}
+        if key in CHAIN_TOGGLES:
+            # дискретний перемикач -- дебаунс лише додав би затримки
+            self._emit("ChainMixerSet", payload)
+        else:
+            self._defer("chain:%s:%s" % (uid, key), "ChainMixerSet", payload)
+
+    def _wire_chain_mixer(self, chain, uid):
+        for param in CHAIN_MIX_PARAMS:
+            p = self._chain_mix_param(chain, param)
+            if p is not None:
+                self._listen(p, "value", self._make_chain_cb(chain, uid, param))
+        for prop in CHAIN_TOGGLES:
+            self._listen(chain, prop, self._make_chain_cb(chain, uid, prop))
+
+    def _prime_chains_mix(self):
+        state = {}
+        for rec in self._chain_records:
+            uid = rec.get("id")
+            chain = self._chains_reg.obj_of(uid) if uid else None
+            if chain is None:
+                continue
+            state[uid] = self._chain_state(chain)
+        self._mirror["chain"] = state
+
+    def _apply_chain_mixer(self, payload, gseq):
+        uid = (payload.get("chain") or {}).get("id")
+        chain = self._chains_reg.obj_of(uid) if uid else None
+        if chain is None:
+            return  # tombstone: ланцюга немає, подія мовчки не діє
+        param = payload.get("param")
+        if param in CHAIN_TOGGLES:
+            value = payload.get("value")
+            if not isinstance(value, bool):
+                self._warn("gseq %s: %s має бути булевим" % (gseq, param))
+                return
+            self._mirror["chain"].setdefault(uid, {})[param] = value
+            try:
+                setattr(chain, param, value)
+            except Exception as e:
+                self._warn("gseq %s: %s ланцюга не встановився: %r" % (gseq, param, e))
+            return
+        if param not in CHAIN_MIX_PARAMS:
+            self._warn("gseq %s: невідомий параметр ланцюга %r" % (gseq, param))
+            return
+        p = self._chain_mix_param(chain, param)
+        if p is None:
+            return
+        try:
+            value = float(payload.get("value"))
+        except Exception:
+            return
+        # Межі беремо з самого параметра: у гучності й панорами вони різні
+        value = max(float(p.min), min(float(p.max), value))
+        self._mirror["chain"].setdefault(uid, {})[param] = round(value, 6)
+        try:
+            p.value = value
+        except Exception as e:
+            self._warn("gseq %s: %s ланцюга не встановився: %r" % (gseq, param, e))
+
     def _clip_key(self, track, scene):
         if not self._registry_ready:
             return None
@@ -2486,6 +2609,7 @@ class AbletonMP(ControlSurface):
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
+        self._prime_chains_mix()
         if current == "midi" and clip is not None:
             notes = self._clip_notes(clip)
             self._mirror["notes"][key] = notes
@@ -3089,6 +3213,9 @@ class AbletonMP(ControlSurface):
             else:
                 self._doc.stop_playing()
 
+        elif etype == "ChainMixerSet":
+            self._apply_chain_mixer(payload, gseq)
+
         elif etype == "ClipWarpSet":
             self._apply_clip_warp(payload, gseq)
 
@@ -3227,6 +3354,7 @@ class AbletonMP(ControlSurface):
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
                 self._prime_arrangement_clips()
+                self._prime_chains_mix()
 
         elif etype == "TrackDelete":
             uid = (payload.get("track") or {}).get("id")
@@ -3373,6 +3501,7 @@ class AbletonMP(ControlSurface):
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
                 self._prime_arrangement_clips()
+                self._prime_chains_mix()
 
         elif etype == "ClipDelete":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -3399,6 +3528,7 @@ class AbletonMP(ControlSurface):
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
                 self._prime_arrangement_clips()
+                self._prime_chains_mix()
 
         elif etype == "SampleLoad":
             self._queue_device_struct(etype, payload, gseq)
@@ -3927,6 +4057,7 @@ class AbletonMP(ControlSurface):
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
             self._prime_arrangement_clips()
+            self._prime_chains_mix()
             self._suppress_struct = struct_was
         return True
 

@@ -18,6 +18,7 @@ const CONTINUOUS = new Set([
   'SceneTimingSet',
   'ClipPropSet',
   'ClipWarpSet',
+  'ChainMixerSet',
   'SongPropSet',
 ]);
 
@@ -37,6 +38,12 @@ export function lockTarget(type, payload, registry) {
   const p = payload || {};
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
+
+  if (type === 'ChainMixerSet') {
+    const chain = p.chain?.id;
+    if (!chain) return null;
+    return { object: `chain:${chain}`, label: 'ланцюг у раку' };
+  }
 
   if (type === 'ClipPropSet' || type === 'ClipWarpSet') {
     // Лок на кліп цілком, а не на властивість: людина крутить один кліп,
