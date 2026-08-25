@@ -25,7 +25,11 @@ const warpKey = (list) => (list || []).map((m) => `${num(m.beat_time)}:${num(m.s
 /** Розбіжності між моїм і чужим знімком. Порожній масив -- усе збігається. */
 export function compareStates(mine, theirs, { limit = 40 } = {}) {
   const out = [];
-  const add = (line) => { if (out.length < limit) out.push(line); };
+  // Збираємо все (до розумної стелі), а обрізаємо в кінці: інакше
+  // не скажеш, скільки розбіжностей лишилось за кадром, а «ще 200»
+  // і «більше немає» -- дуже різні новини.
+  const HARD_CAP = 2000;
+  const add = (line) => { if (out.length < HARD_CAP) out.push(line); };
 
   if (num(mine?.tempo) !== num(theirs?.tempo)) {
     add(`темп: у тебе ${mine?.tempo}, у партнера ${theirs?.tempo}`);
@@ -193,5 +197,9 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     }
   }
 
-  return out;
+  if (out.length <= limit) return out;
+  const rest = out.length - limit;
+  return out.slice(0, limit).concat([
+    `…і ще ${rest}${out.length >= HARD_CAP ? " або більше" : ""} розбіжностей`,
+  ]);
 }

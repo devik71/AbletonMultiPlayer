@@ -56,7 +56,9 @@ test('перелік розбіжностей обмежений, а не нес
   const mine = base();
   const theirs = base();
   for (let i = 0; i < 100; i += 1) theirs.scenes.push({ id: `x${i}`, name: `S${i}` });
-  assert.equal(compareStates(mine, theirs, { limit: 5 }).length, 5);
+  const lines = compareStates(mine, theirs, { limit: 5 });
+  assert.equal(lines.length, 6, "пʼять рядків плюс підсумок");
+  assert.match(lines[5], /…і ще \d+ розбіжностей/);
 });
 
 test('однакова структура з різними значеннями теж називається', () => {
