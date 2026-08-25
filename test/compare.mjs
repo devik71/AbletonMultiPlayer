@@ -58,3 +58,39 @@ test('перелік розбіжностей обмежений, а не нес
   for (let i = 0; i < 100; i += 1) theirs.scenes.push({ id: `x${i}`, name: `S${i}` });
   assert.equal(compareStates(mine, theirs, { limit: 5 }).length, 5);
 });
+
+test('однакова структура з різними значеннями теж називається', () => {
+  const mk = () => ({
+    tracks: [{
+      id: 't1', name: 'Bass',
+      mixer: { sends: [{ index: 0, value: 0.2 }] },
+      devices: [{
+        device: { class_name: 'AutoFilter2', class_display_name: 'Auto Filter', ordinal: 0 },
+        parameters: [{ name: 'Frequency', ordinal: 0, value: 0.4 },
+                     { name: 'Res', ordinal: 0, value: 0.1 }],
+      }],
+      clips: [{
+        scene: { id: 's1' }, clip: { length: 4 }, notes: [],
+        props: { gain: 0.5 },
+        warp: [{ beat_time: 0, sample_time: 0 }],
+      }],
+      arrangement: [],
+    }],
+  });
+  const mine = mk();
+  const theirs = mk();
+  theirs.tracks[0].devices[0].parameters[0].value = 0.9;
+  theirs.tracks[0].mixer.sends[0].value = 0.7;
+  theirs.tracks[0].clips[0].props.gain = 0.1;
+  theirs.tracks[0].clips[0].warp.push({ beat_time: 4, sample_time: 2 });
+
+  const lines = compareStates(mine, theirs).join('\n');
+  assert.match(lines, /Auto Filter: розходяться 1 параметрів/);
+  assert.match(lines, /Frequency 0\.4≠0\.9/);
+  assert.match(lines, /сенд 0 0\.2 проти 0\.7/);
+  assert.match(lines, /gain 0\.5 проти 0\.1/);
+  assert.match(lines, /warp-маркери різні \(1 проти 2\)/);
+
+  // структура однакова -- отже жодного рядка про відсутні обʼєкти
+  assert.ok(!/немає/.test(lines), `зайвий рядок про відсутність: ${lines}`);
+});

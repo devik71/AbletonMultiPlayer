@@ -11,6 +11,17 @@ const num = (v) => (typeof v === 'number' ? Math.round(v * 1e6) / 1e6 : v);
 
 const nameOf = (obj, fallback) => (obj?.name ? `«${obj.name}»` : fallback);
 
+/** Ключ девайса в дереві: клас, порядковий номер і шлях ланцюга. */
+const deviceKey = (d) => [(d.chain_path || []).map((c) => c.id).join('/'),
+  d.device?.class_display_name, d.device?.ordinal].join('#');
+
+/** Значення параметрів девайса за іменем і порядковим номером. */
+const paramMap = (d) => new Map((d.parameters || [])
+  .map((p) => [`${p.name}#${p.ordinal ?? 0}`, num(p.value)]));
+
+/** Ті самі семпли, розтягнуті по-різному, звучать по-різному. */
+const warpKey = (list) => (list || []).map((m) => `${num(m.beat_time)}:${num(m.sample_time)}`).join(',');
+
 /** Розбіжності між моїм і чужим знімком. Порожній масив -- усе збігається. */
 export function compareStates(mine, theirs, { limit = 40 } = {}) {
   const out = [];
@@ -67,6 +78,31 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       add(`${where}: девайси у тебе [${myDev || '—'}], у партнера [${theirDev || '—'}]`);
     }
 
+    // Однакова структура з різними значеннями -- найгірша розбіжність:
+    // сети виглядають однаково, а звучать по-різному.
+    const myDevMap = new Map((my.devices || []).map((d) => [deviceKey(d), d]));
+    const theirDevMap = new Map((their.devices || []).map((d) => [deviceKey(d), d]));
+    for (const [key, mine] of myDevMap) {
+      const other = theirDevMap.get(key);
+      if (!other) continue;
+      const a = paramMap(mine);
+      const b = paramMap(other);
+      const differing = [...a].filter(([name, value]) => b.has(name) && b.get(name) !== value);
+      if (!differing.length) continue;
+      const shown = differing.slice(0, 3).map(([name, value]) => `${name.split('#')[0]} ${value}≠${b.get(name)}`);
+      add(`${where}, ${mine.device?.class_display_name}: розходяться ${differing.length} параметрів`
+        + ` (${shown.join(
+)})`);
+    }
+
+    const mySends = new Map((my.mixer?.sends || []).map((x) => [x.index, num(x.value)]));
+    const theirSends = new Map((their.mixer?.sends || []).map((x) => [x.index, num(x.value)]));
+    for (const [idx, value] of mySends) {
+      if (theirSends.has(idx) && theirSends.get(idx) !== value) {
+        add(`${where}: сенд ${idx} ${value} проти ${theirSends.get(idx)}`);
+      }
+    }
+
     const myClips = new Map((my.clips || []).map((c) => [clipKey(c), c]));
     const theirClips = new Map((their.clips || []).map((c) => [clipKey(c), c]));
     for (const [scene, clip] of theirClips) {
@@ -82,6 +118,17 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       const theirNotes = (other.notes || []).length;
       if (mineNotes !== theirNotes) {
         add(`${where}, сцена ${scene}: нот ${mineNotes} проти ${theirNotes}`);
+      }
+      for (const prop of new Set([...Object.keys(clip.props || {}),
+                                  ...Object.keys(other.props || {})])) {
+        if (num(clip.props?.[prop]) !== num(other.props?.[prop])) {
+          add(`${where}, сцена ${scene}: ${prop} ${clip.props?.[prop] ?? '—'}`
+            + ` проти ${other.props?.[prop] ?? '—'}`);
+        }
+      }
+      if (warpKey(clip.warp) !== warpKey(other.warp)) {
+        add(`${where}, сцена ${scene}: warp-маркери різні`
+          + ` (${(clip.warp || []).length} проти ${(other.warp || []).length})`);
       }
     }
 
