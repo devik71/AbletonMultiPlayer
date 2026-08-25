@@ -11,7 +11,7 @@
 //   node tools/pair-probe.mjs [--relay ws://127.0.0.1:19870] [--session pair]
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
@@ -113,6 +113,45 @@ try {
     const from = d2.out.length;
     d2.stdin.write('pull p1\n');
     await waitFor(d2, /знімок застосовано: \d+ з \d+|знімок від p1/, 30000, from);
+  });
+
+  await check('follow веде вид p2 за p1 і сам вимикається', async () => {
+    const from = d2.out.length;
+    d2.stdin.write('follow p1\n');
+    await waitFor(d2, /слідую за p1/, 8000, from);
+    // Перевіряємо не лог наміру, а факт: вид p2 має реально переїхати.
+    // Рухаємо двічі: перший виклик міг збігтися з тим, де p1 уже стоїть,
+    // а неруханий вид події присутності не породжує.
+    const moved = l2.out.length;
+    for (const idx of [0, 2]) {
+      await p1exec([{ op: 'lom_set', path: ['song', 'view'], property: 'selected_track',
+                      value: { $path: ['song', 'tracks', idx] } }]);
+      await new Promise((r) => setTimeout(r, 900));
+    }
+    await waitFor(l2, /<- view_set від p1:/, 12000, moved);
+    await new Promise((r) => setTimeout(r, 1200));
+    d2.stdin.write('follow off\n');
+    await waitFor(d2, /більше не слідую/, 8000, from);
+  });
+
+  await check('файл із теки проєкту доїжджає до партнера', async () => {
+    const blob = Buffer.alloc(64 * 1024);
+    for (let i = 0; i < blob.length; i += 1) blob[i] = (i * 31 + 7) & 0xff;
+    const name = `probe-${Date.now() % 100000}.wav`;
+    writeFileSync(join(PROJECT, 'Samples', name), blob);
+
+    // Перевіряємо не власний перескан, а те, що файл ДОЇХАВ: беремо теку
+    // проєкту p1 з його ж знімка й дивимось, чи з'явився там файл.
+    const snap = await p1exec([{ op: 'snapshot' }]);
+    const alsPath = snap?.result?.snapshot?.file_path;
+    if (!alsPath) return console.log('       p1 без збереженого сету — перевірку пропущено');
+    const target = join(dirname(alsPath), 'Samples', name);
+    const deadline = Date.now() + 30000;   // перескан filesync раз на 10 с
+    while (Date.now() < deadline) {
+      if (existsSync(target)) return;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error(`файл не доїхав у ${target}`);
   });
 
   await check('diff називає розбіжність, не змінюючи стану', async () => {
