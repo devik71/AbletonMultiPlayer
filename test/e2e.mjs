@@ -1255,10 +1255,38 @@ try {
     await waitFor(l2, /SongPropSet ВІДХИЛЕНО \(невідома властивість пісні record_mode\)/, 6000, rec);
   });
 
-  await check('журнал: 103 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('локатори доїжджають і зникають', async () => {
+    // Партнер без них бачить голу лінійку: «Verse», «Drop» -- це структура
+    // документа, а не чиясь особиста позначка.
+    const from = l2.out.length;
+    l1.stdin.write('cue 32 Drop\n');
+    await waitFor(l2, /<- #\d+ CueSet .*"time":32.*"name":"Drop"/, 8000, from);
+    l1.stdin.write('cue 64 Outro\n');
+    await waitFor(l2, /<- #\d+ CueSet .*"time":64/, 8000, from);
+    if (/CueSet ВІДХИЛЕНО/.test(l2.out.slice(from))) throw new Error('партнер відхилив локатор');
+
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    if (!/"name": "Drop"/.test(l2.out.slice(shown))) throw new Error('локатора в партнера немає');
+
+    const gone = l2.out.length;
+    l1.stdin.write('delcue 32\n');
+    await waitFor(l2, /<- #\d+ CueDelete .*"time":32/, 8000, gone);
+
+    // Повторне видалення -- tombstone: локатора вже немає, і це не помилка
+    const twice = l2.out.length;
+    await inject({ type: 'CueDelete', payload: { time: 32 } });
+    await waitFor(l2, /<- #\d+ CueDelete/, 6000, twice);
+    if (/CueDelete ВІДХИЛЕНО/.test(l2.out.slice(twice))) {
+      throw new Error('повторне видалення не має бути помилкою');
+    }
+  });
+
+  await check('журнал: 107 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 103) throw new Error(`очікував 103 події, у журналі ${lines.length}`);
+    if (lines.length !== 107) throw new Error(`очікував 107 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

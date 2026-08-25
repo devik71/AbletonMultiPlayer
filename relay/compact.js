@@ -37,6 +37,13 @@ export function supersedeKey(ev) {
       return 'tempo';
     case 'TransportSet':
       return 'transport';
+    case 'CueSet':
+    case 'CueDelete':
+      // Локатор адресується часом: CuePoint.time лише на читання, а два
+      // локатори не бувають на одній позиції. Тож час і є адреса, і кожна
+      // з двох подій повністю визначає стан у ній -- згортання коректне
+      // в обидва боки, і create+delete, і delete+create.
+      return `cue:${p.time}`;
     case 'ClipPropSet':
       // Своя адреса на пару (кліп, властивість): gain тягнуть мишею, тож
       // серія доїжджає останньою -- але gain не перекриває warp_mode.

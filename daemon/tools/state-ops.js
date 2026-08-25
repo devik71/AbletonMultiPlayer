@@ -116,6 +116,12 @@ export function stateToOps(state) {
     ops.push(...metaOps('track', ref, aux), ...mixerOps(ref, aux.mixer || {}),
       ...deviceOps(ref, aux.devices || []));
   }
+  // Локатори -- структура документа: «Verse», «Drop». Партнер без них
+  // бачить голу лінійку.
+  for (const cue of state.cues || []) {
+    if (typeof cue?.time !== 'number') continue;
+    ops.push(['CueSet', { time: cue.time, name: cue.name || '' }]);
+  }
   for (const scene of state.scenes || []) {
     // Темп і метр сцени -- частина документа: сцена, що мовчки перемикає
     // темп в одного і не перемикає в іншого, розводить пару миттєво.

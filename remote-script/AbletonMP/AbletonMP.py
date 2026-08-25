@@ -48,6 +48,7 @@ APPLY_TYPES = [
     "DeviceLoad",
     "DeviceInsert", "DeviceDelete", "DeviceMove",
     "SampleLoad", "SongPropSet", "SceneTimingSet", "ClipPropSet",
+    "CueSet", "CueDelete",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
 ]
@@ -77,7 +78,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -140,6 +141,8 @@ LOAD_QUEUE_MAX_SEC = 60.0
 # Семпл може ще їхати filesync-ом (перескан раз на 10 с), та й браузер Live
 # помічає новий файл не миттєво. Тож чекаємо довше, ніж на девайс.
 SAMPLE_QUEUE_MAX_SEC = 180.0
+# Локатор чекає на паузу: ставити його -- це рухати плейхед.
+CUE_QUEUE_MAX_SEC = 300.0
 
 NOTE_TIME_SPAN = 4.0
 NOTE_PITCH_SPAN = 16
@@ -181,7 +184,7 @@ class AbletonMP(ControlSurface):
             "playing": None, "tempo": None, "psi": {}, "mix": {},
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
-            "scene_timing": {}, "clip_props": {},
+            "scene_timing": {}, "clip_props": {}, "cues": None,
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -233,6 +236,11 @@ class AbletonMP(ControlSurface):
 
         self._doc.add_is_playing_listener(self._cb_is_playing)
         self._doc.add_tempo_listener(self._cb_tempo)
+        self._cb_cues = lambda: self._safe(self._on_cues)
+        try:
+            self._doc.add_cue_points_listener(self._cb_cues)
+        except Exception:
+            self._cb_cues = None
         self._song_prop_cbs = {}
         for prop in SONG_PROPS:
             cb = self._make_song_prop_cb(prop)
@@ -298,6 +306,7 @@ class AbletonMP(ControlSurface):
         if self._doc is not None:
             for name, cb in (("is_playing", self._cb_is_playing),
                              ("tempo", self._cb_tempo),
+                             ("cue_points", self._cb_cues),
                              ("tracks", self._cb_tracks),
                              ("scenes", self._cb_scenes),
                              ("return_tracks", self._cb_tracks)):
@@ -824,6 +833,7 @@ class AbletonMP(ControlSurface):
         self._prime_song_props()
         self._prime_scene_timing()
         self._prime_all_clip_props()
+        self._prime_cues()
         self._prime_arrangement()
         self._persist_registry()
         self._log("registry created: %d tracks, %d scenes, %d aux tracks, %d Rack chains (%d ids restored)"
@@ -905,6 +915,7 @@ class AbletonMP(ControlSurface):
         self._prime_song_props()
         self._prime_scene_timing()
         self._prime_all_clip_props()
+        self._prime_cues()
         self._prime_arrangement()
         # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
         # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
@@ -1856,6 +1867,124 @@ class AbletonMP(ControlSurface):
             if actual is not None:
                 self._mirror["clip_props"][key][prop] = actual
 
+    # ------------------------------------------------------------- локатори
+    #
+    # Адресуються ЧАСОМ, і це не спрощення. CuePoint.time доступний лише
+    # на читання, set_data в нього немає, а два локатори не бувають на одній
+    # позиції -- отже час і є ідентичність. Пересунути локатор не можна
+    # взагалі: у Live це видалити й поставити заново.
+
+    def _cue_time(self, cue):
+        try:
+            value = round(float(cue.time), 6)
+        except Exception:
+            return None
+        if not math.isfinite(value) or value < 0 or value > CLIP_LENGTH_MAX:
+            return None
+        return value
+
+    def _cue_map(self):
+        state = {}
+        try:
+            cues = list(self._doc.cue_points)
+        except Exception:
+            return state
+        for cue in cues:
+            time = self._cue_time(cue)
+            if time is not None:
+                state[time] = self._safe_name(cue)
+        return state
+
+    def _prime_cues(self):
+        self._mirror["cues"] = self._cue_map()
+
+    def _on_cues(self):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        previous = self._mirror.get("cues")
+        current = self._cue_map()
+        if previous is None:
+            self._mirror["cues"] = current
+            return
+        self._mirror["cues"] = current
+        for time, name in sorted(current.items()):
+            if previous.get(time) != name:
+                self._emit("CueSet", {"time": time, "name": name})
+        for time in sorted(previous):
+            if time not in current:
+                self._emit("CueDelete", {"time": time})
+
+    def _cue_at(self, time):
+        try:
+            for cue in self._doc.cue_points:
+                if self._cue_time(cue) == time:
+                    return cue
+        except Exception:
+            pass
+        return None
+
+    def _cue_payload_time(self, payload):
+        try:
+            value = round(float(payload.get("time")), 6)
+        except Exception:
+            return None
+        if not math.isfinite(value) or value < 0 or value > CLIP_LENGTH_MAX:
+            return None
+        return value
+
+    def _toggle_cue_at(self, time, gseq):
+        """set_or_delete_cue працює у ПОТОЧНІЙ позиції, іншого шляху немає.
+
+        Тобто щоб поставити локатор у партнера, доводиться на мить зрушити
+        його плейхед. Під час відтворення це чути, тож туди ми не ліземо --
+        подія чекає в черзі, доки транспорт зупиниться.
+        """
+        saved = self._safe_attr(self._doc, "current_song_time")
+        try:
+            self._doc.current_song_time = time
+            self._doc.set_or_delete_cue()
+        except Exception as e:
+            self._warn("gseq %s: локатор не перемкнувся: %r" % (gseq, e))
+        finally:
+            try:
+                if saved is not None:
+                    self._doc.current_song_time = saved
+            except Exception:
+                pass
+
+    def _apply_cue_set(self, payload, gseq):
+        time = self._cue_payload_time(payload)
+        if time is None:
+            self._warn("gseq %s: некоректна позиція локатора %r" % (gseq, payload.get("time")))
+            return
+        name = self._doc_str(payload.get("name") or "")
+        if len(name) > 64:
+            name = name[:64]
+        cue = self._cue_at(time)
+        self._mirror.setdefault("cues", {})[time] = name  # ДО запису -- глушимо ехо
+        if cue is None:
+            self._toggle_cue_at(time, gseq)
+            cue = self._cue_at(time)
+            if cue is None:
+                self._warn("gseq %s: локатор на %s не створився" % (gseq, time))
+                return
+        if name:
+            try:
+                cue.name = name
+            except Exception as e:
+                self._warn("gseq %s: локатор не перейменувався: %r" % (gseq, e))
+        self._mirror["cues"] = self._cue_map()
+
+    def _apply_cue_delete(self, payload, gseq):
+        time = self._cue_payload_time(payload)
+        if time is None:
+            return
+        if self._cue_at(time) is None:
+            return  # tombstone: локатора вже немає
+        self._mirror.setdefault("cues", {}).pop(time, None)
+        self._toggle_cue_at(time, gseq)
+        self._mirror["cues"] = self._cue_map()
+
     def _clip_key(self, track, scene):
         if not self._registry_ready:
             return None
@@ -2524,6 +2653,12 @@ class AbletonMP(ControlSurface):
                 self._doc.start_playing()
             else:
                 self._doc.stop_playing()
+
+        elif etype == "CueSet":
+            self._queue_cue("CueSet", payload, gseq)
+
+        elif etype == "CueDelete":
+            self._queue_cue("CueDelete", payload, gseq)
 
         elif etype == "ClipPropSet":
             self._apply_clip_prop(payload, gseq)
@@ -5427,6 +5562,16 @@ class AbletonMP(ControlSurface):
     def _queue_device_load(self, payload, gseq):
         self._load_queue.append({"payload": payload, "gseq": gseq, "since": time.time()})
 
+    def _queue_cue(self, etype, payload, gseq):
+        """Локатор чекає на зупинку транспорту.
+
+        set_or_delete_cue працює лише в поточній позиції, тож поставити
+        локатор -- це на мить зрушити плейхед. Під час відтворення це чути,
+        і чужий локатор не варта того причина, щоб перебити людині гру.
+        """
+        self._load_queue.append({"etype": etype, "payload": payload,
+                                 "gseq": gseq, "since": time.time()})
+
     def _queue_device_struct(self, etype, payload, gseq):
         self._load_queue.append({"etype": etype, "payload": payload,
                                  "gseq": gseq, "since": time.time()})
@@ -5440,6 +5585,19 @@ class AbletonMP(ControlSurface):
         etype = entry.get("etype", "DeviceLoad")
         # Чекає на зупинку транспорту лише DeviceLoad: тільки він рухає виділення.
         # insert_device і move_device беруть індекс явно, тож під запис безпечні.
+        if etype in ("CueSet", "CueDelete"):
+            if self._safe_attr(self._doc, "is_playing"):
+                if time.time() - entry["since"] < CUE_QUEUE_MAX_SEC:
+                    return  # чекаємо, доки транспорт зупиниться
+                self._load_queue.pop(0)
+                self._warn("gseq %s: локатор не поставлено -- відтворення "
+                           "триває надто довго" % (entry["gseq"],))
+                return
+            self._load_queue.pop(0)
+            handler = (self._apply_cue_set if etype == "CueSet"
+                       else self._apply_cue_delete)
+            self._safe(handler, entry["payload"], entry["gseq"])
+            return
         if etype in ("DeviceLoad", "SampleLoad") and self._recording_guard():
             if time.time() - entry["since"] < LOAD_QUEUE_MAX_SEC:
                 return  # чекаємо, доки транспорт зупиниться
@@ -6171,6 +6329,7 @@ class AbletonMP(ControlSurface):
         return {
             "playing": bool(self._doc.is_playing),
             "tempo": round(float(self._doc.tempo), 6),
+        "cues": [{"time": t, "name": n} for t, n in sorted(self._cue_map().items())],
         "song": dict((p, self._song_prop_value(p, self._safe_attr(self._doc, p)))
                      for p in SONG_PROPS
                      if self._song_prop_value(p, self._safe_attr(self._doc, p)) is not None),

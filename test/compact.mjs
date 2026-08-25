@@ -232,3 +232,30 @@ test('властивість кліпу згортається у своїй а�
   const other = ev('ClipPropSet', { track: { id: 't1' }, scene: { id: 's2' }, prop: 'gain', value: 0.2 });
   assert.equal(compactTail([set('gain', 0.2), other]).dropped, 0);
 });
+
+test('локатор адресується часом, і згортання коректне в обидва боки', () => {
+  gseq = 0;
+  const set = (time, name) => ev('CueSet', { time, name });
+  const del = (time) => ev('CueDelete', { time });
+
+  // перейменування згортається в останнє
+  let out = compactTail([set(32, 'a'), set(32, 'b'), set(32, 'Drop')]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].payload.name, 'Drop');
+
+  // створення + видалення = видалення; кожна подія повністю визначає стан
+  gseq = 0;
+  out = compactTail([set(32, 'Drop'), del(32)]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].type, 'CueDelete');
+
+  // і навпаки
+  gseq = 0;
+  out = compactTail([del(32), set(32, 'Drop')]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].type, 'CueSet');
+
+  // різні позиції -- різні адреси
+  gseq = 0;
+  assert.equal(compactTail([set(32, 'a'), set(64, 'b')]).dropped, 0);
+});

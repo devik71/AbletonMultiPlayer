@@ -107,6 +107,9 @@ const SONG_PROPS = {
 const song = {
   playing: false,
   tempo: 120,
+  // Локатори адресуються часом: CuePoint.time лише на читання, а два
+  // локатори не бувають на одній позиції.
+  cues: {},
   props: { signature_numerator: 4, signature_denominator: 4,
            clip_trigger_quantization: 4, root_note: 0,
            scale_name: 'Major', scale_mode: false,
@@ -335,7 +338,7 @@ const sendHello = () =>
       'TransportSet,TempoSet,ClipLaunch,ClipStop,SceneLaunch,StopAllClips,' +
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
-      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet').split(','),
+      'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete').split(','),
   });
 
 function emit(type, payload) {
@@ -389,6 +392,7 @@ const snapshot = () => ({
   playing: song.playing,
   tempo: song.tempo,
   song: { ...song.props },
+  cues: Object.entries(song.cues).map(([time, name]) => ({ time: Number(time), name })),
   tracks: song.tracks.map((t, idx) => ({ ...t, idx })),
   scenes: song.scenes.map((s, idx) => ({ ...s, idx })),
 });
@@ -636,6 +640,7 @@ const fullState = () => ({
   tempo: song.tempo,
   playing: song.playing,
   song: { ...song.props },
+  cues: Object.entries(song.cues).map(([time, name]) => ({ time: Number(time), name })),
   tracks: song.tracks.filter((t) => t.id).map((t, idx) => ({
     id: t.id,
     idx,
@@ -1065,6 +1070,18 @@ function apply(type, payload, gseq) {
     case 'TransportSet':
       song.playing = !!payload.playing;
       break;
+    case 'CueSet': {
+      const t = Number(payload.time);
+      if (!(t >= 0)) return reject(`некоректна позиція локатора ${payload.time}`);
+      song.cues[t] = String(payload.name || '').slice(0, 64);
+      break;
+    }
+    case 'CueDelete': {
+      const t = Number(payload.time);
+      if (!(t in song.cues)) break;   // tombstone: локатора вже немає
+      delete song.cues[t];
+      break;
+    }
     case 'ClipPropSet': {
       const t = trackById(payload.track?.id);
       const s = sceneIdx(payload.scene?.id);
@@ -1501,6 +1518,23 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       song.playing = false;
       emit('TransportSet', { playing: false });
       break;
+    case 'cue': {
+      const t = Number(rest[0]);
+      if (!(t >= 0)) return console.log('некоректна позиція');
+      const name = rest.slice(1).join(' ');
+      song.cues[t] = name;
+      emit('CueSet', { time: t, name });
+      console.log(`локатор на ${t}: ${name}`);
+      break;
+    }
+    case 'delcue': {
+      const t = Number(rest[0]);
+      if (!(t in song.cues)) return console.log('немає локатора на цій позиції');
+      delete song.cues[t];
+      emit('CueDelete', { time: t });
+      console.log(`локатор на ${t} прибрано`);
+      break;
+    }
     case 'clipprop': {
       const t = song.tracks[Number(rest[0]) || 0];
       const s = Number(rest[1]) || 0;
