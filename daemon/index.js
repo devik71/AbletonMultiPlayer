@@ -223,6 +223,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     lines.push(others.length ? `партнери: ${others.map((p) => p.author).join(', ')}`
                              : 'партнери: нікого');
     if (outbox.length) lines.push(`НЕ ВІДПРАВЛЕНО: ${outbox.length} подій у буфері`);
+    for (const note of compatNotes) lines.push(`НЕСУМІСНІСТЬ: ${note}`);
     lines.push(`семпли: ${filesync.manifest.size} файлів у теці проєкту`);
     if (lastState) {
       const counts = summarize(lastState);
@@ -465,6 +466,7 @@ udp.on('message', (buf) => {
       };
       warnIfStaleScript(msg.sha);
       announceCapabilities();
+      compatNotes.length = 0;  // Live міг оновитись -- старі скарги вже не про нього
       registryAsked = false; // Live перезавантажився -- його реєстр треба відновити
       bootstrapRegistry();
       drainPending();
@@ -685,7 +687,13 @@ function connect() {
         }
         break;
       case 'compat':
-        log(`НЕСУМІСНІСТЬ: ${msg.text}`);
+        // Пишемо один раз, але тримаємо: під час роботи рядок прокрутиться,
+        // а питання «чому не працює X» виникне через годину.
+        if (!compatNotes.includes(msg.text)) {
+          compatNotes.push(msg.text);
+          if (compatNotes.length > 8) compatNotes.shift();
+          log(`НЕСУМІСНІСТЬ: ${msg.text}`);
+        }
         break;
       case 'error':
         log(`relay error [${msg.code}]: ${msg.text}`);
@@ -777,6 +785,7 @@ function repoScriptSha() {
   }
 }
 
+const compatNotes = [];   // що relay сказав про сумісність
 let clockLogged = null;
 let clockLoggedAt = 0;
 let staleWarned = null;
