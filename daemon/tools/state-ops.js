@@ -157,6 +157,11 @@ export function stateToOps(state) {
       if (clip.loop) {
         ops.push(['ClipLoopSet', { track: ref, clip: { id: clip.id }, ...clip.loop }]);
       }
+      // Ноти кліпа в лінійці -- окремим типом, регіонами, як і в Session
+      for (const [region, part] of noteRegionsFor({ length: clip.length }, clip.notes || [])) {
+        if (!part.length) continue;
+        ops.push(['ArrangementClipNotesSet', { track: ref, clip: { id: clip.id }, region, notes: part }]);
+      }
       for (const prop of ['name', 'color']) {
         if (clip[prop] === undefined || clip[prop] === null) continue;
         ops.push(['ObjectMetaSet', { object: 'clip', track: ref, clip: { id: clip.id },

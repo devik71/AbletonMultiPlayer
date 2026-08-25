@@ -284,3 +284,20 @@ test('знімок вирівнює й мікшер ланцюгів', () => {
   assert.deepEqual(mine.sort(), [['mute', true], ['panning', -0.2], ['solo', false], ['volume', 0.6]]);
   assert.equal(ops.every(([, p]) => p.chain?.id === 'c1' || !p.chain), true);
 });
+
+test('ноти кліпа в лінійці розкладаються регіонами, як і в Session', () => {
+  const ops = stateToOps({
+    tracks: [{
+      id: 't1',
+      arrangement: [{ id: 'a1', start_time: 8, length: 4,
+                      notes: [{ pitch: 60, start_time: 0 }, { pitch: 64, start_time: 1 }] }],
+    }],
+  });
+  const notes = ops.filter(([t]) => t === 'ArrangementClipNotesSet');
+  assert.ok(notes.length >= 1, 'нот у лінійці немає в операціях');
+  const [, payload] = notes[0];
+  assert.deepEqual(payload.clip, { id: 'a1' });
+  assert.equal(payload.scene, undefined, 'кліп у лінійці не має адресуватись сценою');
+  assert.ok(payload.region.time_span > 0);
+  assert.ok(payload.notes.length > 0);
+});

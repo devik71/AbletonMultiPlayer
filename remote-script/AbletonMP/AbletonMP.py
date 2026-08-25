@@ -2355,12 +2355,64 @@ class AbletonMP(ControlSurface):
             loop_cb = self._make_arr_loop_cb(track_ref, clip, uid)
             for prop in CLIP_LOOP_PROPS:
                 self._listen(clip, prop, loop_cb)
+            try:
+                if clip.is_midi_clip:
+                    self._listen(clip, "notes", self._make_arr_notes_cb(track_ref, clip, uid))
+            except Exception:
+                pass
             self._wire_metadata("clip", clip)
 
     def _make_arr_prop_cb(self, track_ref, clip, uid, prop):
         def cb():
             self._safe(self._on_arr_prop, track_ref, clip, uid, prop)
         return cb
+
+    def _make_arr_notes_cb(self, track_ref, clip, uid):
+        def cb():
+            self._safe(self._on_arr_notes, track_ref, clip, uid)
+        return cb
+
+    def _on_arr_notes(self, track_ref, clip, uid):
+        """Редагування нот у кліпі лінійки.
+
+        Досі ноти звідти їхали лише один раз -- разом зі створенням кліпа.
+        Тобто перетягнути кліп в Arrangement партнер бачив, а домалювати
+        в ньому ноту -- ні.
+        """
+        if not self._registry_ready or self._suppress_struct:
+            return
+        now = time.time()
+        key = "arr:" + uid
+        previous = self._note_pending.get(key)
+        self._note_pending[key] = {
+            "arr": True,
+            "track_ref": track_ref,
+            "clip": clip,
+            "uid": uid,
+            "due": now + DEBOUNCE_SEC,
+            "first": previous["first"] if previous else now,
+        }
+
+    def _flush_arr_notes(self, key, pending):
+        clip = pending["clip"]
+        uid = pending["uid"]
+        try:
+            current = self._clip_notes(clip)
+        except Exception:
+            return
+        previous = self._mirror["notes"].get(key)
+        self._mirror["notes"][key] = current
+        if previous is None:
+            return  # щойно побачений кліп -- це базова лінія, а не правка
+        for region in sorted(self._changed_note_regions(previous, current)):
+            from_pitch, pitch_span, from_time, time_span = region
+            self._emit("ArrangementClipNotesSet", {
+                "track": pending["track_ref"],
+                "clip": {"id": uid},
+                "region": {"from_pitch": from_pitch, "pitch_span": pitch_span,
+                           "from_time": from_time, "time_span": time_span},
+                "notes": self._notes_in_region(current, region),
+            })
 
     def _make_arr_loop_cb(self, track_ref, clip, uid):
         def cb():
@@ -2426,6 +2478,11 @@ class AbletonMP(ControlSurface):
                 loop = self._clip_loop_state(clip)
                 if loop is not None:
                     self._mirror["loop"][key] = loop
+                try:
+                    if clip.is_midi_clip:
+                        self._mirror["notes"][key] = self._clip_notes(clip)
+                except Exception:
+                    pass
                 markers = self._warp_markers(clip)
                 if markers is not None:
                     self._mirror["warp"][key] = markers
@@ -2640,6 +2697,10 @@ class AbletonMP(ControlSurface):
             if not force and now < pending["due"] and now - pending["first"] < DEBOUNCE_MAX_HOLD:
                 continue
             del self._note_pending[key]
+            if pending.get("arr"):
+                # Кліп у лінійці адресується uuid, і регіони емітяться окремим типом
+                self._safe(self._flush_arr_notes, key, pending)
+                continue
             try:
                 current = self._clip_notes(pending["clip"])
             except Exception:
@@ -5791,6 +5852,11 @@ class AbletonMP(ControlSurface):
             loop = self._clip_loop_state(clip)
             if loop:
                 entry["loop"] = loop
+            try:
+                if clip.is_midi_clip:
+                    entry["notes"] = self._clip_notes(clip)
+            except Exception:
+                pass
             entries.append(entry)
         return entries
 
