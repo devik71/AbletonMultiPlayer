@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { FileSync } from './filesync.js';
-import { compareStates } from './compare.js';
+import { compareStates, positionWith } from './compare.js';
 import { LockKeeper } from './locks.js';
 import { PresenceKeeper, describePresence, shouldFollow } from './presence.js';
 import { StateCollector, stateDigest, summarize } from './state.js';
@@ -331,22 +331,6 @@ function pullFromPeer(author, mode = 'apply') {
 }
 
 /** Прогалина у структурі -- людським рядком, а не JSON-ом. */
-/** Позиція в тактах за розміром такту зі знімка. null -- розміру не знаємо.
- *
- *  Доля в LOM -- чверть незалежно від знаменника, тож довжина такту в долях
- *  це numerator * 4 / denominator: у 6/8 такт -- три долі, а не шість. */
-function barOf(beats) {
-  const song = lastState?.song;
-  const n = song?.signature_numerator;
-  const d = song?.signature_denominator;
-  if (!(n > 0) || !(d > 0)) return null;
-  const barBeats = (n * 4) / d;
-  if (!(barBeats > 0)) return null;
-  const bar = Math.floor(beats / barBeats) + 1;
-  const within = beats - (bar - 1) * barBeats;
-  return `такт ${bar}.${+(within + 1).toFixed(2)}`;
-}
-
 function describeGap(gap) {
   const where = [gap.track, gap.device].filter(Boolean).join(' / ') || '?';
   if (gap.what === 'track') return `трек ${gap.kind ? `${gap.kind}:` : ''}${gap.id} — такого немає`;
@@ -374,13 +358,11 @@ function describeGap(gap) {
     //
     // Позиція -- у долях, як її віддає LOM. Такт додаємо поруч, а не замість:
     // розмір такту тепер синхронізується (SongPropSet), але доля лишається
-    // тим, що реально приїхало, а такт -- зручним переказом.
-    const at = (v) => {
-      if (typeof v !== 'number') return 'невідомій позиції';
-      const beats = `${+v.toFixed(3)}-й долі`;
-      const bar = barOf(v);
-      return bar ? `${beats} (${bar})` : beats;
-    };
+    // тим, що реально приїхало, а такт -- зручним переказом. Рахує це та сама
+    // функція, що й `diff`: два звіти про одне й те саме не сміють розійтись
+    // у тому, який це такт.
+    const position = positionWith(lastState?.song).at;
+    const at = (v) => (typeof v === 'number' ? position(v) : 'невідомій позиції');
     const what = gap.name ? `кліп «${gap.name}»` : 'кліп';
     if (gap.here === null) {
       return `${gap.track} — ${what} в Arrangement: у тебе на ${at(gap.mine)}, у партнера на ${at(gap.start)}`;

@@ -63,7 +63,7 @@ const loopKeyless = (o) => (o ? Object.keys(o).sort().map((k) => `${k}=${num(o[k
  *  Доля в LOM -- чверть незалежно від знаменника, тож такт займає
  *  numerator * 4 / denominator долі: у 6/8 це три долі, а не шість.
  *  Такт саме ПОРУЧ, а не замість: доля -- те, що реально лежить у знімку. */
-const positionWith = (song) => {
+export const positionWith = (song) => {
   const bar = (value) => {
     const n = song?.signature_numerator;
     const d = song?.signature_denominator;
