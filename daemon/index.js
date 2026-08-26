@@ -160,7 +160,14 @@ const stateCollector = new StateCollector({
 let applyId = 0;
 // pull застосовує чужий знімок, diff лише порівнює -- діагностика не має
 // змінювати те, що діагностує.
+const WATCH_DEFAULT_MIN = 5;
+// Пауза між запитом свого знімка і запитом чужого. Свій збирається локально
+// через UDP-чанки -- секунди вистачає з запасом, чотири беремо на всяк.
+const WATCH_SETTLE_MS = 4000;
 let pullMode = 'apply';
+// Тихе спостереження за розходженням. Вимкнене за замовчуванням: це трафік
+// і робота bridge, і вмикати їх без прохання ми не маємо права.
+let watchPeer = null;      // { author, everyMs, timer }
 
 createInterface({ input: process.stdin }).on('line', (line) => {
   const [cmd, ...rest] = line.trim().split(/\s+/);
@@ -184,6 +191,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   if (cmd === 'pull') return pullFromPeer(rest[0]);
   if (cmd === 'diff') return pullFromPeer(rest[0], 'diff');
+  if (cmd === 'watch') return startWatch(rest[0], rest[1]);
   if (cmd === 'follow') return startFollow(rest[0]);
   if (cmd === 'undo') {
     if (!connected) return log('немає звʼязку з relay');
@@ -237,7 +245,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   if (cmd === 'refresh') return requestFullState();
   log('команди: status | state | apply [файл] | pull <author> | diff <author> | ' +
-      'follow <author>|off | who | undo [author] | refresh');
+      'watch <author> [хв]|off | follow <author>|off | who | undo [author] | refresh');
 });
 
 // Обмін знімками між учасниками. Relay тут труба: знімок не подія, у журнал
@@ -263,22 +271,32 @@ const peerCollector = new StateCollector({
     } catch (error) {
       return log(`знімок ${author} не записався: ${error.message}`);
     }
-    const counts = summarize(state);
-    log(`знімок ${author} отримано (${info.chars} символів, digest ${stateDigest(state)}): ` +
-        `${counts.tracks} треків, ${counts.parameters} параметрів, ${counts.notes} нот`);
+    // Спостереження мовчить, доки все гаразд: інакше воно перетворюється
+    // на шум, крізь який не видно справжньої розбіжності.
+    const quiet = pullMode === 'watch';
+    if (!quiet) {
+      const counts = summarize(state);
+      log(`знімок ${author} отримано (${info.chars} символів, digest ${stateDigest(state)}): ` +
+          `${counts.tracks} треків, ${counts.parameters} параметрів, ${counts.notes} нот`);
+    }
 
-    if (pullMode === 'diff') {
+    if (pullMode === 'diff' || quiet) {
       pullMode = 'apply';
-      if (!lastState) return log(`свого знімка ще немає — знімок ${author} лежить у ${path}`);
+      if (!lastState) {
+        return quiet ? undefined
+          : log(`свого знімка ще немає — знімок ${author} лежить у ${path}`);
+      }
       if (stateDigest(lastState) === stateDigest(state)) {
-        return log(`стан збігається з ${author} повністю (digest ${stateDigest(state)})`);
+        return quiet ? undefined
+          : log(`стан збігається з ${author} повністю (digest ${stateDigest(state)})`);
       }
       const lines = compareStates(lastState, state);
       if (!lines.length) {
-        return log(`digest різні, але предметних розбіжностей не видно — ` +
-                   `швидше за все відрізняється те, чого порівняння не дивиться`);
+        return quiet ? undefined
+          : log(`digest різні, але предметних розбіжностей не видно — ` +
+                `швидше за все відрізняється те, чого порівняння не дивиться`);
       }
-      log(`розбіжності з ${author} (${lines.length}):`);
+      log(`розбіжності з ${author} (${lines.length})${quiet ? ' — помітило спостереження' : ''}:`);
       for (const line of lines) log(`  · ${line}`);
       return;
     }
@@ -314,8 +332,10 @@ function pullFromPeer(author, mode = 'apply') {
   if (!author) return log(`кого просити? ${mode} <author>`);
   if (pullFrom) {
     // Один запит за раз: інакше другий перемкнув би режим першого,
-    // і pull тихо перетворився б на diff або навпаки.
-    return log(`вже чекаю знімок від ${pullFrom} — дай йому дочекатись`);
+    // і pull тихо перетворився б на diff або навпаки. Спостереження просто
+    // пропускає такт: наступний за хвилину, поспішати нема куди.
+    return mode === 'watch' ? undefined
+      : log(`вже чекаю знімок від ${pullFrom} — дай йому дочекатись`);
   }
   pullMode = mode;
   peerCollector.reset();
@@ -327,7 +347,46 @@ function pullFromPeer(author, mode = 'apply') {
     pullFrom = null;
   }, PULL_TIMEOUT_MS);
   ws.send(JSON.stringify({ m: 'peer_state_request', to: author }));
-  log(`прошу знімок у ${author}${mode === 'diff' ? ' (лише порівняти)' : ''}`);
+  if (mode !== 'watch') {
+    log(`прошу знімок у ${author}${mode === 'diff' ? ' (лише порівняти)' : ''}`);
+  }
+}
+
+/**
+ * Тихо звіряти сети раз на N хвилин і озиватись лише тоді, коли розійшлись.
+ *
+ * Сенс у моменті: розходження, знайдене за хвилину, лікується `pull`, а те
+ * саме розходження, знайдене наприкінці джему, лікується вже руками.
+ *
+ * Свій знімок оновлюємо ПЕРЕД тим, як просити чужий: інакше порівнювали б
+ * свіже чуже зі своїм півгодинної давнини і бачили б розбіжності, яких
+ * немає. Пауза між двома запитами -- на збірку власних чанків; bridge
+ * на тій самій машині вкладається в неї з великим запасом.
+ */
+function watchTick() {
+  if (!watchPeer || !connected) return;
+  requestFullState();
+  setTimeout(() => {
+    if (watchPeer) pullFromPeer(watchPeer.author, 'watch');
+  }, WATCH_SETTLE_MS);
+}
+
+function startWatch(author, minutes) {
+  if (author === 'off' || author === 'stop') {
+    if (!watchPeer) return log('спостереження й так вимкнене');
+    clearInterval(watchPeer.timer);
+    log(`спостереження за ${watchPeer.author} вимкнено`);
+    watchPeer = null;
+    return;
+  }
+  if (!author) return log('за ким стежити? watch <author> [хвилини] | watch off');
+  const every = Number(minutes) > 0 ? Number(minutes) : WATCH_DEFAULT_MIN;
+  if (watchPeer) clearInterval(watchPeer.timer);
+  const everyMs = Math.max(1, every) * 60_000;
+  watchPeer = { author, everyMs, timer: setInterval(watchTick, everyMs) };
+  watchPeer.timer.unref?.();
+  log(`стежу за розходженням з ${author} раз на ${every} хв — озвуся, лише коли розійдемось`);
+  watchTick();
 }
 
 /** Прогалина у структурі -- людським рядком, а не JSON-ом. */
