@@ -331,6 +331,22 @@ function pullFromPeer(author, mode = 'apply') {
 }
 
 /** Прогалина у структурі -- людським рядком, а не JSON-ом. */
+/** Позиція в тактах за розміром такту зі знімка. null -- розміру не знаємо.
+ *
+ *  Доля в LOM -- чверть незалежно від знаменника, тож довжина такту в долях
+ *  це numerator * 4 / denominator: у 6/8 такт -- три долі, а не шість. */
+function barOf(beats) {
+  const song = lastState?.song;
+  const n = song?.signature_numerator;
+  const d = song?.signature_denominator;
+  if (!(n > 0) || !(d > 0)) return null;
+  const barBeats = (n * 4) / d;
+  if (!(barBeats > 0)) return null;
+  const bar = Math.floor(beats / barBeats) + 1;
+  const within = beats - (bar - 1) * barBeats;
+  return `такт ${bar}.${+(within + 1).toFixed(2)}`;
+}
+
 function describeGap(gap) {
   const where = [gap.track, gap.device].filter(Boolean).join(' / ') || '?';
   if (gap.what === 'track') return `трек ${gap.kind ? `${gap.kind}:` : ''}${gap.id} — такого немає`;
@@ -356,9 +372,15 @@ function describeGap(gap) {
     // це не «не застосувалось», а «у нас різні лінійки». Мовчати про це
     // найгірше: порожній слот у Session видно, а чужу лінійку -- ні.
     //
-    // Позиція -- у долях, як її віддає LOM. Такти рахувати не можемо чесно:
-    // розмір такту поки не синхронізується (docs/COVERAGE.md, тир 1).
-    const at = (v) => (typeof v === 'number' ? `${+v.toFixed(3)}-й долі` : 'невідомій позиції');
+    // Позиція -- у долях, як її віддає LOM. Такт додаємо поруч, а не замість:
+    // розмір такту тепер синхронізується (SongPropSet), але доля лишається
+    // тим, що реально приїхало, а такт -- зручним переказом.
+    const at = (v) => {
+      if (typeof v !== 'number') return 'невідомій позиції';
+      const beats = `${+v.toFixed(3)}-й долі`;
+      const bar = barOf(v);
+      return bar ? `${beats} (${bar})` : beats;
+    };
     const what = gap.name ? `кліп «${gap.name}»` : 'кліп';
     if (gap.here === null) {
       return `${gap.track} — ${what} в Arrangement: у тебе на ${at(gap.mine)}, у партнера на ${at(gap.start)}`;

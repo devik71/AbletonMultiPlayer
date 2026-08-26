@@ -533,7 +533,8 @@ const clipsState = (track) => (track.clips || []).map((clip, idx) => {
 // Кліп в Arrangement не може носити власний id (Clip.set_data не існує),
 // тож у bridge ідентичність живе в мапі на Song. Тут ми тримаємо її просто
 // в моделі -- нам важлива не персистенція, а те, що uuid є і він стабільний.
-// Подій для Arrangement поки немає: стадія A -- лише знімок і звіт.
+// Події для Arrangement є; тут тримається лише ідентичність, бо в bridge
+// вона живе в мапі на Song, а нам важлива не персистенція, а стабільність uuid.
 
 const arrOf = (t) => (t.arrangement || (t.arrangement = []));
 
@@ -2148,7 +2149,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }
     case 'arr': {
       // Кладе копію сесійного кліпу в Arrangement -- як duplicate_clip_to_arrangement.
-      // Подій не шле: для Arrangement їх поки немає, і в цьому вся суть перевірки.
+      // Далі onArrangement(false) сам побачить новий кліп у різниці
+      // й видасть ArrangementClipCreate -- так само, як _diff_arrangement.
       const t = song.tracks[Number(rest[0]) || 0];
       const clip = t && t.clips[Number(rest[1]) || 0];
       if (!clip) return console.log('немає кліпу в цьому слоті');

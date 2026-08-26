@@ -1043,7 +1043,11 @@ try {
     const said = d2.out.length;
     d2.stdin.write(`apply ${foreign}\n`);
     await waitFor(d2, /Бракує ось чого:/, 15000, said);
-    if (!/кліп «Bridge» в Arrangement на 32-й долі є в партнера, у тебе немає/.test(d2.out.slice(said))) {
+    // Такт поруч із долею -- переказ для людини: 32 долі в 4/4 це початок девʼятого.
+    // Такт поруч із долею -- переказ для людини: 32 долі в 4/4 це початок
+    // девʼятого такту. Доля лишається тим, що реально приїхало.
+    const line = 'кліп «Bridge» в Arrangement на 32-й долі (такт 9.1) є в партнера, у тебе немає';
+    if (!d2.out.slice(said).includes(line)) {
       throw new Error('про чужий Arrangement-кліп не сказано');
     }
   });
