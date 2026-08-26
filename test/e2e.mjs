@@ -113,7 +113,13 @@ try {
 
   // окрема "тека проєкту" на кожного гравця -- саме між ними ходитимуть файли
   const projectOf = (author) => join(tmp, `project-${author}`);
-  for (const a of ['p1', 'p2', 'p3']) mkdirSync(join(projectOf(a), 'Samples'), { recursive: true });
+  // Кожному демону -- СВОЯ тека, включно з допоміжними (p4, p5, p1-other).
+  // Два демони на одній теці -- сценарій, якого не буває, зате він робить
+  // будь-яку перевірку filesync недетермінованою: хто перший просканував,
+  // той і віддає файл, і «віддав» опиняється в чужому лозі.
+  for (const a of ['p1', 'p2', 'p3', 'p4', 'p5', 'p1-other']) {
+    mkdirSync(join(projectOf(a), 'Samples'), { recursive: true });
+  }
 
   const mkDaemon = (author, inPort, outPort) =>
     launch(`daemon-${author}`, join(root, 'daemon/index.js'), [
@@ -321,7 +327,7 @@ try {
       '--author', 'p5', '--session', SESSION,
       '--relay', `ws://127.0.0.1:${RELAY_PORT}`,
       '--udp-in', '19955', '--udp-out', '19956',
-      '--state-dir', tmp, '--project', projectOf('p1'),
+      '--state-dir', tmp, '--project', projectOf('p5'),
     ], { cwd: join(root, 'daemon') });
 
     await waitFor(dOld, /НЕСУМІСНІСТЬ.*не вміє застосовувати.*MixerSet/, 15000);
@@ -473,14 +479,25 @@ try {
   });
 
   await check('семпл, покладений у p1, доїхав до p2 байт у байт', async () => {
-    // 400 КБ -- більше за CHUNK, тож збірка з кількох частин теж перевіряється
-    const blob = Buffer.alloc(400 * 1024);
+    // 2.5 МБ -- це 14 чанків при вікні у 8, тобто вікно мусить зсунутись
+    // щонайменше двічі. Менший файл влазив у вікно цілком і не перевіряв
+    // головного: що передача продовжується після підтверджень.
+    const from = d1.out.length;
+    const blob = Buffer.alloc(2560 * 1024);
     for (let i = 0; i < blob.length; i++) blob[i] = (i * 7 + 13) & 0xff;
     writeFileSync(join(tmp, 'project-p1', 'Samples', 'kick.wav'), blob);
 
-    await waitFor(d2, /filesync: отримав Samples\/kick\.wav/, 25000);
+    await waitFor(d2, /filesync: отримав Samples\/kick\.wav/, 40000);
     const got = readFileSync(join(tmp, 'project-p2', 'Samples', 'kick.wav'));
     if (!got.equals(blob)) throw new Error(`файл побився: ${got.length} Б замість ${blob.length}`);
+
+    // Запасний шлях (дослати без вікна) існує для старого партнера; тут
+    // партнер новий, і спрацювання запасного означало б, що підтвердження
+    // не ходять, а вікно тримається на таймауті.
+    if (/не підтверджує чанки/.test(d1.out.slice(from))) {
+      throw new Error('вікно не працює: відправник звалився на запасний шлях');
+    }
+    await waitFor(d1, /filesync: віддав Samples\/kick\.wav/, 10000, from);
   });
 
   await check('передача файлів не потрапляє в журнал', async () => {
@@ -1047,11 +1064,20 @@ try {
     d2.stdin.write(`apply ${bad}\n`);
     await waitFor(d2, /знімок застосовано: \d+ з \d+$/m, 15000, applied);
 
+    // Свій знімок перезнімаємо ДО watch: перший такт спостереження оновлює
+    // його сам, але між "оновлюю" і "прийшло чуже" є вікно, і в ньому
+    // порівняння побачило б свіже чуже проти свого, знятого ще до apply.
+    const rebuilt = d2.out.length;
+    l2.stdin.write('fullstate\n');
+    await waitFor(d2, /state: знімок \d+ зібрано/, 10000, rebuilt);
+
     const from = d2.out.length;
     d2.stdin.write('watch p1 1\n');
     await waitFor(d2, /стежу за розходженням з p1/, 8000, from);
     await waitFor(d2, /розбіжності з p1 \(\d+\) — помітило спостереження:/, 25000, from);
     if (!/WatchDrift/.test(d2.out.slice(from))) {
+      console.log('--- звіт watch ---');
+      console.log(d2.out.slice(from));
       throw new Error('спостереження не назвало розходження поіменно');
     }
 
@@ -1614,7 +1640,7 @@ try {
       '--author', 'p1', '--session', 'other',
       '--relay', `ws://127.0.0.1:${RELAY_PORT}`,
       '--udp-in', '19951', '--udp-out', '19952',
-      '--state-dir', tmp, '--project', projectOf('p1'),
+      '--state-dir', tmp, '--project', projectOf('p1-other'),
     ], { cwd: join(root, 'daemon') });
 
     await waitFor(dOther, /#1 RegistryInit/, 15000);
@@ -1629,7 +1655,7 @@ try {
       '--author', 'p4', '--session', SESSION,
       '--relay', `ws://127.0.0.1:${RELAY_PORT}`,
       '--udp-in', '19953', '--udp-out', '19954',
-      '--state-dir', tmp, '--project', projectOf('p1'),
+      '--state-dir', tmp, '--project', projectOf('p4'),
     ], { cwd: join(root, 'daemon') });
     await waitFor(dLater, /relay: head=/, 10000);
 

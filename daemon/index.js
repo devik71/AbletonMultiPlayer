@@ -702,6 +702,9 @@ function connect() {
       case 'file_chunk':
         filesync.onChunk(msg);
         break;
+      case 'file_ack':
+        filesync.onAck(msg);
+        break;
       case 'ack': {
         // Подія вже була закомічена раніше -- relay не може повернути її
         // самою собою, бо стиснення прибрало її з журналу. Але outbox тримати

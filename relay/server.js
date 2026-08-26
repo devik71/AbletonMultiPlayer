@@ -955,6 +955,7 @@ wss.on('connection', (ws, req) => {
       case 'files_manifest':
       case 'file_request':
       case 'file_chunk':
+      case 'file_ack':
       // Знімок стану ходить тією самою трубою, що й файли: relay його не
       // журналює й не розуміє -- це не подія, а вирівнювання між учасниками.
       case 'peer_state_request':

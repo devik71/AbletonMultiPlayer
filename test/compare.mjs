@@ -219,3 +219,23 @@ test('девайси на Return теж порівнюються: ревер ч�
   assert.ok(out.some((l) => l.includes('Reverb') && l.includes('DecayTime')),
     `девайс Return не порівняний: ${out.join(' | ')}`);
 });
+
+test('структура називається раніше за ланцюги: стеля звіту не з’їдає головного', () => {
+  // У Drum Rack ланцюгів десятки, і кожен дає до шести рядків. Якби вони
+  // йшли першими, зниклий трек опинявся б за стелею -- тобто звіт мовчав
+  // би саме про те, заради чого його читають.
+  const chains = [];
+  for (let i = 0; i < 30; i++) chains.push({ id: `c${i}`, volume: 0.1, panning: 0.1 });
+  const mine = {
+    chains,
+    tracks: [{ id: 't1', name: 'Bass', mixer: {}, clips: [] }],
+    scenes: [],
+  };
+  const theirs = {
+    chains: chains.map((c) => ({ ...c, volume: 0.9, panning: 0.9 })),
+    tracks: [],
+    scenes: [],
+  };
+  const out = compareStates(mine, theirs, { limit: 10 });
+  assert.ok(out[0].includes('«Bass»'), `першим має бути зниклий трек, а не ланцюг: ${out[0]}`);
+});

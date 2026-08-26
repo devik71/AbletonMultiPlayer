@@ -15,6 +15,20 @@ import {
 import { dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from 'node:path';
 
 const CHUNK = 192 * 1024; // байтів сирих даних на повідомлення
+// Скільки чанків тримаємо в польоті без підтвердження. Раніше відправник
+// вганяв увесь файл у сокет одним циклом: на LAN relay встигав його
+// віддавати, а на вузькому каналі його буфер у бік отримувача переростав
+// MP_MAX_BUFFERED -- і relay розривав зʼєднання тому, хто не встигав читати.
+// Вісім чанків -- це півтора мегабайта: досить, щоб канал не простоював,
+// і мало, щоб буфер не ріс безмежно.
+const WINDOW = 8;
+// Партнер, що не підтвердив жодного чанка, -- швидше за все старий клієнт,
+// який про file_ack не знає. Тоді дошлемо решту без вікна: це рівно та
+// поведінка, що була досі, тож гірше не стане.
+const ACK_WAIT_MS = 5000;
+// А от мовчання посеред передачі -- це вже обрив, і чекати на нього вічно
+// означало б тримати файл у памʼяті до кінця сесії.
+const STALL_MS = 30000;
 const SCAN_DEBOUNCE_MS = 1500;
 const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 const HASH_RE = /^[0-9a-f]{16}$/;
@@ -73,7 +87,8 @@ export class FileSync {
     this.log = log;
     this.root = null;
     this.manifest = new Map(); // relPath -> {size, hash, mtimeMs}
-    this.incoming = new Map(); // relPath -> {total, parts:[], bytes, expected}
+    this.incoming = new Map();
+    this.outgoing = new Map();  // ключ "адресат|шлях" -> передача в польоті // relPath -> {total, parts:[], bytes, expected}
     this.wanted = new Map();   // relPath -> {size, hash}
     this._timer = null;
   }
@@ -207,20 +222,71 @@ export class FileSync {
       return;
     }
     const total = Math.max(1, Math.ceil(data.length / CHUNK));
-    for (let i = 0; i < total; i++) {
-      this.send({
-        m: 'file_chunk',
-        to: from ?? undefined,
-        path,
-        seq: i,
-        total,
-        data: data.subarray(i * CHUNK, (i + 1) * CHUNK).toString('base64'),
-      });
-    }
-    this.log(`filesync: віддав ${path} (${data.length} Б, ${total} чанків)`);
+    const key = `${from ?? ''}|${path}`;
+    const previous = this.outgoing.get(key);
+    if (previous) clearTimeout(previous.timer);
+    this.outgoing.set(key, {
+      path, data, total, to: from ?? undefined,
+      sent: 0, acked: -1, blast: false, timer: null,
+    });
+    this.log(`filesync: віддаю ${path} (${data.length} Б, ${total} чанків)`);
+    this.#pump(key);
   }
 
-  onChunk({ path, seq, total, data }) {
+  /** Дослати стільки чанків, скільки дозволяє вікно. */
+  #pump(key) {
+    const job = this.outgoing.get(key);
+    if (!job) return;
+    const limit = job.blast ? job.total : Math.min(job.total, job.acked + 1 + WINDOW);
+    while (job.sent < limit) {
+      const seq = job.sent;
+      job.sent += 1;
+      this.send({
+        m: 'file_chunk',
+        to: job.to,
+        path: job.path,
+        seq,
+        total: job.total,
+        data: job.data.subarray(seq * CHUNK, (seq + 1) * CHUNK).toString('base64'),
+      });
+    }
+    const done = job.blast ? job.sent >= job.total : job.acked >= job.total - 1;
+    if (done) {
+      clearTimeout(job.timer);
+      this.outgoing.delete(key);
+      this.log(`filesync: віддав ${job.path} (${job.data.length} Б, ${job.total} чанків)`);
+      return;
+    }
+    clearTimeout(job.timer);
+    job.timer = setTimeout(() => this.#stalled(key), job.acked < 0 ? ACK_WAIT_MS : STALL_MS);
+    job.timer.unref?.();
+  }
+
+  #stalled(key) {
+    const job = this.outgoing.get(key);
+    if (!job) return;
+    if (job.acked < 0 && !job.blast) {
+      job.blast = true;
+      this.log(`filesync: ${job.path} — партнер не підтверджує чанки, дошлю без вікна`);
+      this.#pump(key);
+      return;
+    }
+    this.outgoing.delete(key);
+    this.log(`filesync: передача ${job.path} зупинилась — партнер замовк`);
+  }
+
+  /** Партнер підтвердив чанк -- вікно зсувається. */
+  onAck({ path, seq, from = null } = {}) {
+    const safe = safeRelPath(path);
+    if (!safe || !Number.isSafeInteger(seq)) return;
+    const key = `${from ?? ''}|${safe}`;
+    const job = this.outgoing.get(key);
+    if (!job || seq < 0 || seq >= job.total) return;
+    if (seq > job.acked) job.acked = seq;
+    this.#pump(key);
+  }
+
+  onChunk({ path, seq, total, data, from = null }) {
     path = safeRelPath(path);
     const expected = path ? this.wanted.get(path) : null;
     if (!this.root || !path || !expected) return;
@@ -246,6 +312,10 @@ export class FileSync {
     }
     acc.parts[seq] = buf;
     acc.bytes += buf.length;
+    // Підтвердження -- вісімдесят байтів проти чвертьмегабайтного чанка,
+    // тож економити на ньому нема сенсу: хай відправник точно знає, докуди
+    // ми дочитали, і не жене більше, ніж канал витягує.
+    this.send({ m: 'file_ack', to: from ?? undefined, path, seq });
     if (acc.parts.some((p) => p === null)) return;
 
     const complete = Buffer.concat(acc.parts);

@@ -146,24 +146,6 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     }
   }
 
-  // Ланцюги: у Drum Rack це гучність кожного пада
-  const myChains = new Map((mine?.chains || []).map((c) => [c.id, c]));
-  const theirChains = new Map((theirs?.chains || []).map((c) => [c.id, c]));
-  for (const [id, my] of myChains) {
-    const their = theirChains.get(id);
-    if (!their) continue;
-    for (const param of ['volume', 'panning', 'mute', 'solo']) {
-      if (num(my[param]) === num(their[param])) continue;
-      add(`ланцюг ${id}: ${param} ${my[param] ?? '—'} проти ${their[param] ?? '—'}`);
-    }
-    // Назва пада -- те, за чим людина його впізнає: «Kick» проти «Chain 1»
-    // виглядає як інший інструмент ще до того, як його почули.
-    for (const prop of ['name', 'color']) {
-      if ((my[prop] ?? null) === (their[prop] ?? null)) continue;
-      add(`ланцюг ${id}: ${prop} ${my[prop] ?? '—'} проти ${their[prop] ?? '—'}`);
-    }
-  }
-
   for (const [kind, key] of [['трек', 'tracks'], ['сцена', 'scenes']]) {
     const my = byId(mine?.[key]);
     const their = byId(theirs?.[key]);
@@ -209,6 +191,26 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
   const theirReturns = (theirs?.aux_tracks || []).filter((t) => t.kind === "return").length;
   if (myReturns !== theirReturns) {
     add(`Return-треків ${myReturns} проти ${theirReturns} — індекси сендів означають різне`);
+  }
+
+  // Ланцюги йдуть ПІСЛЯ структури навмисно. У Drum Rack їх десятки, і кожен
+  // дає до шести рядків -- при стелі звіту вони витіснили б те, заради чого
+  // звіт і читають: зниклий трек, чужу назву, розʼїханий Return.
+  const myChains = new Map((mine?.chains || []).map((c) => [c.id, c]));
+  const theirChains = new Map((theirs?.chains || []).map((c) => [c.id, c]));
+  for (const [id, my] of myChains) {
+    const their = theirChains.get(id);
+    if (!their) continue;
+    for (const param of ['volume', 'panning', 'mute', 'solo']) {
+      if (num(my[param]) === num(their[param])) continue;
+      add(`ланцюг ${id}: ${param} ${my[param] ?? '—'} проти ${their[param] ?? '—'}`);
+    }
+    // Назва пада -- те, за чим людина його впізнає: «Kick» проти «Chain 1»
+    // виглядає як інший інструмент ще до того, як його почули.
+    for (const prop of ['name', 'color']) {
+      if ((my[prop] ?? null) === (their[prop] ?? null)) continue;
+      add(`ланцюг ${id}: ${prop} ${my[prop] ?? '—'} проти ${their[prop] ?? '—'}`);
+    }
   }
 
   const myTracks = byId(mine?.tracks);
