@@ -87,9 +87,44 @@ PLAN_SCHEMA = {
                 "additionalProperties": True,
             },
         },
+        # Складний запит розкладається на залежні блоки: спершу створити
+        # треки, потім покласти на них девайси, потім крутити параметри.
+        # Блок -- це одиниця виконання, а не оформлення: між блоками
+        # знімок перезнімається, тож наступний адресує те, що щойно
+        # створив попередній.
+        "stages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": True,
+                "properties": {
+                    "title": {"type": "string"},
+                    "needs_confirmation": {"type": "boolean"},
+                    "actions": {
+                        "type": "array",
+                        "items": {"type": "object", "additionalProperties": True},
+                    },
+                },
+            },
+        },
     },
     "required": ["reply", "needs_confirmation", "actions"],
 }
+
+# Скільки блоків має сенс. Один -- це не план, а дія; понад десять означає,
+# що модель дрібнить замість планувати, і кожен зайвий блок -- це ще один
+# похід у Live з перезніманням знімка.
+MAX_STAGES = 10
+
+# Коди, після яких наступна спроба безглузда: ключ, доступ і неіснуюча модель
+# не полагодяться від іншого формату запиту.
+CONFIG_HTTP_CODES = (401, 403, 404)
+# Менше секунди на спробу -- це вже не спроба, а гарантований таймаут.
+MIN_ATTEMPT_SEC = 2.0
+
+
+class _ConfigError(RuntimeError):
+    """Помилка налаштування, а не формату: повторювати не варто."""
 
 ACTION_HELP = {
     "contract": PLAN_CONTRACT,
@@ -135,6 +170,12 @@ Return only a JSON object matching this shape:
 Use high-level ops when possible. Use generic lom_get/lom_set/lom_call only when
 the request cannot be expressed by a high-level op. Paths address the Live Object
 Model from Song by default, e.g. ["tracks",0,"mixer_device","volume"].
+
+For a request that needs several dependent steps, return "stages": an ordered
+list of blocks, each with "title" and "actions". A block is a unit of execution:
+the snapshot is re-read between blocks, so a later block may address objects an
+earlier one created. Use at most 10 blocks, and put a block that needs a human
+decision behind its own "needs_confirmation": true instead of guessing.
 
 Keep actions small and reversible where practical. Do not attempt filesystem,
 network, shell, plugin installation, or arbitrary Python access. Use only LOM
@@ -563,6 +604,7 @@ class OpenAIPlanner(object):
         self.model = os.environ.get("ABLETONMP_AI_MODEL", "gpt-5")
         self.base_url = os.environ.get("ABLETONMP_AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         self.timeout = _env_int("ABLETONMP_AI_TIMEOUT", 45)
+        self._deadline = None
 
     def _refresh_api_key(self):
         api_key, source = _load_api_key()
@@ -602,22 +644,45 @@ class OpenAIPlanner(object):
             "available_actions": ACTION_HELP["ops"],
         }
         prompt = json.dumps(user_payload, ensure_ascii=False)
+        # Спільний строк на ВСІ спроби, а не по строку на кожну. Три
+        # послідовні падіння по 45 секунд давали 135 секунд тиші на один
+        # запит -- людина за цей час устигала вирішити, що все зламалось.
+        self._deadline = time.time() + self.timeout
+        attempts = (
+            ("responses", lambda: self._responses_plan(prompt)),
+            ("chat-json", lambda: self._chat_plan(prompt, json_mode=True)),
+            ("chat", lambda: self._chat_plan(prompt, json_mode=False)),
+        )
         errors = []
         try:
-            return self._responses_plan(prompt)
-        except Exception as e:
-            errors.append("responses: %r" % (e,))
-            self._log("AI Responses planning failed, trying chat completions: %r" % (e,))
-        try:
-            return self._chat_plan(prompt, json_mode=True)
-        except Exception as e:
-            errors.append("chat-json: %r" % (e,))
-            self._log("AI chat JSON planning failed, trying plain chat: %r" % (e,))
-        try:
-            return self._chat_plan(prompt, json_mode=False)
-        except Exception as e:
-            errors.append("chat: %r" % (e,))
+            for i, (name, attempt) in enumerate(attempts):
+                if i and self._time_left() < MIN_ATTEMPT_SEC:
+                    errors.append("%s: пропущено, часу не лишилось" % (name,))
+                    break
+                try:
+                    return attempt()
+                except _ConfigError as e:
+                    # 401/403/404 -- це не збій формату, а налаштування.
+                    # Наступна спроба піде тим самим ключем у ту саму модель
+                    # і впаде так само, лише витративши решту строку.
+                    errors.append("%s: %s" % (name, e))
+                    break
+                except Exception as e:
+                    errors.append("%s: %r" % (name, e))
+                    self._log("AI planning attempt %s failed: %r" % (name, e))
             raise RuntimeError("; ".join(errors))
+        finally:
+            self._deadline = None
+
+    def _time_left(self):
+        if self._deadline is None:
+            return self.timeout
+        return self._deadline - time.time()
+
+    def _attempt_timeout(self):
+        """Скільки лишилось на цю спробу. Не менше секунди -- нульовий
+        таймаут у urlopen означає не «одразу здатись», а «чекати вічно»."""
+        return max(1.0, min(float(self.timeout), self._time_left()))
 
     def _post(self, path, payload):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -626,15 +691,18 @@ class OpenAIPlanner(object):
             headers["Authorization"] = "Bearer " + self.api_key
         req = Request(self.base_url + path, data=data, headers=headers)
         try:
-            response = urlopen(req, timeout=self.timeout)
+            response = urlopen(req, timeout=self._attempt_timeout())
             raw = response.read().decode("utf-8")
         except HTTPError as e:
             try:
                 raw = e.read().decode("utf-8")
             except Exception:
                 raw = str(e)
-            raise RuntimeError("HTTP %s %s" % (getattr(e, "code", "?"),
-                                               _safe_remote_error(raw)))
+            code = getattr(e, "code", "?")
+            text = "HTTP %s %s" % (code, _safe_remote_error(raw))
+            if code in CONFIG_HTTP_CODES:
+                raise _ConfigError(text)
+            raise RuntimeError(text)
         except URLError as e:
             raise RuntimeError("network error %r" % (e,))
         return json.loads(raw)
@@ -714,14 +782,52 @@ def _normalize_plan(plan):
         if not isinstance(action, dict):
             raise ValueError("each action must be an object")
         normal.append(action)
+    stages = _normalize_stages(plan.get("stages"), normal)
+    # actions лишається ПЛОСКИМ переліком усього запланованого: на нього
+    # дивиться і M4L-панель, і /api/exec, і вони не мусять знати про блоки.
+    flat = []
+    for stage in stages:
+        flat.extend(stage["actions"])
     reply = plan.get("reply")
     if not isinstance(reply, str):
-        reply = "Plan ready." if normal else "No actions."
+        reply = "Plan ready." if flat else "No actions."
     return {
         "reply": reply,
         "needs_confirmation": bool(plan.get("needs_confirmation", False)),
-        "actions": normal,
+        "actions": flat,
+        "stages": stages,
     }
+
+
+def _normalize_stages(raw, fallback_actions):
+    """Блоки виконання. Порожній перелік -- коли й дій немає.
+
+    План без blocks -- це один блок: так старий формат лишається робочим
+    без жодної гілки в місці виконання.
+    """
+    if not isinstance(raw, list) or not raw:
+        return [{"title": "", "needs_confirmation": False,
+                 "actions": fallback_actions}] if fallback_actions else []
+    if len(raw) > MAX_STAGES:
+        raise ValueError("plan.stages must not exceed %d blocks" % MAX_STAGES)
+    stages = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("each stage must be an object")
+        actions = item.get("actions")
+        if not isinstance(actions, list):
+            raise ValueError("stage.actions must be a list")
+        for action in actions:
+            if not isinstance(action, dict):
+                raise ValueError("each action must be an object")
+        title = item.get("title")
+        stages.append({
+            "title": title if isinstance(title, str) else "",
+            "needs_confirmation": bool(item.get("needs_confirmation", False)),
+            "actions": list(actions),
+        })
+    # Блок без дій нічого не виконує, але й не має права зупиняти чергу.
+    return [stage for stage in stages if stage["actions"]]
 
 
 class AIChatServer(object):
@@ -813,6 +919,53 @@ class AIChatServer(object):
             raise RuntimeError(req.error)
         return req.response
 
+    def run_stages(self, plan, message, execute=True):
+        """Виконує блоки по черзі. Повертає (прогрес, останній результат).
+
+        Знімок між блоками перезнімається не для краси: другий блок кладе
+        девайс на трек, якого до першого блоку не існувало, і без свіжого
+        знімка адресувати його нічим.
+
+        Черга зупиняється на першій же невдачі, а не доводить решту до
+        кінця: наступні блоки залежні за побудовою, і виконати їх поверх
+        напівзробленого -- це отримати сет, якого ніхто не просив.
+        """
+        stages = plan.get("stages") or []
+        progress = []
+        last = None
+        if not execute or not stages:
+            return progress, None
+        if plan.get("needs_confirmation"):
+            for i, stage in enumerate(stages):
+                progress.append({"stage": i, "title": stage["title"],
+                                 "status": "confirm", "actions": len(stage["actions"])})
+            return progress, None
+        for i, stage in enumerate(stages):
+            if stage.get("needs_confirmation"):
+                progress.append({"stage": i, "title": stage["title"],
+                                 "status": "confirm", "actions": len(stage["actions"])})
+                break
+            try:
+                result = self.live_request("exec", {
+                    "actions": stage["actions"],
+                    "source": "chat",
+                    "message": message,
+                })
+            except Exception as e:
+                progress.append({"stage": i, "title": stage["title"],
+                                 "status": "failed", "actions": len(stage["actions"]),
+                                 "error": str(e)})
+                break
+            last = result
+            ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
+            progress.append({"stage": i, "title": stage["title"],
+                             "status": "ok" if ok else "failed",
+                             "actions": len(stage["actions"]),
+                             "result": result})
+            if not ok:
+                break
+        return progress, last
+
     def _serve(self):
         try:
             self._httpd.serve_forever()
@@ -893,18 +1046,16 @@ class AIChatServer(object):
                 try:
                     snapshot = outer.live_request("snapshot", {})
                     plan = outer._planner.plan(message, snapshot)
-                    result = None
-                    if execute and plan["actions"] and not plan.get("needs_confirmation"):
-                        result = outer.live_request("exec", {
-                            "actions": plan["actions"],
-                            "source": "chat",
-                            "message": message,
-                        })
+                    progress, result = outer.run_stages(plan, message, execute)
                     self._send_json({
                         "ok": True,
                         "reply": plan.get("reply"),
                         "needs_confirmation": bool(plan.get("needs_confirmation")),
                         "actions": plan.get("actions") or [],
+                        "stages": [{"title": st["title"],
+                                    "actions": len(st["actions"])}
+                                   for st in plan.get("stages") or []],
+                        "progress": progress,
                         "executed": result is not None,
                         "result": result,
                     })

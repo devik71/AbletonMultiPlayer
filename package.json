@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/announce.mjs test/bridge-lint.mjs test/compare.mjs test/compact.mjs test/locks.mjs test/presence.mjs test/state.mjs test/state-parity.mjs test/hardening.mjs test/recovery.mjs && node test/e2e.mjs",
+    "test": "node --test --test-concurrency=1 test/announce.mjs test/bridge-lint.mjs test/compare.mjs test/compact.mjs test/locks.mjs test/presence.mjs test/state.mjs test/state-parity.mjs test/python.mjs test/hardening.mjs test/recovery.mjs && node test/e2e.mjs",
     "test:hardening": "node --test test/hardening.mjs",
     "test:recovery": "node --test test/recovery.mjs",
     "test:e2e": "node test/e2e.mjs",
@@ -19,6 +19,7 @@
     "probe:pair": "node tools/pair-probe.mjs",
     "test:lint": "node --test test/bridge-lint.mjs",
     "preflight": "node tools/preflight.mjs",
-    "test:parity": "node --test test/state-parity.mjs"
+    "test:parity": "node --test test/state-parity.mjs",
+    "test:planner": "python -m unittest discover -s test -p planner_test.py -v"
   }
 }
