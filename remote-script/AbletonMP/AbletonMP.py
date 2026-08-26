@@ -5791,12 +5791,13 @@ class AbletonMP(ControlSurface):
         if not notes:
             return
         for region, part in self._note_regions_for({"length": meta["length"]}, notes):
-            from_pitch, pitch_span, from_time, time_span = region
+            # region тут -- уже готовий dict. Розпакувати його в чотири імені
+            # не можна: розпакування словника дає КЛЮЧІ, і в payload летіли б
+            # рядки "from_pitch" замість чисел.
             self._emit("ArrangementClipNotesSet", {
                 "track": track_ref,
                 "clip": {"id": uid},
-                "region": {"from_pitch": from_pitch, "pitch_span": pitch_span,
-                           "from_time": from_time, "time_span": time_span},
+                "region": region,
                 "notes": part,
             })
 
@@ -6638,6 +6639,10 @@ class AbletonMP(ControlSurface):
         tempo = state.get("tempo")
         if isinstance(tempo, (int, float)):
             ops.append(("TempoSet", {"bpm": float(tempo)}))
+        # Розмір такту й тональність -- частина документа, а не смак: без них
+        # ті самі позиції нот означають у партнера інше.
+        for prop, value in (state.get("song") or {}).items():
+            ops.append(("SongPropSet", {"prop": prop, "value": value}))
 
         for track in state.get("tracks") or []:
             ref = {"id": track.get("id")}
@@ -6656,10 +6661,89 @@ class AbletonMP(ControlSurface):
             ops.extend(self._mixer_ops(ref, aux.get("mixer") or {}))
             ops.extend(self._device_ops(ref, aux.get("devices") or []))
 
-        for scene in state.get("scenes") or []:
-            if scene.get("id"):
-                ops.extend(self._meta_ops("scene", {"id": scene["id"]}, scene))
+        # Мікшер ланцюгів: у Drum Rack це гучність кожного пада.
+        for chain in state.get("chains") or []:
+            cid = (chain or {}).get("id")
+            if not cid:
+                continue
+            for param in ("volume", "panning", "mute", "solo"):
+                if chain.get(param) is None:
+                    continue
+                ops.append(("ChainMixerSet", {"chain": {"id": cid},
+                                              "param": param, "value": chain[param]}))
+            for prop in ("name", "color"):
+                if chain.get(prop) is None:
+                    continue
+                ops.append(("ObjectMetaSet", {"object": "chain", "chain": {"id": cid},
+                                              "prop": prop, "value": chain[prop]}))
 
+        # Локатори -- структура документа: «Verse», «Drop». Партнер без них
+        # бачить голу лінійку.
+        for cue in state.get("cues") or []:
+            at = (cue or {}).get("time")
+            if isinstance(at, bool) or not isinstance(at, (int, float)):
+                continue
+            ops.append(("CueSet", {"time": at, "name": cue.get("name") or ""}))
+
+        # Кліпи в лінійці: структури знімок не створює, але значення вирівнює.
+        for track in state.get("tracks") or []:
+            tid = (track or {}).get("id")
+            if not tid:
+                continue
+            ops.extend(self._arrangement_ops({"id": tid},
+                                             track.get("arrangement") or []))
+
+        for scene in state.get("scenes") or []:
+            if not scene.get("id"):
+                continue
+            # Темп і метр сцени -- частина документа: сцена, що мовчки перемикає
+            # темп в одного і не перемикає в іншого, розводить пару миттєво.
+            timing = scene.get("timing")
+            if timing:
+                payload = {"scene": {"id": scene["id"]}}
+                payload.update(timing)
+                ops.append(("SceneTimingSet", payload))
+            ops.extend(self._meta_ops("scene", {"id": scene["id"]}, scene))
+
+        return ops
+
+    def _arrangement_ops(self, ref, clips):
+        """Кліпи в лінійці зі знімка.
+
+        Створення тут немає навмисно: знімок не будує структури, він
+        вирівнює значення в тих кліпах, що в партнера вже є.
+        """
+        ops = []
+        for clip in clips:
+            uid = (clip or {}).get("id")
+            if not uid:
+                continue
+            clip_ref = {"id": uid}
+            for prop, value in (clip.get("props") or {}).items():
+                ops.append(("ClipPropSet", {"track": ref, "clip": clip_ref,
+                                            "prop": prop, "value": value}))
+            markers = clip.get("warp")
+            if markers:
+                ops.append(("ClipWarpSet", {"track": ref, "clip": clip_ref,
+                                            "markers": markers}))
+            loop = clip.get("loop")
+            if loop:
+                payload = {"track": ref, "clip": clip_ref}
+                payload.update(loop)
+                ops.append(("ClipLoopSet", payload))
+            for region, part in self._note_regions_for(
+                    {"length": clip.get("length")}, clip.get("notes") or []):
+                if not part:
+                    continue
+                ops.append(("ArrangementClipNotesSet", {
+                    "track": ref, "clip": clip_ref,
+                    "region": region, "notes": part}))
+            for prop in ("name", "color"):
+                if clip.get(prop) is None:
+                    continue
+                ops.append(("ObjectMetaSet", {"object": "clip", "track": ref,
+                                              "clip": clip_ref, "prop": prop,
+                                              "value": clip[prop]}))
         return ops
 
     def _meta_ops(self, kind, ref, src):
@@ -6675,14 +6759,21 @@ class AbletonMP(ControlSurface):
 
     def _mixer_ops(self, ref, mixer):
         ops = []
-        for param in ("volume", "panning", "crossfader", "cue_volume"):
+        for param in ("volume", "panning", "crossfader", "cue_volume",
+                      "crossfade_assign"):
             if param in mixer:
                 ops.append(("MixerSet", {"track": ref, "param": param, "value": mixer[param]}))
         for send in mixer.get("sends") or []:
             if send.get("value") is None:
                 continue
-            ops.append(("MixerSet", {"track": ref, "param": "send",
-                                     "index": send.get("index"), "value": send.get("value")}))
+            payload = {"track": ref, "param": "send",
+                       "index": send.get("index"), "value": send.get("value")}
+            # uuid Return -- контрольна сума: індекс сенда між машинами не
+            # збігається, щойно набір Return-треків розійшовся.
+            ret = send.get("return") or {}
+            if ret.get("id"):
+                payload["return"] = ret
+            ops.append(("MixerSet", payload))
         for prop in ("mute", "solo", "arm"):
             if prop in mixer:
                 ops.append(("TrackToggle", {"track": ref, "param": prop, "value": bool(mixer[prop])}))
@@ -6725,6 +6816,15 @@ class AbletonMP(ControlSurface):
                         "track": ref, "scene": scene, "clip": meta,
                         "region": region, "notes": part,
                     }))
+            # Властивості й warp -- після створення кліпу й нот: на порожній
+            # слот вони не лягли б, а warp вимагає ще й того, щоб кліп був audio.
+            for prop, value in (entry.get("props") or {}).items():
+                ops.append(("ClipPropSet", {"track": ref, "scene": scene,
+                                            "prop": prop, "value": value}))
+            markers = entry.get("warp")
+            if markers:
+                ops.append(("ClipWarpSet", {"track": ref, "scene": scene,
+                                            "markers": markers}))
             loop = entry.get("loop")
             if loop:
                 payload = {"track": ref, "scene": scene}
