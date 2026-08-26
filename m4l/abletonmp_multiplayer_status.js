@@ -112,6 +112,36 @@ function refresh() {
     }
 }
 
+/** Однакова версія скрипта з різним хешем коду. Повертає опис або "". */
+function codeDrift(clients) {
+    var byScript = {};
+    for (var i = 0; i < clients.length; i++) {
+        var c = clients[i];
+        if (!c.script || !c.sha) {
+            continue;
+        }
+        if (!byScript[c.script]) {
+            byScript[c.script] = {};
+        }
+        byScript[c.script][c.sha] = (byScript[c.script][c.sha] || []).concat(c.author);
+    }
+    for (var script in byScript) {
+        if (!byScript.hasOwnProperty(script)) {
+            continue;
+        }
+        var shas = [];
+        for (var sha in byScript[script]) {
+            if (byScript[script].hasOwnProperty(sha)) {
+                shas.push(sha + "=" + byScript[script][sha].join(","));
+            }
+        }
+        if (shas.length > 1) {
+            return script + ": " + shas.join("  ");
+        }
+    }
+    return "";
+}
+
 function render(data) {
     if (!data || data.ok === false) {
         setstatus("Relay error");
@@ -163,8 +193,18 @@ function render(data) {
                     (c.port ? (":" + c.port) : "") +
                     "  live " + (c.live || "?") +
                     "  script " + (c.script || "?") +
+                    (c.sha ? ("#" + c.sha) : "") +
                     "  connected " + seconds(c.connected_sec || 0) +
                     "  idle " + seconds(c.idle_sec || 0));
+            }
+            // Версія між комітами не змінюється, тож однакова версія при
+            // різному хеші -- це саме той випадок, коли "синхронізація не
+            // працює" означає "одна машина крутить старий скрипт". Найдорожча
+            // година прогону витрачається саме на нього, тож кажемо вголос.
+            var drift = codeDrift(clients);
+            if (drift) {
+                lines.push("  !! РІЗНИЙ КОД при однаковій версії " + drift);
+                lines.push("     онови скрипт на машині, що відстала, і перезапусти Live");
             }
         }
 
