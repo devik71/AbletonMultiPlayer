@@ -74,6 +74,37 @@ PLAN_CONTRACT = {
     ],
 }
 
+# Другий приклад -- для запиту, який одним блоком не робиться. Контракт
+# показує саме залежність: девайс кладеться на трек, якого до першого
+# блоку не існувало, тож між блоками знімок перезнімається.
+PLAN_CONTRACT_STAGED = {
+    "reply": "Three tracks, then instruments, then a rough balance.",
+    "needs_confirmation": False,
+    "stages": [
+        {
+            "title": "create tracks",
+            "actions": [
+                {"op": "create_track", "kind": "midi", "name": "Drums"},
+                {"op": "create_track", "kind": "midi", "name": "Bass"},
+            ],
+        },
+        {
+            "title": "load instruments",
+            "actions": [
+                {"op": "load_device", "track_index": 0, "name": "Drum Rack"},
+                {"op": "load_device", "track_index": 1, "name": "Operator"},
+            ],
+        },
+        {
+            "title": "rough balance",
+            "actions": [
+                {"op": "set_mixer", "track_index": 0, "param": "volume", "value": 0.8},
+                {"op": "set_mixer", "track_index": 1, "param": "volume", "value": 0.7},
+            ],
+        },
+    ],
+}
+
 PLAN_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -128,6 +159,7 @@ class _ConfigError(RuntimeError):
 
 ACTION_HELP = {
     "contract": PLAN_CONTRACT,
+    "staged_contract": PLAN_CONTRACT_STAGED,
     "ops": [
         "snapshot",
         "apply",
@@ -684,6 +716,7 @@ class OpenAIPlanner(object):
             "request": message,
             "live_snapshot": snapshot,
             "action_contract": PLAN_CONTRACT,
+            "staged_contract": PLAN_CONTRACT_STAGED,
             "available_actions": ACTION_HELP["ops"],
         }
         prompt = json.dumps(user_payload, ensure_ascii=False)

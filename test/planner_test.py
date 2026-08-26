@@ -188,3 +188,22 @@ class StagesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ContractTest(unittest.TestCase):
+    def test_both_contracts_survive_normalization(self):
+        # Приклад, який ми показуємо моделі, мусить проходити наш власний
+        # розбір. Інакше ми вчимо її формату, який самі ж відхиляємо.
+        one = chat._normalize_plan(dict(chat.PLAN_CONTRACT))
+        self.assertEqual(len(one["stages"]), 1)
+        self.assertEqual(len(one["actions"]), len(chat.PLAN_CONTRACT["actions"]))
+
+        staged = chat._normalize_plan(dict(chat.PLAN_CONTRACT_STAGED))
+        self.assertEqual(len(staged["stages"]), 3)
+        self.assertEqual(len(staged["actions"]), 6)
+        self.assertLessEqual(len(staged["stages"]), chat.MAX_STAGES)
+
+    def test_system_prompt_mentions_blocks(self):
+        # Схема дозволяє stages, але модель про них дізнається лише з промпту.
+        self.assertIn("stages", chat.SYSTEM_PROMPT)
+        self.assertIn("stages", chat.PLAN_SCHEMA["properties"])
