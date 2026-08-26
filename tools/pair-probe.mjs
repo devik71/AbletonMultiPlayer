@@ -11,7 +11,7 @@
 //   node tools/pair-probe.mjs [--relay ws://127.0.0.1:19870] [--session pair]
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
@@ -152,6 +152,58 @@ try {
       await new Promise((r) => setTimeout(r, 500));
     }
     throw new Error(`файл не доїхав у ${target}`);
+  });
+
+  await check('стоп-кнопка слота: has_stop_button справді пишеться з коду', async () => {
+    // Довідник LOM каже про цю властивість різне: в одному місці R/W,
+    // в аудиті -- read-only без observable. Перевіряємо обидва боки одразу:
+    // чи запис узагалі проходить і чи listener побачив його як подію.
+    const from = l2.out.length;
+    const path = ['tracks', 0, 'clip_slots', 1];
+    // lom_get віддає СЕРІАЛІЗОВАНИЙ обʼєкт за шляхом, тож властивість має
+    // бути останньою ланкою шляху, а не окремим полем.
+    const before = await p1exec([{ op: 'lom_get', path: [...path, 'has_stop_button'] }]);
+    const was = before?.result?.results?.[0]?.result;
+    if (typeof was !== 'boolean') {
+      return console.log('       has_stop_button не читається — перевірку пропущено');
+    }
+    await p1exec([{ op: 'lom_set', path, property: 'has_stop_button', value: !was }]);
+    try {
+      await waitFor(l2, /<- #\d+ SlotStopButtonSet /, 12000, from);
+    } finally {
+      await p1exec([{ op: 'lom_set', path, property: 'has_stop_button', value: was }]);
+    }
+    if (/SlotStopButtonSet ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер відхилив стоп-кнопку');
+    }
+  });
+
+  await check('великий семпл їде вікном, а не залпом у сокет', async () => {
+    // 6 МБ -- це 32 чанки при вікні у 8, тобто вікно мусить зсунутись чотири
+    // рази з підтвердженнями від партнера. Локально канал широкий і без вікна,
+    // тож тут перевіряється не швидкість, а те, що ланцюжок ack узагалі живий.
+    const snap = await p1exec([{ op: 'snapshot' }]);
+    const alsPath = snap?.result?.snapshot?.file_path;
+    if (!alsPath) return console.log('       p1 без збереженого сету — перевірку пропущено');
+
+    const from = d2.out.length;
+    const blob = Buffer.alloc(6 * 1024 * 1024);
+    for (let i = 0; i < blob.length; i += 1) blob[i] = (i * 17 + 3) & 0xff;
+    const name = `probe-big-${Date.now() % 100000}.wav`;
+    writeFileSync(join(PROJECT, 'Samples', name), blob);
+
+    const target = join(dirname(alsPath), 'Samples', name);
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      if (existsSync(target) && statSync(target).size === blob.length) {
+        if (/не підтверджує чанки/.test(d2.out.slice(from))) {
+          throw new Error('партнер не підтверджує чанки — вікно тримається на таймауті');
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 750));
+    }
+    throw new Error(`великий файл не доїхав у ${target}`);
   });
 
   await check('status відповідає на «у нас усе гаразд?» одним екраном', async () => {
