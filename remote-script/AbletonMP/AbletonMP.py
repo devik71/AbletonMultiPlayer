@@ -1061,6 +1061,38 @@ class AbletonMP(ControlSurface):
                     reg.bind(rec.get("id"), objects[i])
                     by_map += 1
 
+            # Другий прохід -- за назвою, і тільки для сцен. Сцена не тримає
+            # set_data, тож її ідентичність живе виключно в мапі за індексом:
+            # варто переставити сцени між сесіями, і за тим індексом уже інша
+            # сцена. Перевірка імені чесно відмовляє -- і uuid губиться назовсім.
+            #
+            # Якщо ж назва унікальна з обох боків, вона сама по собі адреса,
+            # незалежна від порядку. Неунікальну назву (і порожню, яку Live
+            # дає за замовчуванням) не чіпаємо: краще втратити ідентичність,
+            # ніж привʼязати uuid до не тієї сцени.
+            saved_by_name = {}
+            for rec in (saved.get("scenes") or []):
+                name = rec.get("name")
+                if name and rec.get("id"):
+                    saved_by_name.setdefault(name, []).append(rec)
+            live_by_name = {}
+            for obj in self._doc.scenes:
+                name = self._safe_name(obj)
+                if name:
+                    live_by_name.setdefault(name, []).append(obj)
+            for name, recs in saved_by_name.items():
+                live = live_by_name.get(name) or []
+                if len(recs) != 1 or len(live) != 1:
+                    continue
+                obj = live[0]
+                uid = recs[0]["id"]
+                if self._scenes_reg.id_of(obj, create=False):
+                    continue
+                if self._scenes_reg.taken_by_other(uid, obj):
+                    continue
+                self._scenes_reg.bind(uid, obj)
+                by_map += 1
+
             saved_aux = {}
             for rec in self._saved_aux_track_records:
                 if rec.get("id"):
