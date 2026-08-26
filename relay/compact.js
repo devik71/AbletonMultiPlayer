@@ -64,10 +64,6 @@ export function supersedeKey(ev) {
       // Кожна властивість -- власна адреса: розмір такту не перекриває
       // тональність, а серія рухів однієї доїжджає останньою.
       return `song:${p.prop}`;
-    case 'SongPropSet':
-      // Кожна властивість -- власна адреса: розмір такту не перекриває
-      // тональність, а серія рухів однієї доїжджає останньою.
-      return `song:${p.prop}`;
     case 'MixerSet':
       return `mixer:${trackKey(p.track)}:${p.param}:${p.index ?? ''}`;
     case 'TrackToggle':
@@ -93,6 +89,19 @@ export function supersedeKey(ev) {
       return `arrmove:${p.clip?.id}`;
     case 'ArrangementClipNotesSet':
       return `arrnotes:${p.clip?.id}:${canonical(p.region)}`;
+    // Далі -- усе, що згортати не можна, і причини в них різні.
+    //
+    // Структура: подія створює або знищує обʼєкт, тож "остання перемагає"
+    // означало б втратити сам обʼєкт, а не проміжне значення. Виконати
+    // TrackCreate і не виконати TrackDelete -- це різні сети, а не той самий.
+    // NEVER_FOLD: TrackCreate, TrackDelete, TrackDuplicate, SceneCreate, SceneDelete
+    // NEVER_FOLD: ClipCreate, ClipDelete, ReturnCreate, ReturnDelete
+    // NEVER_FOLD: DeviceInsert, DeviceDelete, DeviceMove, DeviceLoad, SampleLoad
+    // NEVER_FOLD: ArrangementClipCreate, ArrangementClipDelete
+    //
+    // Відтворення: у них своя адреса й свій барʼєр, вони згортаються вище
+    // в compactTail, а не тут -- ключ мусить враховувати SceneLaunch.
+    // NEVER_FOLD: ClipLaunch, ClipStop, SceneLaunch, StopAllClips
     default:
       return null;
   }

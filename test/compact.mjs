@@ -2,6 +2,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { compactTail } from '../relay/compact.js';
 
 let gseq = 0;
@@ -299,4 +300,33 @@ test('кліп у лінійці має власну адресу згортан
     track: { id: 't1' }, clip: { id: 'a1' }, looping: true, loop_start: 0, loop_end: end,
   });
   assert.equal(compactTail([loopArr(4), loopArr(8)]).events.length, 1);
+});
+
+test('у switch стиснення немає двох гілок на один тип', () => {
+  // Дубльований case в JS -- мертвий код: друга гілка недосяжна назавжди.
+  // Тут це особливо підступно, бо дубль виглядає як робоче правило згортання
+  // і читач вважає, що воно діє. SongPropSet прожив так цілий реліз.
+  const src = readFileSync(new URL('../relay/compact.js', import.meta.url), 'utf8');
+  const labels = [...src.matchAll(/^\s*case '([A-Za-z]+)':/gm)].map((m) => m[1]);
+  const twice = labels.filter((t, i) => labels.indexOf(t) !== i);
+  assert.deepEqual(twice, [], `тип згортається двічі: ${twice.join(', ')}`);
+});
+
+test('кожен тип, який bridge уміє застосувати, має рішення про згортання', () => {
+  // Рішення може бути й «не згортати» -- воно тоді записане в коментарі
+  // до default. Чого не має бути, так це типу, про який ніхто не думав.
+  const src = readFileSync(new URL('../relay/compact.js', import.meta.url), 'utf8');
+  const bridge = readFileSync(
+    new URL('../remote-script/AbletonMP/AbletonMP.py', import.meta.url), 'utf8');
+  const block = bridge.slice(bridge.indexOf('APPLY_TYPES'), bridge.indexOf('CLIP_PROPS'));
+  const applied = new Set([...block.matchAll(/"([A-Z][A-Za-z]+)"/g)].map((m) => m[1]));
+  assert.ok(applied.size >= 20, `APPLY_TYPES прочитано не повністю: ${applied.size}`);
+  // Явно перелічені або свідомо лишені структурними -- обидва варіанти ок,
+  // тест лише ловить тип, доданий у bridge і забутий у relay.
+  const folded = new Set([...src.matchAll(/^\s*case '([A-Za-z]+)':/gm)].map((m) => m[1]));
+  const structural = new Set([...src.matchAll(/NEVER_FOLD:\s*([A-Za-z, ]+)/g)]
+    .flatMap((m) => m[1].split(',').map((s) => s.trim())).filter(Boolean));
+  const forgotten = [...applied].filter((t) => !folded.has(t) && !structural.has(t)).sort();
+  assert.deepEqual(forgotten, [],
+    `тип є в APPLY_TYPES, але relay про нього не знає: ${forgotten.join(', ')}`);
 });
