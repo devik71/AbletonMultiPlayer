@@ -80,3 +80,21 @@ test('знімок bridge і знімок емулятора мають ті с�
   assert.deepStrictEqual(onlyPy, [],
     `bridge кладе в знімок те, чого емулятор не кладе: ${onlyPy.join(', ')}`);
 });
+
+test('прогалини описані з обох боків і мають людський текст у демоні', () => {
+  // Прогалина, яку вміє назвати лише одна сторона, -- це або мовчазна
+  // втрата («застосовано» замість «бракує»), або рядок звіту виду
+  // [object Object]. Обидва варіанти гірші за падіння тесту.
+  const daemon = readFileSync(join(root, 'daemon/index.js'), 'utf8');
+  const py = new Set([...bridge.matchAll(/"what":\s*"([a-z_]+)"/g)].map((m) => m[1]));
+  const js = new Set([...mirror2.matchAll(/what:\s*'([a-z_]+)'/g)].map((m) => m[1]));
+  const described = new Set([...daemon.matchAll(/gap\.what === '([a-z_]+)'/g)].map((m) => m[1]));
+
+  assert.ok(py.size >= 8, `у bridge знайдено лише ${py.size} видів прогалин`);
+  assert.deepStrictEqual([...js].filter((k) => !py.has(k)).sort(), [],
+    'емулятор знає прогалину, якої не знає bridge');
+  assert.deepStrictEqual([...py].filter((k) => !js.has(k)).sort(), [],
+    'bridge знає прогалину, якої не знає емулятор');
+  assert.deepStrictEqual([...py].filter((k) => !described.has(k)).sort(), [],
+    'демон не має тексту для прогалини');
+});

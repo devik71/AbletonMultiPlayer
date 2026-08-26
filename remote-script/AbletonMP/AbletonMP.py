@@ -6626,6 +6626,23 @@ class AbletonMP(ControlSurface):
                         "name": (payload.get("parameter") or {}).get("name")}
             return None
 
+        # Ланцюг і кліп у лінійці адресуються власним uuid, повз сцену.
+        # Без цих двох гілок пропущене рахувалось би застосованим: _apply
+        # на нерозвʼязаний uuid мовчки виходить, і звіт про це не дізнався б.
+        chain_ref = payload.get("chain")
+        if isinstance(chain_ref, dict) and chain_ref.get("id"):
+            if self._chains_reg.obj_of(chain_ref["id"]) is None:
+                return {"what": "chain", "id": chain_ref["id"]}
+            return None
+
+        clip_ref = payload.get("clip")
+        if isinstance(clip_ref, dict) and clip_ref.get("id"):
+            _track, clip = self._resolve_arr_clip(payload)
+            if clip is None:
+                return {"what": "arr_clip", "id": clip_ref["id"],
+                        "track": self._safe_name(track)}
+            return None
+
         scene_ref = payload.get("scene")
         if isinstance(scene_ref, dict) and scene_ref.get("id"):
             if self._resolve_scene(scene_ref) is None:

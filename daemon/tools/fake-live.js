@@ -781,6 +781,19 @@ function opGap(type, payload) {
     return null;
   }
 
+  // Ланцюг і кліп у лінійці адресуються власним uuid, повз сцену.
+  // Без цих гілок пропущене рахувалось би застосованим.
+  if (payload.chain?.id) {
+    if (!chainById(payload.chain.id)) return { what: 'chain', id: payload.chain.id };
+    return null;
+  }
+  if (payload.clip?.id) {
+    if (!arrClipById(payload.clip.id)) {
+      return { what: 'arr_clip', id: payload.clip.id, track: track?.name };
+    }
+    return null;
+  }
+
   if (payload.scene?.id) {
     const sidx = sceneIdx(payload.scene.id);
     if (sidx < 0) return { what: 'scene', id: payload.scene.id };
