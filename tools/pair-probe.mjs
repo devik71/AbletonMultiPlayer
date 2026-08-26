@@ -41,6 +41,29 @@ async function p1exec(actions) {
 const procs = [];
 let failed = 0;
 
+/** Трек, який знають обидві сторони: uuid + його індекс у живому Live.
+ *
+ *  Емулятор навмисно не привʼязує чужий uuid до інакше названого треку --
+ *  і правильно робить. Але через це будь-яка перевірка, що адресує
+ *  «трек 0», ламається на кожному сеті, де назви не збіглися з типовим
+ *  сетом емулятора. Тож питаємо обидві сторони і беремо спільне. */
+async function sharedTrack(l2) {
+  const snap = await p1exec([{ op: 'snapshot' }]);
+  const mine = (snap?.result?.snapshot?.tracks) || [];
+  const from = l2.out.length;
+  l2.stdin.write('state\n');
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline && !/"tempo"/.test(l2.out.slice(from))) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const text = l2.out.slice(from);
+  const theirs = new Set([...text.matchAll(/"id":\s*"([0-9a-f]{12})"/g)].map((m) => m[1]));
+  for (let i = 0; i < mine.length; i += 1) {
+    if (mine[i]?.id && theirs.has(mine[i].id)) return { id: mine[i].id, index: i };
+  }
+  return null;
+}
+
 function launch(name, file, args) {
   const p = spawn(process.execPath, [file, ...args], { cwd: join(root, 'daemon') });
   p.out = '';
@@ -95,9 +118,28 @@ try {
   await check('розбіжність можливостей називається поіменно', async () => {
     // Це головна цінність двох учасників: relay звіряє переліки типів
     // і каже, ЩО саме в партнера не спрацює -- замість «щось не так».
-    await waitFor(d2, /НЕСУМІСНІСТЬ: p1 не вміє застосовувати: /, 20000);
-    const line = (d2.out.match(/p1 не вміє застосовувати: ([^\n]+)/) || [])[1] || '';
-    console.log(`       p1 не вміє: ${line.split(' —')[0]}`);
+    //
+    // Розбіжність створюємо НАВМИСНО третім учасником, що вдає стару збірку.
+    // Раніше перевірка покладалась на те, що живий bridge відстає від
+    // емулятора -- і мовчки зламалась того дня, коли він наздогнав.
+    const lOld = launch('live-old', join(root, 'daemon/tools/fake-live.js'), [
+      '--udp-in', '19867', '--udp-out', '19868',
+      '--script', '0.7.0-fake', '--events', 'TransportSet,TempoSet',
+      '--project', STATE,
+    ]);
+    const dOld = launch('daemon-old', join(root, 'daemon/index.js'), [
+      '--author', 'pold', '--session', SESSION, '--relay', RELAY,
+      '--udp-in', '19867', '--udp-out', '19868',
+      '--state-dir', join(STATE, 'old'), '--project', STATE,
+    ]);
+    try {
+      await waitFor(dOld, /НЕСУМІСНІСТЬ: pold не вміє застосовувати: /, 25000);
+      const line = (dOld.out.match(/pold не вміє застосовувати: ([^\n]+)/) || [])[1] || '';
+      console.log(`       pold не вміє: ${line.split(' —')[0].slice(0, 60)}…`);
+    } finally {
+      dOld.kill();
+      lOld.kill();
+    }
   });
 
   await check('присутність: p2 бачить, куди дивиться p1', async () => {
@@ -158,8 +200,12 @@ try {
     // Довідник LOM каже про цю властивість різне: в одному місці R/W,
     // в аудиті -- read-only без observable. Перевіряємо обидва боки одразу:
     // чи запис узагалі проходить і чи listener побачив його як подію.
+    const shared = await sharedTrack(l2);
+    if (!shared) {
+      return console.log('       жодного спільного треку — сети розійшлись, перевірку пропущено');
+    }
     const from = l2.out.length;
-    const path = ['tracks', 0, 'clip_slots', 1];
+    const path = ['tracks', shared.index, 'clip_slots', 1];
     // lom_get віддає СЕРІАЛІЗОВАНИЙ обʼєкт за шляхом, тож властивість має
     // бути останньою ланкою шляху, а не окремим полем.
     const before = await p1exec([{ op: 'lom_get', path: [...path, 'has_stop_button'] }]);
