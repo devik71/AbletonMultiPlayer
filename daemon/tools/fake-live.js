@@ -368,7 +368,8 @@ const sendHello = () =>
       'TrackCreate,TrackDelete,TrackDuplicate,SceneCreate,SceneDelete,MixerSet,TrackToggle,DeviceParamSet,ObjectMetaSet,' +
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
       'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,ClipWarpSet,ChainMixerSet,' +
-      'ArrangementClipCreate,ArrangementClipMove,ArrangementClipDelete,ArrangementClipNotesSet').split(','),
+      'ArrangementClipCreate,ArrangementClipMove,ArrangementClipDelete,ArrangementClipNotesSet,' +
+      'SlotStopButtonSet').split(','),
   });
 
 function emit(type, payload) {
@@ -426,7 +427,7 @@ const snapshot = () => ({
   tempo: song.tempo,
   song: { ...song.props },
   cues: Object.entries(song.cues).map(([time, name]) => ({ time: Number(time), name })),
-  tracks: song.tracks.map((t, idx) => ({ ...t, idx })),
+  tracks: song.tracks.map((t, idx) => ({ ...t, idx, stop_off: [...(t.stopOff || [])] })),
   scenes: song.scenes.map((s, idx) => ({ ...s, idx })),
 });
 
@@ -710,6 +711,7 @@ const fullState = () => ({
     mixer: mixerState(t),
     devices: deviceEntries(t),
     clips: clipsState(t),
+    stop_off: [...(t.stopOff || [])],
     arrangement: arrState(t),
   })),
   aux_tracks: auxTracks().filter((t) => t.id).map((t) => ({
@@ -1222,6 +1224,15 @@ function apply(type, payload, gseq) {
       const clip = arrTarget ? arrTarget.clip : t.clips[s];
       if (!clip) break;   // tombstone: кліпа немає, подія мовчки не діє
       clip[payload.prop] = value;
+      break;
+    }
+    case 'SlotStopButtonSet': {
+      const t = trackById(payload.track?.id);
+      const s = sceneIdx(payload.scene?.id);
+      if (!t) return reject('невідомий трек');
+      if (s < 0) return reject('невідома сцена');
+      if (typeof payload.value !== 'boolean') return reject('стоп-кнопка має бути булевою');
+      (t.stopOff || (t.stopOff = new Set()))[payload.value ? 'delete' : 'add'](payload.scene.id);
       break;
     }
     case 'SceneTimingSet': {
@@ -1764,6 +1775,18 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       (chain.mix || (chain.mix = {}))[param] = value;
       emit('ChainMixerSet', { chain: { id: chain.id }, param, value });
       console.log(`ланцюг ${chain.name}: ${param} = ${value}`);
+      break;
+    }
+    case 'stopbtn': {
+      // stopbtn <трек> <сцена> <0|1> -- стоп-кнопка ПОРОЖНЬОГО слота теж має
+      // сенс: саме вона вирішує, чи зупинить трек запуск сцени.
+      const t = song.tracks[Number(rest[0]) || 0];
+      const scene = song.scenes[Number(rest[1]) || 0];
+      if (!t || !scene) return console.log('stopbtn <трек> <сцена> <0|1>');
+      const value = rest[2] !== '0';
+      (t.stopOff || (t.stopOff = new Set()))[value ? 'delete' : 'add'](scene.id);
+      emit('SlotStopButtonSet', { track: trackRef(t), scene: sceneRef(scene), value });
+      console.log(`слот ${rest[0]}/${rest[1]}: стоп-кнопка ${value ? 'є' : 'немає'}`);
       break;
     }
     case 'clipprop': {

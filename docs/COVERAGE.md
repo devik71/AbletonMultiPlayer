@@ -28,7 +28,11 @@ AbletonOSC — це RPC-поверхня: get/set/listen на властивос
 `SceneDelete`, `MixerSet` (volume, pan, sends, crossfader, cue),
 `TrackToggle` (mute, solo, arm), `DeviceParamSet` (включно з раками),
 `ObjectMetaSet` (name, color), `ClipCreate`, `ClipDelete`, `ClipNotesSet`,
-`ClipLoopSet`, `DeviceLoad`.
+`ClipLoopSet`, `DeviceLoad`, `SlotStopButtonSet`,
+`SampleLoad`, `SongPropSet`, `SceneTimingSet`, `ClipPropSet`, `ClipWarpSet`,
+`ChainMixerSet`, `CueSet`/`CueDelete`, `ReturnCreate`/`ReturnDelete`,
+`DeviceInsert`/`DeviceDelete`/`DeviceMove`,
+`ArrangementClipCreate`/`Move`/`Delete`/`NotesSet`.
 
 Плюс те, чого в AbletonOSC немає як класу: стабільна ідентичність, журнал
 із hash-chain, undo як подія, знімки стану, передача семплів, присутність.
@@ -57,7 +61,10 @@ AbletonOSC — це RPC-поверхня: get/set/listen на властивос
 `gain`, `pitch_coarse`, `pitch_fine`, `warping`, `warp_mode`, `muted`,
 `launch_mode`, `launch_quantization`, `legato`, `velocity_amount`, `groove`.
 Для audio-кліпів це половина звучання; ми зараз возимо лише межі й ноти.
-Плюс `clip_slot.has_stop_button` -- дрібниця, але вона змінює поведінку сцени.
+
+> `clip_slot.has_stop_button` закрито `SlotStopButtonSet`. Дрібницею воно
+> здавалось, поки не з'ясувалось, що йдеться про поведінку **порожнього**
+> слота: саме він вирішує, чи зупинить трек запуск сцени.
 
 ### Тир 3 — режими запису
 

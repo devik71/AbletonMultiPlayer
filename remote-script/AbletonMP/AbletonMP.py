@@ -52,6 +52,7 @@ APPLY_TYPES = [
     "ChainMixerSet",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
+    "SlotStopButtonSet",
 ]
 
 # Як емітити перенесення девайса. "move" -- один DeviceMove через
@@ -79,7 +80,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons"]
 
 STATE_VERSION = 1
 STATE_CHUNK_CHARS = 30000
@@ -195,7 +196,7 @@ class AbletonMP(ControlSurface):
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
             "scene_timing": {}, "clip_props": {}, "cues": None, "returns": None,
-            "warp": {}, "chain": {},
+            "warp": {}, "chain": {}, "stopbtn": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -384,6 +385,10 @@ class AbletonMP(ControlSurface):
                 break
             scene = scenes[i]
             self._listen(slot, "has_clip", self._make_slot_content_cb(track, scene, slot))
+            # Стоп-кнопка живе на СЛОТІ, а не на кліпі: вона є й у порожнього,
+            # і саме порожній слот зі стоп-кнопкою зупиняє трек на SceneLaunch.
+            self._listen(slot, "has_stop_button",
+                         self._make_stop_button_cb(track, scene, slot))
             try:
                 if slot.has_clip:
                     clip = slot.clip
@@ -759,6 +764,7 @@ class AbletonMP(ControlSurface):
             self._prime_notes()
             self._prime_metadata()
             self._prime_clip_loops()
+            self._prime_stop_buttons()
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
             self._prime_arrangement_clips()
@@ -783,6 +789,7 @@ class AbletonMP(ControlSurface):
             self._prime_notes()
             self._prime_metadata()
             self._prime_clip_loops()
+            self._prime_stop_buttons()
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
             self._prime_arrangement_clips()
@@ -862,6 +869,7 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_stop_buttons()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
@@ -951,6 +959,7 @@ class AbletonMP(ControlSurface):
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_stop_buttons()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
@@ -2677,6 +2686,7 @@ class AbletonMP(ControlSurface):
         self._rewire_tracks()
         self._prime_metadata()
         self._prime_clip_loops()
+        self._prime_stop_buttons()
         self._prime_all_clip_props()
         self._prime_all_clip_warp()
         self._prime_arrangement_clips()
@@ -2879,6 +2889,60 @@ class AbletonMP(ControlSurface):
                     pass
 
     # ------------------------------------------------------ loop і маркери
+
+    def _make_stop_button_cb(self, track, scene, slot):
+        def cb():
+            self._safe(self._on_stop_button, track, scene, slot)
+        return cb
+
+    def _stop_button_state(self, slot):
+        value = self._safe_attr(slot, "has_stop_button")
+        return None if value is None else bool(value)
+
+    def _on_stop_button(self, track, scene, slot):
+        """Стоп-кнопка слота змінилась.
+
+        Дискретний перемикач, тож без дебаунсу: один клац -- одна подія.
+        """
+        if not self._registry_ready or self._suppress_struct:
+            return
+        key = self._clip_key(track, scene)
+        if key is None:
+            return
+        value = self._stop_button_state(slot)
+        if value is None or self._mirror["stopbtn"].get(key) == value:
+            return
+        self._mirror["stopbtn"][key] = value
+        payload = self._clip_refs(track, scene)
+        payload["value"] = value
+        self._emit("SlotStopButtonSet", payload)
+
+    def _prime_stop_button(self, track, scene, slot):
+        key = self._clip_key(track, scene)
+        if key is None:
+            return
+        value = self._stop_button_state(slot)
+        if value is None:
+            self._mirror["stopbtn"].pop(key, None)
+        else:
+            self._mirror["stopbtn"][key] = value
+
+    def _prime_stop_buttons(self):
+        """Без прайму перший же перегляд слота виглядав би як зміна проти None."""
+        self._mirror["stopbtn"] = {}
+        try:
+            scenes = list(self._doc.scenes)
+        except Exception:
+            return
+        for track in self._doc.tracks:
+            try:
+                slots = list(track.clip_slots)
+            except Exception:
+                continue
+            for i, scene in enumerate(scenes):
+                if i >= len(slots):
+                    break
+                self._prime_stop_button(track, scene, slots[i])
 
     def _make_clip_loop_cb(self, track, scene, clip):
         def cb():
@@ -3426,6 +3490,7 @@ class AbletonMP(ControlSurface):
                 self._prime_notes()
                 self._prime_metadata()
                 self._prime_clip_loops()
+                self._prime_stop_buttons()
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
                 self._prime_arrangement_clips()
@@ -3576,6 +3641,7 @@ class AbletonMP(ControlSurface):
                 self._prime_clip_warp(track, scene, slot)
                 self._prime_metadata()
                 self._prime_clip_loops()
+                self._prime_stop_buttons()
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
                 self._prime_arrangement_clips()
@@ -3603,6 +3669,7 @@ class AbletonMP(ControlSurface):
                 self._prime_clip_warp(track, scene, slot)
                 self._prime_metadata()
                 self._prime_clip_loops()
+                self._prime_stop_buttons()
                 self._prime_all_clip_props()
                 self._prime_all_clip_warp()
                 self._prime_arrangement_clips()
@@ -3696,6 +3763,27 @@ class AbletonMP(ControlSurface):
                 actual = self._clip_loop_state(clip)
                 if actual is not None:
                     self._mirror["loop"][_key] = actual
+
+        elif etype == "SlotStopButtonSet":
+            value = payload.get("value")
+            if not isinstance(value, bool):
+                return self._warn("gseq %s: стоп-кнопка має бути булевою" % (gseq,))
+            track, scene, slot = self._resolve_clip_slot(payload, gseq)
+            if slot is None:
+                return
+            key = self._clip_key(track, scene)
+            if key is not None:
+                self._mirror["stopbtn"][key] = value   # ДО запису -- глушимо ехо
+            try:
+                slot.has_stop_button = value
+            except Exception as e:
+                self._warn("gseq %s: стоп-кнопка не записалась: %r" % (gseq, e))
+                if key is not None:
+                    actual = self._stop_button_state(slot)
+                    if actual is None:
+                        self._mirror["stopbtn"].pop(key, None)
+                    else:
+                        self._mirror["stopbtn"][key] = actual
 
         elif etype == "ClipNotesSet":
             track, scene, slot = self._resolve_clip_slot(payload, gseq)
@@ -4132,6 +4220,7 @@ class AbletonMP(ControlSurface):
             self._rewire_tracks()
             self._prime_metadata()
             self._prime_clip_loops()
+            self._prime_stop_buttons()
             self._prime_all_clip_props()
             self._prime_all_clip_warp()
             self._prime_arrangement_clips()
@@ -5324,6 +5413,7 @@ class AbletonMP(ControlSurface):
                 "mixer": self._state_mixer(track),
                 "devices": self._state_devices(track),
                 "clips": self._state_clips(track, doc_scenes),
+                "stop_off": self._state_stop_off(track, doc_scenes),
                 "arrangement": self._state_arrangement(track),
             })
 
@@ -5440,6 +5530,29 @@ class AbletonMP(ControlSurface):
                 entry["chain_path"] = chain_path
             devices.append(entry)
         return devices
+
+    def _state_stop_off(self, track, scenes):
+        """Сцени, у яких слот цього треку БЕЗ стоп-кнопки.
+
+        Перелічуємо саме вимкнені, бо ввімкнена -- стан Live за замовчуванням,
+        і перелік усіх слотів сету означав би тисячі подій на дрібницю.
+        Ціна асиметрії названа в PROTOCOL.md: знімок вирівнює лише вимкнені,
+        а в обидва боки сходить SlotStopButtonSet під час самої сесії.
+        """
+        out = []
+        try:
+            slots = list(track.clip_slots)
+        except Exception:
+            return out
+        for i, scene in enumerate(scenes):
+            if i >= len(slots):
+                break
+            sid = self._scenes_reg.id_of(scene, create=False)
+            if not sid:
+                continue
+            if self._stop_button_state(slots[i]) is False:
+                out.append(sid)
+        return out
 
     def _state_clips(self, track, scenes):
         clips = []
@@ -6693,6 +6806,9 @@ class AbletonMP(ControlSurface):
             ops.extend(self._mixer_ops(ref, track.get("mixer") or {}))
             ops.extend(self._device_ops(ref, track.get("devices") or []))
             ops.extend(self._clip_ops(ref, track.get("clips") or []))
+            for sid in track.get("stop_off") or []:
+                ops.append(("SlotStopButtonSet",
+                            {"track": ref, "scene": {"id": sid}, "value": False}))
 
         for aux in state.get("aux_tracks") or []:
             ref = {"id": aux.get("id"), "kind": aux.get("kind")}

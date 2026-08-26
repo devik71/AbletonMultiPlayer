@@ -1283,6 +1283,31 @@ try {
     }
   });
 
+  await check('стоп-кнопка слота доїжджає, і знімок везе саме вимкнені', async () => {
+    // Порожній слот зі стоп-кнопкою зупиняє трек на запуску сцени, а без неї
+    // трек продовжує грати. Тобто це не косметика, а те, як сет звучить.
+    const from = l2.out.length;
+    l1.stdin.write('stopbtn 0 1 0\n');
+    await waitFor(l2, /<- #\d+ SlotStopButtonSet .*"value":false/, 8000, from);
+    if (/SlotStopButtonSet ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер відхилив стоп-кнопку');
+    }
+
+    // У знімку перелічені саме вимкнені: ввімкнена -- стан за замовчуванням.
+    const shown = l2.out.length;
+    l2.stdin.write('state\n');
+    await waitFor(l2, /"tempo"/, 8000, shown);
+    if (!/"stop_off"/.test(l2.out.slice(shown))) {
+      throw new Error('знімок не везе стоп-кнопки');
+    }
+
+    // І назад: перемикач має ходити в обидва боки, інакше вимкнене
+    // лишалось би вимкненим назавжди.
+    const back = l1.out.length;
+    l2.stdin.write('stopbtn 0 1 1\n');
+    await waitFor(l1, /<- #\d+ SlotStopButtonSet .*"value":true/, 8000, back);
+  });
+
   await check('сенд у чужий Return відхиляється, а не їде не туди', async () => {
     // Індекс сенда -- позиція, а не адреса. Щойно набір Return-треків
     // розійшовся, той самий індекс означає інший ревер -- і мікс тихо
@@ -1486,10 +1511,10 @@ try {
     }
   });
 
-  await check('журнал: 129 подій, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 131 подія, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 129) throw new Error(`очікував 129 подій, у журналі ${lines.length}`);
+    if (lines.length !== 131) throw new Error(`очікував 131 подію, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

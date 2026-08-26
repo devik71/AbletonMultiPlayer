@@ -185,6 +185,17 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
 
     mixerDiff(where, my, their, add);
 
+    // Стоп-кнопка порожнього слота вирішує, чи зупинить трек запуск сцени:
+    // розбіжність тут чути не в мікшері, а в тому, що сет грає інакше.
+    const myStop = new Set(my.stop_off || []);
+    const theirStop = new Set(their.stop_off || []);
+    for (const sid of myStop) {
+      if (!theirStop.has(sid)) add(`${where}, сцена ${sid}: стоп-кнопки немає в тебе, у партнера є`);
+    }
+    for (const sid of theirStop) {
+      if (!myStop.has(sid)) add(`${where}, сцена ${sid}: стоп-кнопка є в тебе, у партнера немає`);
+    }
+
     const myClips = new Map((my.clips || []).map((c) => [clipKey(c), c]));
     const theirClips = new Map((their.clips || []).map((c) => [clipKey(c), c]));
     for (const [scene, clip] of theirClips) {

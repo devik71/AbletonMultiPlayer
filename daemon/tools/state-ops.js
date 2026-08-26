@@ -121,6 +121,11 @@ export function stateToOps(state) {
     const ref = { id: track.id };
     ops.push(...metaOps('track', ref, track), ...mixerOps(ref, track.mixer || {}),
       ...deviceOps(ref, track.devices || []), ...clipOps(ref, track.clips || []));
+    // Перелічені лише ВИМКНЕНІ стоп-кнопки: ввімкнена -- стан за замовчуванням,
+    // а перелік усіх слотів сету означав би тисячі подій на дрібницю.
+    for (const sid of track.stop_off || []) {
+      ops.push(['SlotStopButtonSet', { track: ref, scene: { id: sid }, value: false }]);
+    }
   }
   for (const aux of state.aux_tracks || []) {
     if (!aux.id || !aux.kind) continue;

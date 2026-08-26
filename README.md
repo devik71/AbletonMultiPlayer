@@ -78,6 +78,7 @@ Live (LOM)  ⇄  Bridge (Remote Script, Python, у процесі Live)
 | `ClipPropSet` | властивості кліпів: gain, warp, транспонування, launch mode, власний розмір такту — і для Session, і для лінійки |
 | `ClipWarpSet` | warp-маркери audio-кліпів: увесь набір однією подією |
 | `ChainMixerSet` | гучність, панорама й перемикачі ланцюга в раку — у Drum Rack це кожен пад |
+| `SlotStopButtonSet` | стоп-кнопка слота: порожній слот із нею зупиняє трек на запуску сцени |
 | `SampleLoad` | семпл у слот Session, на пад Drum Rack або в лінійку (адреса — шлях у теці проєкту) |
 | `SongPropSet` | розмір такту, квантизація запуску, тональність, петля Arrangement, punch |
 | `SceneTimingSet` | темп і метр сцени — увесь блок перевизначень разом |
