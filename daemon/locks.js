@@ -44,9 +44,12 @@ export function lockTarget(type, payload, registry) {
     return { object: `chain:${chain}`, label: 'ланцюг у раку' };
   }
 
-  if (type === 'ClipPropSet' || type === 'ClipWarpSet') {
+  if (type === 'ClipPropSet' || type === 'ClipWarpSet'
+      || type === 'ClipNotesSet' || type === 'ClipLoopSet') {
     // Лок на кліп цілком, а не на властивість: людина крутить один кліп,
-    // і показувати «зайнято» краще про нього, а не про окреме поле.
+    // і показувати «зайнято» краще про нього, а не про окреме поле. Тому
+    // всі чотири типи діляться одним обʼєктом лока -- це не збіг, а вимога:
+    // розійшовшись, вони блимали б у чужому UI двома різними «зайнято».
     const track = p.track?.id;
     // Кліп у лінійці має власний uuid і не має сцени
     const scene = p.clip?.id || p.scene?.id;
@@ -75,15 +78,6 @@ export function lockTarget(type, payload, registry) {
     if (!clip) return null;
     const track = trackName(registry, p.track?.id);
     return { object: `arrclip:${clip}`, label: [track, 'Arrangement'].filter(Boolean).join(' / ') };
-  }
-
-  if (type === 'ClipNotesSet' || type === 'ClipLoopSet') {
-    const track = p.track?.id;
-    // Кліп у лінійці має власний uuid і не має сцени
-    const scene = p.clip?.id || p.scene?.id;
-    if (!track || !scene) return null;
-    const names = [trackName(registry, track), sceneName(registry, scene)].filter(Boolean);
-    return { object: `clip:${track}:${scene}`, label: names.join(' / ') || null };
   }
 
   const id = p.track?.id;

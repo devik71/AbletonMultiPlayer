@@ -755,6 +755,21 @@ setInterval(() => {
 // окремої перевірки звіт рахував би пропущене як застосоване.
 const MISSING_LIMIT = 50;
 
+/** Ланцюг за uuid або за порядковим номером у плоскому обході всіх раків.
+ *  Був двічі скопійований по командах -- а копії саме такого й розходяться. */
+function findChain(ref) {
+  const all = [];
+  const collect = (container) => {
+    for (const rack of container.devices || []) {
+      for (const [, chains] of chainGroups(rack)) {
+        for (const c of chains) { all.push(c); collect(c); }
+      }
+    }
+  };
+  for (const t of allDeviceTracks()) collect(t);
+  return all.find((c) => c.id === ref) || all[Number(ref) || 0];
+}
+
 function opGap(type, payload) {
   if (['TempoSet', 'TransportSet', 'StopAllClips'].includes(type)) return null;
 
@@ -1730,16 +1745,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       break;
     }
     case 'chainname': {
-      const all = [];
-      const collect = (container) => {
-        for (const rack of container.devices || []) {
-          for (const [, chains] of chainGroups(rack)) {
-            for (const c of chains) { all.push(c); collect(c); }
-          }
-        }
-      };
-      for (const t of allDeviceTracks()) collect(t);
-      const chain = all.find((c) => c.id === rest[0]) || all[Number(rest[0]) || 0];
+      const chain = findChain(rest[0]);
       if (!chain) return console.log('немає такого ланцюга');
       const value = rest.slice(1).join(' ');
       chain.name = value;
@@ -1749,16 +1755,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }
     case 'chainmix': {
       // chainmix <uuid|idx> <param> <value>
-      const all = [];
-      const collect = (container) => {
-        for (const rack of container.devices || []) {
-          for (const [, chains] of chainGroups(rack)) {
-            for (const c of chains) { all.push(c); collect(c); }
-          }
-        }
-      };
-      for (const t of allDeviceTracks()) collect(t);
-      const chain = all.find((c) => c.id === rest[0]) || all[Number(rest[0]) || 0];
+      const chain = findChain(rest[0]);
       if (!chain) return console.log('немає такого ланцюга');
       const param = rest[1];
       if (CHAIN_TOGGLES.includes(param)) {

@@ -6055,7 +6055,7 @@ class AbletonMP(ControlSurface):
                 continue
             gaps.append({
                 "what": "group",
-                "track": track.get("names", {}).get("track") or self._safe_name(local),
+                "track": self._safe_name(local) or track.get("name"),
                 "name": (theirs or mine or {}).get("name"),
                 "here": bool(mine),
             })
@@ -6068,9 +6068,10 @@ class AbletonMP(ControlSurface):
     def _arrangement_gaps(self, state, budget):
         """Чим різняться Arrangement у нас і в партнера.
 
-        Подій для Arrangement ще немає, тож розбіжність не лікується нічим,
-        крім рук -- і саме тому її треба назвати вголос. Мовчазний розсинхрон
-        тут найгірший: у Session видно порожній слот, а лінійку партнера
+        Події для лінійки є, але знімок структури в ній не будує -- тобто
+        розбіжність, що вже сталася, знімком не лікується, лише руками.
+        Саме тому її треба назвати вголос: мовчазний розсинхрон тут
+        найгірший, бо в Session видно порожній слот, а лінійку партнера
         не видно взагалі.
         """
         gaps = []
