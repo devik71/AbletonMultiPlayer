@@ -22,6 +22,42 @@ const paramMap = (d) => new Map((d.parameters || [])
 /** Ті самі семпли, розтягнуті по-різному, звучать по-різному. */
 const warpKey = (list) => (list || []).map((m) => `${num(m.beat_time)}:${num(m.sample_time)}`).join(',');
 
+/** Межі кліпу цілком: петля й маркери -- це пʼять полів, які має сенс
+ *  порівнювати разом, бо поодинці вони нічого не означають. */
+const LOOP_PROPS = ['looping', 'loop_start', 'loop_end', 'start_marker', 'end_marker'];
+const loopKey = (l) => (l ? LOOP_PROPS.map((p) => `${p}=${num(l[p])}`).join(' ') : '');
+
+/** Мікшер: гучність, панорама й перемикачі. Досі `diff` мовчав про них
+ *  узагалі -- порівнювались лише сенди, тобто розʼїхані фейдери двох машин
+ *  звіт називав повним збігом. */
+const MIX_SCALARS = ['volume', 'panning', 'crossfader', 'cue_volume', 'crossfade_assign'];
+const MIX_TOGGLES = ['mute', 'solo', 'arm'];
+function mixerDiff(where, my, their, add) {
+  const a = my?.mixer || {};
+  const b = their?.mixer || {};
+  for (const param of MIX_SCALARS) {
+    if (a[param] === undefined && b[param] === undefined) continue;
+    if (num(a[param]) === num(b[param])) continue;
+    add(`${where}: ${param} ${a[param] ?? '—'} проти ${b[param] ?? '—'}`);
+  }
+  for (const param of MIX_TOGGLES) {
+    if (a[param] === undefined && b[param] === undefined) continue;
+    if (!!a[param] === !!b[param]) continue;
+    add(`${where}: ${param} ${a[param] ? 'увімкнено' : 'вимкнено'}`
+      + ` проти ${b[param] ? 'увімкненого' : 'вимкненого'}`);
+  }
+  const mySends = new Map((a.sends || []).map((x) => [x.index, num(x.value)]));
+  const theirSends = new Map((b.sends || []).map((x) => [x.index, num(x.value)]));
+  for (const [idx, value] of mySends) {
+    if (theirSends.has(idx) && theirSends.get(idx) !== value) {
+      add(`${where}: сенд ${idx} ${value} проти ${theirSends.get(idx)}`);
+    }
+  }
+}
+
+/** Канонічний рядок плоского блоку: порядок ключів не має значення. */
+const loopKeyless = (o) => (o ? Object.keys(o).sort().map((k) => `${k}=${num(o[k])}`).join(' ') : '');
+
 /** Розбіжності між моїм і чужим знімком. Порожній масив -- усе збігається. */
 export function compareStates(mine, theirs, { limit = 40 } = {}) {
   const out = [];
@@ -65,6 +101,12 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       if (num(my[param]) === num(their[param])) continue;
       add(`ланцюг ${id}: ${param} ${my[param] ?? '—'} проти ${their[param] ?? '—'}`);
     }
+    // Назва пада -- те, за чим людина його впізнає: «Kick» проти «Chain 1»
+    // виглядає як інший інструмент ще до того, як його почули.
+    for (const prop of ['name', 'color']) {
+      if ((my[prop] ?? null) === (their[prop] ?? null)) continue;
+      add(`ланцюг ${id}: ${prop} ${my[prop] ?? '—'} проти ${their[prop] ?? '—'}`);
+    }
   }
 
   for (const [kind, key] of [['трек', 'tracks'], ['сцена', 'scenes']]) {
@@ -75,8 +117,18 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     }
     for (const [id, obj] of my) {
       if (!their.has(id)) add(`${kind} ${nameOf(obj, id)} є в тебе, у партнера немає`);
-      else if (obj.name !== their.get(id).name) {
-        add(`${kind} ${id}: у тебе «${obj.name}», у партнера «${their.get(id).name}»`);
+      else {
+        const other = their.get(id);
+        if (obj.name !== other.name) {
+          add(`${kind} ${id}: у тебе «${obj.name}», у партнера «${other.name}»`);
+        }
+        if ((obj.color ?? null) !== (other.color ?? null)) {
+          add(`${kind} ${nameOf(obj, id)}: колір ${obj.color ?? '—'} проти ${other.color ?? '—'}`);
+        }
+        // Темп сцени мовчки перемикає темп в одного і не перемикає в іншого
+        if (key === 'scenes' && loopKeyless(obj.timing) !== loopKeyless(other.timing)) {
+          add(`сцена ${nameOf(obj, id)}: темп/метр сцени різні`);
+        }
       }
     }
   }
@@ -89,7 +141,12 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     if (!myAux.has(id)) add(`${obj.kind || "aux"} ${nameOf(obj, id)} є в партнера, у тебе немає`);
   }
   for (const [id, obj] of myAux) {
-    if (!theirAux.has(id)) add(`${obj.kind || "aux"} ${nameOf(obj, id)} є в тебе, у партнера немає`);
+    if (!theirAux.has(id)) {
+      add(`${obj.kind || "aux"} ${nameOf(obj, id)} є в тебе, у партнера немає`);
+      continue;
+    }
+    // Гучність Return -- це те, наскільки чути ревер у всьому сеті одразу
+    mixerDiff(`${obj.kind || 'aux'} ${nameOf(obj, id)}`, obj, theirAux.get(id), add);
   }
   const myReturns = (mine?.aux_tracks || []).filter((t) => t.kind === "return").length;
   const theirReturns = (theirs?.aux_tracks || []).filter((t) => t.kind === "return").length;
@@ -123,17 +180,10 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       if (!differing.length) continue;
       const shown = differing.slice(0, 3).map(([name, value]) => `${name.split('#')[0]} ${value}≠${b.get(name)}`);
       add(`${where}, ${mine.device?.class_display_name}: розходяться ${differing.length} параметрів`
-        + ` (${shown.join(
-)})`);
+        + ` (${shown.join(', ')})`);
     }
 
-    const mySends = new Map((my.mixer?.sends || []).map((x) => [x.index, num(x.value)]));
-    const theirSends = new Map((their.mixer?.sends || []).map((x) => [x.index, num(x.value)]));
-    for (const [idx, value] of mySends) {
-      if (theirSends.has(idx) && theirSends.get(idx) !== value) {
-        add(`${where}: сенд ${idx} ${value} проти ${theirSends.get(idx)}`);
-      }
-    }
+    mixerDiff(where, my, their, add);
 
     const myClips = new Map((my.clips || []).map((c) => [clipKey(c), c]));
     const theirClips = new Map((their.clips || []).map((c) => [clipKey(c), c]));
@@ -161,6 +211,9 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       if (warpKey(clip.warp) !== warpKey(other.warp)) {
         add(`${where}, сцена ${scene}: warp-маркери різні`
           + ` (${(clip.warp || []).length} проти ${(other.warp || []).length})`);
+      }
+      if (loopKey(clip.loop) !== loopKey(other.loop)) {
+        add(`${where}, сцена ${scene}: межі кліпу різні`);
       }
     }
 
@@ -190,6 +243,12 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       }
       if (warpKey(clip.warp) !== warpKey(other.warp)) {
         add(`${where}, лінійка: warp-маркери різні`);
+      }
+      if (num(clip.length) !== num(other.length)) {
+        add(`${where}, лінійка: довжина ${num(clip.length)} проти ${num(other.length)}`);
+      }
+      if (loopKey(clip.loop) !== loopKey(other.loop)) {
+        add(`${where}, лінійка: межі кліпу різні`);
       }
       const mineN = (clip.notes || []).length;
       const theirN = (other.notes || []).length;

@@ -126,3 +126,52 @@ test('розбіжність у кліпах лінійки називаєтьс
   assert.match(other, /є в тебе, у партнера немає/);
   assert.match(other, /є в партнера, у тебе немає/);
 });
+
+test('розʼїхані фейдери названі: досі diff порівнював лише сенди', () => {
+  const state = (volume, mute) => ({
+    tempo: 120,
+    tracks: [{ id: 't1', name: 'Bass', mixer: { volume, mute, sends: [] }, clips: [] }],
+    aux_tracks: [{ id: 'r1', kind: 'return', name: 'Reverb', mixer: { volume: 0.5 } }],
+    scenes: [],
+  });
+  const out = compareStates(state(0.85, false), state(0.4, true));
+  assert.ok(out.some((l) => l.includes('volume')), `гучність не названа: ${out.join(' | ')}`);
+  assert.ok(out.some((l) => l.includes('mute')), `mute не названий: ${out.join(' | ')}`);
+});
+
+test('гучність Return порівнюється: від неї залежить увесь сет', () => {
+  const state = (volume) => ({
+    tracks: [],
+    aux_tracks: [{ id: 'r1', kind: 'return', name: 'Reverb', mixer: { volume } }],
+    scenes: [],
+  });
+  const out = compareStates(state(0.7), state(0.2));
+  assert.ok(out.some((l) => l.includes('Reverb') && l.includes('volume')),
+    `Return не порівняний: ${out.join(' | ')}`);
+});
+
+test('різні межі кліпу -- це розбіжність, а не збіг', () => {
+  const state = (loopEnd) => ({
+    tracks: [{
+      id: 't1', name: 'Drums', mixer: {},
+      clips: [{ scene: { id: 's1' }, clip: { length: 4 },
+        loop: { looping: true, loop_start: 0, loop_end: loopEnd } }],
+      arrangement: [{ id: 'a1', start_time: 0, length: 8,
+        loop: { looping: true, loop_start: 0, loop_end: loopEnd } }],
+    }],
+    scenes: [{ id: 's1', name: 'A' }],
+  });
+  const out = compareStates(state(4), state(2));
+  assert.equal(out.filter((l) => l.includes('межі кліпу')).length, 2,
+    `межі не названі з обох боків: ${out.join(' | ')}`);
+});
+
+test('темп сцени й колір треку теж розбіжність', () => {
+  const state = (tempo, color) => ({
+    tracks: [{ id: 't1', name: 'Bass', color, mixer: {}, clips: [] }],
+    scenes: [{ id: 's1', name: 'A', timing: { tempo, tempo_enabled: true } }],
+  });
+  const out = compareStates(state(120, 16711680), state(140, 255));
+  assert.ok(out.some((l) => l.includes('темп/метр')), `темп сцени не названий: ${out.join(' | ')}`);
+  assert.ok(out.some((l) => l.includes('колір')), `колір не названий: ${out.join(' | ')}`);
+});
