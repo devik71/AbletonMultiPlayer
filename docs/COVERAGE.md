@@ -32,7 +32,8 @@ AbletonOSC — це RPC-поверхня: get/set/listen на властивос
 `SampleLoad`, `SongPropSet`, `SceneTimingSet`, `ClipPropSet`, `ClipWarpSet`,
 `ChainMixerSet`, `CueSet`/`CueDelete`, `ReturnCreate`/`ReturnDelete`,
 `DeviceInsert`/`DeviceDelete`/`DeviceMove`,
-`ArrangementClipCreate`/`Move`/`Delete`/`NotesSet`.
+`ArrangementClipCreate`, `ArrangementClipMove`,
+`ArrangementClipDelete`, `ArrangementClipNotesSet`.
 
 Плюс те, чого в AbletonOSC немає як класу: стабільна ідентичність, журнал
 із hash-chain, undo як подія, знімки стану, передача семплів, присутність.

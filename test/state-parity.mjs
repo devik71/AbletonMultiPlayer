@@ -98,3 +98,16 @@ test('прогалини описані з обох боків і мають л�
   assert.deepStrictEqual([...py].filter((k) => !described.has(k)).sort(), [],
     'демон не має тексту для прогалини');
 });
+
+test('кожен застосовний тип названий у документації', () => {
+  // Документація, що відстала від коду, гірша за відсутню: людина шукає
+  // подію в переліку, не знаходить і робить висновок, що її немає.
+  // Так README цілий реліз описував стан на девʼять типів раніше.
+  const docs = ['README.md', 'docs/COVERAGE.md', 'docs/PROTOCOL.md']
+    .map((p) => readFileSync(join(root, p), 'utf8')).join('\n');
+  const block = bridge.slice(bridge.indexOf('APPLY_TYPES'), bridge.indexOf('CLIP_PROPS'));
+  const applied = [...new Set([...block.matchAll(/"([A-Z][A-Za-z]+)"/g)].map((m) => m[1]))];
+  assert.ok(applied.length >= 20, `APPLY_TYPES прочитано не повністю: ${applied.length}`);
+  const silent = applied.filter((t) => !docs.includes(t)).sort();
+  assert.deepStrictEqual(silent, [], `тип є в коді, але не названий у docs: ${silent.join(', ')}`);
+});
