@@ -2343,17 +2343,32 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case '':
       break;
     default:
+      // Довідка мусить перелічувати ВСІ команди: інакше під час прогону
+      // парою людина шукає спосіб відтворити баг і не знаходить його тут,
+      // хоча він є. Перевіряє це test/announce.mjs.
       console.log([
-        'play | stop | tempo <bpm>',
-        'fullstate -- повний знімок сету чанками',
-        'look <track|return:N|master> [scene] | view',
-        'loop <track> <scene> <start> <end> | duptrack <track>',
-        'load <track> <uri> [category]',
-        'launch <t> <s> | scene <n> | stopclip <t> | stopall',
-        'note <t> <s> <pitch> <start> <duration> [velocity] | delnote <t> <s> <pitch> <start> | delclip <t> <s>',
-        'device <track> <device[/chain/device...]> <parameter> <value> | vol <t> <value> | pan <t> <value> | send <t> <index> <value>',
-        'addtrack [midi|audio] [idx] | deltrack <t> | addscene [idx] | delscene <n>',
-        'meta <track:N|return:N|master|scene:N|clip:T:S> <name|color> <value> | rename <t> <name> | move <from> <to> | state',
+        'транспорт: play | stop | tempo <bpm>',
+        'вид:       look <track|return:N|master> [scene] | view',
+        'стан:      state | fullstate -- повний знімок сету чанками',
+        'запуск:    launch <t> <s> | scene <n> | stopclip <t> | stopall',
+        'структура: addtrack [midi|audio] [idx] | deltrack <t> | duptrack <t>',
+        '           addscene [idx] | delscene <n> | addreturn [name] | delreturn <n>',
+        'мікшер:    vol <t> <v> | pan <t> <v> | send <t> <idx> <v> | mix <t> <param> <v>',
+        '           mute|solo|arm <t> [0|1] | toggle <t> <param> | xfade <t> <-1|0|1>',
+        'девайси:   device <track> <device[/chain/device...]> <parameter> <value>',
+        '           adddevice <t> <name> [idx] | deldevice <t> <idx> | movedevice <t> <from> <to>',
+        '           movemode move|pair | load <track> <uri> [category]',
+        'ланцюги:   chainmix <ланцюг> volume|panning|mute|solo <v> | chainname <ланцюг> <name>',
+        'кліпи:     note <t> <s> <pitch> <start> <dur> [vel] | delnote <t> <s> <pitch> <start>',
+        '           delclip <t> <s> | loop <t> <s> <start> <end> | clipprop <t> <s> <prop> <v>',
+        '           warp <t> <s> <доля:семпл> ... | stopbtn <t> <s> <0|1>',
+        'лінійка:   arr <t> <s> <доля> | movearr <t> <idx> <доля> | delarr <t> <idx>',
+        '           arrnote <t> <idx> <pitch> <start> <dur> [vel]',
+        'семпли:    dropsample <t> <s> <шлях> | droppad <t> <нота> <шлях>',
+        'пісня:     songprop <prop> <value> | scenetiming <n> [tempo] [num] [den]',
+        '           cue <доля> [name] | delcue <доля>',
+        'назви:     meta <track:N|return:N|master|scene:N|clip:T:S> <name|color> <v>',
+        '           rename <t> <name> | move <from> <to>',
       ].join('\n'));
   }
 });

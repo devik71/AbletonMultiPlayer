@@ -59,3 +59,23 @@ test('bridge оголошує рівно ті типи, які застосов�
   const missing = [...announced].filter((t) => !applied.has(t)).sort();
   assert.deepEqual(missing, [], `оголошує, але не застосовує: ${missing.join(', ')}`);
 });
+
+test('довідка емулятора перелічує всі його команди', () => {
+  // Під час прогону парою людина шукає в довідці спосіб відтворити баг.
+  // Команда, якої там немає, вважається неіснуючою -- так довідка відстала
+  // на девʼятнадцять команд і не згадувала ні лінійку, ні семпли, ні локатори.
+  const src = readFileSync(join(root, 'daemon/tools/fake-live.js'), 'utf8');
+  const commands = [...src.matchAll(/^ {4}case '([a-z]+)':/gm)].map((m) => m[1]);
+  assert.ok(commands.length >= 40, `команд знайдено лише ${commands.length}`);
+
+  const from = src.lastIndexOf('console.log([');
+  const help = src.slice(from, src.indexOf('].join(', from));
+  assert.ok(help.length > 200, 'довідку не знайдено');
+
+  // Розбираємо довідку на слова, а не шукаємо підрядок: інакше «note»
+  // зарахувалось би через «delnote», і половина команд рахувалась би
+  // описаною, не бувши описаною.
+  const words = new Set(help.split(/[^a-z]+/i).filter(Boolean));
+  const silent = [...new Set(commands.filter((c) => !words.has(c)))].sort();
+  assert.deepEqual(silent, [], `команда є, але в довідці її немає: ${silent.join(', ')}`);
+});
