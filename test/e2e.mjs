@@ -1028,6 +1028,49 @@ try {
     }
   });
 
+  await check('watch сам знаходить розходження і мовчить про решту', async () => {
+    // Розводимо машини навмисно: apply знімка нічого не емітить, тож p1 про
+    // зміну не дізнається -- рівно та ситуація, заради якої watch і є.
+    const built = d2.out.length;
+    l2.stdin.write('fullstate\n');
+    await waitFor(d2, /state: знімок \d+ зібрано/, 10000, built);
+    const clean = join(tmp, 'watch-clean.json');
+    const source = JSON.parse(readFileSync(join(tmp, 'p2.e2e.state.json'), 'utf8'));
+    writeFileSync(clean, JSON.stringify(source));
+
+    const drifted = JSON.parse(JSON.stringify(source));
+    drifted.tracks.find((t) => t.id).name = 'WatchDrift';
+    const bad = join(tmp, 'watch-drift.json');
+    writeFileSync(bad, JSON.stringify(drifted));
+
+    const applied = d2.out.length;
+    d2.stdin.write(`apply ${bad}\n`);
+    await waitFor(d2, /знімок застосовано: \d+ з \d+$/m, 15000, applied);
+
+    const from = d2.out.length;
+    d2.stdin.write('watch p1 1\n');
+    await waitFor(d2, /стежу за розходженням з p1/, 8000, from);
+    await waitFor(d2, /розбіжності з p1 \(\d+\) — помітило спостереження:/, 25000, from);
+    if (!/WatchDrift/.test(d2.out.slice(from))) {
+      throw new Error('спостереження не назвало розходження поіменно');
+    }
+
+    // Головна властивість -- тиша про все решта. Спостереження, яке звітує
+    // про кожен отриманий знімок, через десять хвилин перестають читати.
+    if (/знімок p1 отримано/.test(d2.out.slice(from))) {
+      throw new Error('спостереження звітує про кожен знімок замість мовчати');
+    }
+
+    const off = d2.out.length;
+    d2.stdin.write('watch off\n');
+    await waitFor(d2, /спостереження за p1 вимкнено/, 8000, off);
+
+    // Повертаємо p2 як було, щоб наступні перевірки не будувались на дрейфі
+    const back = d2.out.length;
+    d2.stdin.write(`apply ${clean}\n`);
+    await waitFor(d2, /знімок застосовано: \d+ з \d+$/m, 15000, back);
+  });
+
   await check('чужий кліп в Arrangement, якого в нас немає, називається вголос', async () => {
     // Подія могла не доїхати -- партнер був офлайн, гілка розійшлась.
     // Тоді єдине чесне -- не мовчати про різницю.
