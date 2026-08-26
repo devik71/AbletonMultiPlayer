@@ -494,6 +494,28 @@ const deviceEntries = (track) => {
   return out;
 };
 
+const CLIP_LOOP_PROPS = ['looping', 'loop_start', 'loop_end', 'start_marker', 'end_marker'];
+
+// Властивості й warp у моделі лежать просто на кліпі -- ClipPropSet пише
+// clip[prop], ClipWarpSet пише clip.warp_markers. У знімок вони мусять
+// потрапити під тими самими іменами, що й у bridge, інакше емулятор
+// «підтверджує» знімок, якого насправді ніхто не везе.
+const clipShape = (clip) => {
+  const out = {};
+  const props = {};
+  for (const prop of Object.keys(CLIP_PROPS)) {
+    if (clip[prop] !== undefined) props[prop] = clip[prop];
+  }
+  if (Object.keys(props).length) out.props = props;
+  if (clip.warp_markers?.length) out.warp = clip.warp_markers;
+  const loop = {};
+  for (const prop of CLIP_LOOP_PROPS) {
+    if (clip[prop] !== undefined) loop[prop] = clip[prop];
+  }
+  if (Object.keys(loop).length) out.loop = loop;
+  return out;
+};
+
 const clipsState = (track) => (track.clips || []).map((clip, idx) => {
   const scene = song.scenes[idx];
   if (!clip || !scene?.id) return null;
@@ -502,12 +524,7 @@ const clipsState = (track) => (track.clips || []).map((clip, idx) => {
     clip: { length: clip.length, name: clip.name, color: clip.color },
   };
   if (clip.kind === 'midi') entry.notes = clip.notes;
-  const loop = {};
-  for (const prop of ['looping', 'loop_start', 'loop_end', 'start_marker', 'end_marker']) {
-    if (clip[prop] !== undefined) loop[prop] = clip[prop];
-  }
-  if (Object.keys(loop).length) entry.loop = loop;
-  return entry;
+  return { ...entry, ...clipShape(clip) };
 }).filter(Boolean);
 
 // ------------------------------------------------------- Arrangement (мірror)
@@ -519,15 +536,21 @@ const clipsState = (track) => (track.clips || []).map((clip, idx) => {
 
 const arrOf = (t) => (t.arrangement || (t.arrangement = []));
 
-const arrState = (t) => arrOf(t).map((c) => ({
-  id: c.id,
-  start_time: c.start_time,
-  end_time: c.start_time + c.length,
-  length: c.length,
-  name: c.name,
-  color: c.color,
-  is_midi: true,
-}));
+const arrState = (t) => arrOf(t).map((c) => {
+  const isMidi = c.kind !== 'audio';
+  const entry = {
+    id: c.id,
+    start_time: c.start_time,
+    end_time: c.start_time + c.length,
+    length: c.length,
+    name: c.name,
+    color: c.color,
+    is_midi: isMidi,
+    ...clipShape(c),
+  };
+  if (isMidi && c.notes) entry.notes = c.notes;
+  return entry;
+});
 
 // Емісія подій Arrangement. Дзеркало _diff_arrangement: переїзд розпізнається
 // за тим, що вижив сам обʼєкт (тут -- його uuid), а не за схожістю кліпів.
