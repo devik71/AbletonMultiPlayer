@@ -66,6 +66,12 @@ function ask() {
         if (data.needs_confirmation) {
             out += "\n\nNeeds confirmation.";
         }
+        // Блоки -- першими й коротко. У довгому плані сирий перелік дій
+        // займає весь екран, а питання завжди те саме: докуди дійшло.
+        var blocks = stageLines(data);
+        if (blocks) {
+            out += "\n\nBlocks:\n" + blocks;
+        }
         if (data.actions && data.actions.length) {
             out += "\n\nActions:\n" + stringify(data.actions);
         }
@@ -77,6 +83,26 @@ function ask() {
         }
         setresponse(out || stringify(data));
     });
+}
+
+var STAGE_STATUS = { ok: "done", failed: "failed", confirm: "needs confirmation" };
+
+/** Рядок на блок: номер, назва, стан. "" -- блоків менше двох, показувати нічого. */
+function stageLines(data) {
+    var stages = (data && data.stages) || [];
+    if (stages.length < 2) {
+        return "";
+    }
+    var progress = (data && data.progress) || [];
+    var lines = [];
+    for (var i = 0; i < stages.length; i++) {
+        var done = progress[i];
+        var status = done ? (STAGE_STATUS[done.status] || done.status) : "not started";
+        var title = stages[i].title || ("block " + (i + 1));
+        lines.push((i + 1) + ". " + title + " — " + status +
+            " (" + (stages[i].actions || 0) + ")");
+    }
+    return lines.join("\n");
 }
 
 function snapshot() {

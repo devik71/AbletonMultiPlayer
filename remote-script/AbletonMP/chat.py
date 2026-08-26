@@ -367,22 +367,65 @@ const messages = $("messages");
 const tokenInput = $("token");
 tokenInput.value = localStorage.getItem("abletonmp_token") || "";
 
+const STATUS_TEXT = {ok: "done", failed: "failed", confirm: "needs confirmation"};
+
+// Дії, які ще НЕ виконались. Плоский actions -- це блоки підряд, тож
+// пропустити треба рівно стільки, скільки їх у блоках зі статусом ok.
+// Без цього кнопка переганяла б успішні блоки ще раз.
+function pendingActions(extra) {
+  if (!extra || !Array.isArray(extra.actions) || !extra.actions.length) return [];
+  const stages = Array.isArray(extra.stages) ? extra.stages : [];
+  const progress = Array.isArray(extra.progress) ? extra.progress : [];
+  if (!stages.length || !progress.length) return extra.executed ? [] : extra.actions;
+  let done = 0;
+  for (let i = 0; i < progress.length && i < stages.length; i++) {
+    if (progress[i].status !== "ok") break;
+    done += Number(stages[i].actions) || 0;
+  }
+  return extra.actions.slice(done);
+}
+
+function stageSummary(extra) {
+  const stages = Array.isArray(extra && extra.stages) ? extra.stages : [];
+  if (stages.length < 2) return null;
+  const progress = Array.isArray(extra.progress) ? extra.progress : [];
+  const lines = stages.map((stage, i) => {
+    const done = progress[i];
+    const status = done ? (STATUS_TEXT[done.status] || done.status) : "not started";
+    const title = stage.title || ("block " + (i + 1));
+    return (i + 1) + ". " + title + " — " + status + " (" + (stage.actions || 0) + ")";
+  });
+  return lines.join("\n");
+}
+
 function add(role, text, extra, isError) {
   const el = document.createElement("div");
   el.className = "msg " + role + (isError ? " error" : "");
   el.textContent = text || "";
   if (extra !== undefined) {
+    // Підсумок по блоках -- окремо й першим: у сирому JSON його не видно
+    // серед знімка й результатів, а це найголовніше в довгому плані.
+    const summary = stageSummary(extra);
+    if (summary) {
+      const head = document.createElement("pre");
+      head.textContent = summary;
+      head.style.opacity = "0.85";
+      el.appendChild(head);
+    }
     const pre = document.createElement("pre");
     pre.textContent = JSON.stringify(extra, null, 2);
     el.appendChild(pre);
-    if (extra && Array.isArray(extra.actions) && extra.actions.length && !extra.executed) {
+    const pending = pendingActions(extra);
+    if (pending.length) {
       const run = document.createElement("button");
-      run.textContent = "Run actions";
+      run.textContent = pending.length === (extra.actions || []).length
+        ? "Run actions"
+        : "Run remaining " + pending.length;
       run.style.marginTop = "8px";
       run.onclick = async () => {
         run.disabled = true;
         try {
-          const result = await api("/api/exec", {actions: extra.actions});
+          const result = await api("/api/exec", {actions: pending});
           add("assistant", "Executed", result);
         } catch (err) {
           add("assistant", err.message, undefined, true);
