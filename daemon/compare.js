@@ -58,6 +58,31 @@ function mixerDiff(where, my, their, add) {
 /** Канонічний рядок плоского блоку: порядок ключів не має значення. */
 const loopKeyless = (o) => (o ? Object.keys(o).sort().map((k) => `${k}=${num(o[k])}`).join(' ') : '');
 
+/** Позиція в долях, а поруч у тактах -- якщо розмір такту відомий.
+ *
+ *  Доля в LOM -- чверть незалежно від знаменника, тож такт займає
+ *  numerator * 4 / denominator долі: у 6/8 це три долі, а не шість.
+ *  Такт саме ПОРУЧ, а не замість: доля -- те, що реально лежить у знімку. */
+const positionWith = (song) => {
+  const bar = (value) => {
+    const n = song?.signature_numerator;
+    const d = song?.signature_denominator;
+    if (!(n > 0) || !(d > 0)) return '';
+    const barBeats = (n * 4) / d;
+    if (!(barBeats > 0)) return '';
+    const index = Math.floor(value / barBeats) + 1;
+    const within = value - (index - 1) * barBeats;
+    return ` (такт ${index}.${+(within + 1).toFixed(2)})`;
+  };
+  // Два відмінки, бо рядки читає людина: «на 16-й долі», але «проти 32-ї долі».
+  const form = (ending) => (beats) => {
+    const value = num(beats);
+    if (typeof value !== 'number') return String(beats);
+    return `${value}-${ending} долі${bar(value)}`;
+  };
+  return { at: form('й'), gen: form('ї') };
+};
+
 /** Розбіжності між моїм і чужим знімком. Порожній масив -- усе збігається. */
 export function compareStates(mine, theirs, { limit = 40 } = {}) {
   const out = [];
@@ -66,6 +91,8 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
   // і «більше немає» -- дуже різні новини.
   const HARD_CAP = 2000;
   const add = (line) => { if (out.length < HARD_CAP) out.push(line); };
+  // Розмір такту беремо зі СВОГО знімка: він і є системою координат читача.
+  const { at, gen } = positionWith(mine?.song);
 
   if (num(mine?.tempo) !== num(theirs?.tempo)) {
     add(`темп: у тебе ${mine?.tempo}, у партнера ${theirs?.tempo}`);
@@ -82,12 +109,12 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
   const myCues = new Map((mine?.cues || []).map((c) => [num(c.time), c.name || '']));
   const theirCues = new Map((theirs?.cues || []).map((c) => [num(c.time), c.name || '']));
   for (const [time, name] of theirCues) {
-    if (!myCues.has(time)) add(`локатор «${name}» на ${time}-й долі є в партнера, у тебе немає`);
+    if (!myCues.has(time)) add(`локатор «${name}» на ${at(time)} є в партнера, у тебе немає`);
   }
   for (const [time, name] of myCues) {
-    if (!theirCues.has(time)) add(`локатор «${name}» на ${time}-й долі є в тебе, у партнера немає`);
+    if (!theirCues.has(time)) add(`локатор «${name}» на ${at(time)} є в тебе, у партнера немає`);
     else if (theirCues.get(time) !== name) {
-      add(`локатор на ${time}-й долі: у тебе «${name}», у партнера «${theirCues.get(time)}»`);
+      add(`локатор на ${at(time)}: у тебе «${name}», у партнера «${theirCues.get(time)}»`);
     }
   }
 
@@ -234,17 +261,17 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     const theirArrMap = new Map((their.arrangement || []).filter((c) => c.id).map((c) => [c.id, c]));
     for (const [id, clip] of theirArrMap) {
       if (!myArrMap.has(id)) {
-        add(`${where}: кліп у лінійці на ${num(clip.start_time)}-й долі є в партнера, у тебе немає`);
+        add(`${where}: кліп у лінійці на ${at(clip.start_time)} є в партнера, у тебе немає`);
       }
     }
     for (const [id, clip] of myArrMap) {
       const other = theirArrMap.get(id);
       if (!other) {
-        add(`${where}: кліп у лінійці на ${num(clip.start_time)}-й долі є в тебе, у партнера немає`);
+        add(`${where}: кліп у лінійці на ${at(clip.start_time)} є в тебе, у партнера немає`);
         continue;
       }
       if (num(clip.start_time) !== num(other.start_time)) {
-        add(`${where}: кліп у лінійці на ${num(clip.start_time)}-й долі проти ${num(other.start_time)}-ї`);
+        add(`${where}: кліп у лінійці на ${at(clip.start_time)} проти ${gen(other.start_time)}`);
       }
       for (const prop of new Set([...Object.keys(clip.props || {}),
                                   ...Object.keys(other.props || {})])) {

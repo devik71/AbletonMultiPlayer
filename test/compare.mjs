@@ -175,3 +175,30 @@ test('темп сцени й колір треку теж розбіжність
   assert.ok(out.some((l) => l.includes('темп/метр')), `темп сцени не названий: ${out.join(' | ')}`);
   assert.ok(out.some((l) => l.includes('колір')), `колір не названий: ${out.join(' | ')}`);
 });
+
+test('позиція називається і в долях, і в тактах -- коли розмір такту відомий', () => {
+  const state = (start) => ({
+    song: { signature_numerator: 4, signature_denominator: 4 },
+    cues: [{ time: 32, name: 'Drop' }],
+    tracks: [{ id: 't1', name: 'Bass', mixer: {},
+      arrangement: [{ id: 'a1', start_time: start, length: 4 }] }],
+    scenes: [],
+  });
+  const out = compareStates(state(16), { ...state(32), cues: [] });
+  assert.ok(out.some((l) => l.includes('на 16-й долі (такт 5.1) проти 32-ї долі (такт 9.1)')),
+    `такти не названі: ${out.join(' | ')}`);
+  assert.ok(out.some((l) => l.includes('локатор «Drop» на 32-й долі (такт 9.1)')),
+    `локатор без такту: ${out.join(' | ')}`);
+});
+
+test('без розміру такту лишається сама доля, а не вигаданий такт', () => {
+  const state = (start) => ({
+    tracks: [{ id: 't1', name: 'Bass', mixer: {},
+      arrangement: [{ id: 'a1', start_time: start, length: 4 }] }],
+    scenes: [],
+  });
+  const out = compareStates(state(16), state(32));
+  assert.ok(out.some((l) => l.includes('на 16-й долі проти 32-ї долі')),
+    `доля зіпсована: ${out.join(' | ')}`);
+  assert.ok(!out.some((l) => l.includes('такт')), `такт вигаданий: ${out.join(' | ')}`);
+});
