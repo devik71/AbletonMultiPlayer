@@ -270,7 +270,22 @@ class AbletonMP(ControlSurface):
         self._wire_view()
         self._prime_mirror()
 
-        self._link.send({
+        self._link.send(self._hello_payload())
+        self._link.send({"m": "snapshot", "state": self._snapshot()})
+        self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
+        self._safe(self._probe_persistence)
+
+    def _hello_payload(self):
+        """Єдине місце, де збирається hello.
+
+        Копій було дві: одна на старті скрипта, друга на hello_request --
+        коли daemon піднявся пізніше за Live. Друга відстала й не несла
+        хеша, а на практиці саме вона й доїжджає: Live майже завжди вже
+        запущений, коли стартує daemon. Наслідок був тихий і бридкий --
+        перевірка версій вважала свіжий скрипт старим і казала про це
+        щоразу, тобто попередження, яке треба читати, привчали ігнорувати.
+        """
+        return {
             "m": "hello",
             "live": self._live_version(),
             "script": SCRIPT_VERSION,
@@ -278,10 +293,7 @@ class AbletonMP(ControlSurface):
             "events": APPLY_TYPES,
             "features": FEATURES,
             "sha": self._script_sha(),
-        })
-        self._link.send({"m": "snapshot", "state": self._snapshot()})
-        self._log("AbletonMP %s connected, Live %s" % (SCRIPT_VERSION, self._live_version()))
-        self._safe(self._probe_persistence)
+        }
 
     def _probe_persistence(self):
         """Р©Рѕ РґРѕСЃС‚СѓРїРЅРѕ РґР»СЏ Р·Р±РµСЂС–РіР°РЅРЅСЏ СЂРµС”СЃС‚СЂСѓ РІ С†С–Р№ Р·Р±С–СЂС†С– Live.
@@ -3998,14 +4010,7 @@ class AbletonMP(ControlSurface):
             self._link.send({"m": "snapshot", "state": self._snapshot()})
         elif m == "hello_request":
             # daemon стартував пізніше за Live і пропустив наш hello
-            self._link.send({
-                "m": "hello",
-                "live": self._live_version(),
-                "script": SCRIPT_VERSION,
-                "pid": os.getpid(),
-                "events": APPLY_TYPES,
-                "features": FEATURES,
-            })
+            self._link.send(self._hello_payload())
         elif m == "registry_build":
             self._link.send({"m": "registry", "registry": self._build_registry()})
         elif m == "registry_adopt":

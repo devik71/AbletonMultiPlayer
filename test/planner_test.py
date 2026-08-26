@@ -250,3 +250,16 @@ class BridgeShapeTest(unittest.TestCase):
                     bad.append('%s.%s(%s)' % (node.name, item.name, first or ''))
         self.assertEqual(bad, [],
                          'метод у класі без self і без @staticmethod: %s' % ', '.join(bad))
+
+
+    def test_hello_is_built_in_one_place(self):
+        # Копій було дві: на старті скрипта і на hello_request. Друга
+        # відстала й не несла хеша -- а доїжджає саме вона, бо daemon майже
+        # завжди стартує пізніше за Live. Розбіжність була тиха: перевірка
+        # версій вважала свіжий скрипт старим і скаржилась щоразу.
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            os.pardir, 'remote-script', 'AbletonMP', 'AbletonMP.py')
+        with io.open(path, encoding='utf-8-sig') as fh:
+            src = fh.read()
+        self.assertEqual(src.count(chr(34) + 'm' + chr(34) + ': ' + chr(34) + 'hello' + chr(34)), 1,
+                         'hello збирається більш ніж в одному місці')
