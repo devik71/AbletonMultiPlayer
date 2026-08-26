@@ -19,7 +19,6 @@ const CONTINUOUS = new Set([
   'ClipPropSet',
   'ClipWarpSet',
   'ChainMixerSet',
-  'SongPropSet',
 ]);
 
 function trackName(registry, id, kind) {
@@ -60,14 +59,6 @@ export function lockTarget(type, payload, registry) {
     const scene = p.scene?.id;
     if (!scene) return null;
     return { object: `scene:${scene}:timing`, label: sceneName(registry, scene) };
-  }
-
-  if (type === 'SongPropSet') {
-    // Своя адреса на кожну властивість: двоє можуть одночасно правити
-    // розмір такту й тональність, і це не конфлікт.
-    const prop = p.prop;
-    if (!prop) return null;
-    return { object: `song:${prop}`, label: prop };
   }
 
   if (type === 'SongPropSet') {

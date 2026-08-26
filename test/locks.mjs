@@ -2,6 +2,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { LockKeeper, lockTarget } from '../daemon/locks.js';
 
 const registry = {
@@ -103,4 +104,36 @@ test('кожна властивість пісні бере власний ло�
   assert.equal(sig.object, 'song:signature_numerator');
   assert.notEqual(sig.object, root.object, 'метр і тональність -- не той самий обʼєкт');
   assert.equal(lockTarget('SongPropSet', {}, registry), null, 'без prop лок не береться');
+});
+
+test('жоден тип не диспетчеризується двічі', () => {
+  // Дубльована гілка -- мертвий код: до другої виконання не доходить ніколи.
+  // Читається вона при цьому як робоче правило, тож наступна правка може
+  // піти саме в неї. Так у CONTINUOUS і в lockTarget по разу прожив
+  // SongPropSet, і рівно так само -- у relay/compact.js.
+  const src = readFileSync(new URL('../daemon/locks.js', import.meta.url), 'utf8');
+  const guards = [...src.matchAll(/type === '([A-Za-z]+)'/g)].map((m) => m[1]);
+  const twice = [...new Set(guards.filter((t, i) => guards.indexOf(t) !== i))];
+  assert.deepEqual(twice, [], `гілка лока повторюється: ${twice.join(', ')}`);
+
+  const list = src.slice(src.indexOf('const CONTINUOUS'), src.indexOf(']);'));
+  const names = [...list.matchAll(/'([A-Za-z]+)'/g)].map((m) => m[1]);
+  const dup = [...new Set(names.filter((t, i) => names.indexOf(t) !== i))];
+  assert.deepEqual(dup, [], `тип перелічено в CONTINUOUS двічі: ${dup.join(', ')}`);
+});
+
+test('кожен неперервний тип має обʼєкт лока, а не падає в трек за замовчуванням', () => {
+  // Замовчування бере track.id -- для подій, у яких треку немає (SongPropSet,
+  // ChainMixerSet), це означало б мовчазний null і лок, якого ніхто не бачить.
+  const src = readFileSync(new URL('../daemon/locks.js', import.meta.url), 'utf8');
+  const list = src.slice(src.indexOf('const CONTINUOUS'), src.indexOf(']);'));
+  const continuous = [...list.matchAll(/'([A-Za-z]+)'/g)].map((m) => m[1]);
+  const trackless = ['SongPropSet', 'ChainMixerSet', 'SceneTimingSet'];
+  for (const type of continuous) {
+    if (!trackless.includes(type)) continue;
+    const target = lockTarget(type, type === 'SongPropSet' ? { prop: 'signature_numerator' }
+      : type === 'ChainMixerSet' ? { chain: { id: 'c1' }, param: 'volume' }
+        : { scene: { id: 's1' } }, null);
+    assert.ok(target?.object, `${type} лишився без обʼєкта лока`);
+  }
 });
