@@ -202,3 +202,20 @@ test('без розміру такту лишається сама доля, а 
     `доля зіпсована: ${out.join(' | ')}`);
   assert.ok(!out.some((l) => l.includes('такт')), `такт вигаданий: ${out.join(' | ')}`);
 });
+
+test('девайси на Return теж порівнюються: ревер чути в усьому сеті', () => {
+  const state = (threshold) => ({
+    tracks: [],
+    aux_tracks: [{
+      id: 'r1', kind: 'return', name: 'Reverb', mixer: { volume: 0.5 },
+      devices: [{
+        device: { class_name: 'Reverb', class_display_name: 'Reverb', ordinal: 0 },
+        parameters: [{ name: 'DecayTime', ordinal: 0, value: threshold }],
+      }],
+    }],
+    scenes: [],
+  });
+  const out = compareStates(state(1200), state(400));
+  assert.ok(out.some((l) => l.includes('Reverb') && l.includes('DecayTime')),
+    `девайс Return не порівняний: ${out.join(' | ')}`);
+});

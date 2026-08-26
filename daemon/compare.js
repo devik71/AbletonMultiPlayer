@@ -63,6 +63,34 @@ const loopKeyless = (o) => (o ? Object.keys(o).sort().map((k) => `${k}=${num(o[k
  *  Доля в LOM -- чверть незалежно від знаменника, тож такт займає
  *  numerator * 4 / denominator долі: у 6/8 це три долі, а не шість.
  *  Такт саме ПОРУЧ, а не замість: доля -- те, що реально лежить у знімку. */
+/** Девайси й їхні параметри. Викликається і для звичайних треків, і для
+ *  Return/Master: ревер на Return, зведений по-різному, чути в усьому сеті,
+ *  а порівнювались досі лише звичайні треки. */
+function deviceDiff(where, my, their, add) {
+  const myDev = (my.devices || []).map((d) => d.device?.class_display_name).join(', ');
+  const theirDev = (their.devices || []).map((d) => d.device?.class_display_name).join(', ');
+  if (myDev !== theirDev) {
+    add(`${where}: девайси у тебе [${myDev || '—'}], у партнера [${theirDev || '—'}]`);
+  }
+
+  // Однакова структура з різними значеннями -- найгірша розбіжність:
+  // сети виглядають однаково, а звучать по-різному.
+  const myDevMap = new Map((my.devices || []).map((d) => [deviceKey(d), d]));
+  const theirDevMap = new Map((their.devices || []).map((d) => [deviceKey(d), d]));
+  for (const [key, mine] of myDevMap) {
+    const other = theirDevMap.get(key);
+    if (!other) continue;
+    const a = paramMap(mine);
+    const b = paramMap(other);
+    const differing = [...a].filter(([name, value]) => b.has(name) && b.get(name) !== value);
+    if (!differing.length) continue;
+    const shown = differing.slice(0, 3)
+      .map(([name, value]) => `${name.split('#')[0]} ${value}≠${b.get(name)}`);
+    add(`${where}, ${mine.device?.class_display_name}: розходяться ${differing.length} параметрів`
+      + ` (${shown.join(', ')})`);
+  }
+}
+
 export const positionWith = (song) => {
   const bar = (value) => {
     const n = song?.signature_numerator;
@@ -173,7 +201,9 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       continue;
     }
     // Гучність Return -- це те, наскільки чути ревер у всьому сеті одразу
-    mixerDiff(`${obj.kind || 'aux'} ${nameOf(obj, id)}`, obj, theirAux.get(id), add);
+    const auxWhere = `${obj.kind || 'aux'} ${nameOf(obj, id)}`;
+    mixerDiff(auxWhere, obj, theirAux.get(id), add);
+    deviceDiff(auxWhere, obj, theirAux.get(id), add);
   }
   const myReturns = (mine?.aux_tracks || []).filter((t) => t.kind === "return").length;
   const theirReturns = (theirs?.aux_tracks || []).filter((t) => t.kind === "return").length;
@@ -188,27 +218,7 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     if (!their) continue;
     const where = nameOf(my, id);
 
-    const myDev = (my.devices || []).map((d) => d.device?.class_display_name).join(', ');
-    const theirDev = (their.devices || []).map((d) => d.device?.class_display_name).join(', ');
-    if (myDev !== theirDev) {
-      add(`${where}: девайси у тебе [${myDev || '—'}], у партнера [${theirDev || '—'}]`);
-    }
-
-    // Однакова структура з різними значеннями -- найгірша розбіжність:
-    // сети виглядають однаково, а звучать по-різному.
-    const myDevMap = new Map((my.devices || []).map((d) => [deviceKey(d), d]));
-    const theirDevMap = new Map((their.devices || []).map((d) => [deviceKey(d), d]));
-    for (const [key, mine] of myDevMap) {
-      const other = theirDevMap.get(key);
-      if (!other) continue;
-      const a = paramMap(mine);
-      const b = paramMap(other);
-      const differing = [...a].filter(([name, value]) => b.has(name) && b.get(name) !== value);
-      if (!differing.length) continue;
-      const shown = differing.slice(0, 3).map(([name, value]) => `${name.split('#')[0]} ${value}≠${b.get(name)}`);
-      add(`${where}, ${mine.device?.class_display_name}: розходяться ${differing.length} параметрів`
-        + ` (${shown.join(', ')})`);
-    }
+    deviceDiff(where, my, their, add);
 
     mixerDiff(where, my, their, add);
 
@@ -252,6 +262,12 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       }
       if (loopKey(clip.loop) !== loopKey(other.loop)) {
         add(`${where}, сцена ${scene}: межі кліпу різні`);
+      }
+      for (const prop of ['name', 'color']) {
+        const a = clip.clip?.[prop];
+        const b = other.clip?.[prop];
+        if ((a ?? null) === (b ?? null)) continue;
+        add(`${where}, сцена ${scene}: ${prop} ${a ?? '—'} проти ${b ?? '—'}`);
       }
     }
 
