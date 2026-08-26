@@ -9,6 +9,7 @@
 Мережі тут немає жодної: усе, що ходило б у OpenAI, підмінене.
 """
 
+import io
 import os
 import sys
 import time
@@ -207,3 +208,45 @@ class ContractTest(unittest.TestCase):
         # Схема дозволяє stages, але модель про них дізнається лише з промпту.
         self.assertIn("stages", chat.SYSTEM_PROMPT)
         self.assertIn("stages", chat.PLAN_SCHEMA["properties"])
+
+
+class BridgeShapeTest(unittest.TestCase):
+    """Форма самого AbletonMP.py -- те, що Python перевіряє лише під час виклику.
+
+    Метод у класі без self і без @staticmethod парситься, імпортується
+    й мовчить -- аж поки його не викличуть у живому Live. Саме так
+    _device_tree_sig упав на першому ж прогоні парою, посеред
+    _prime_devices: дзеркало девайсів лишилось непобудованим, і про це
+    сказав тільки traceback у bridge.log.
+    """
+
+    def bridge_tree(self):
+        import ast
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            os.pardir, 'remote-script', 'AbletonMP', 'AbletonMP.py')
+        with io.open(path, encoding='utf-8-sig') as fh:
+            return ast.parse(fh.read())
+
+    def test_every_method_takes_self_or_is_declared_static(self):
+        import ast
+        bad = []
+        for node in ast.walk(self.bridge_tree()):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                decorators = set()
+                for d in item.decorator_list:
+                    name = getattr(d, 'id', None) or getattr(d, 'attr', None)
+                    if name:
+                        decorators.add(name)
+                if decorators & {'staticmethod', 'classmethod', 'property'}:
+                    continue
+                args = item.args.posonlyargs + item.args.args if hasattr(item.args, 'posonlyargs') \
+                    else item.args.args
+                first = args[0].arg if args else None
+                if first not in ('self', 'cls'):
+                    bad.append('%s.%s(%s)' % (node.name, item.name, first or ''))
+        self.assertEqual(bad, [],
+                         'метод у класі без self і без @staticmethod: %s' % ', '.join(bad))

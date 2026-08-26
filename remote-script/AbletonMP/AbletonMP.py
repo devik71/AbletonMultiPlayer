@@ -6226,6 +6226,7 @@ class AbletonMP(ControlSurface):
             pass
         return True
 
+    @staticmethod
     def _device_tree_sig(device):
         """Сигнатура для діффу структури -- разом із name.
 
@@ -7357,8 +7358,7 @@ class AbletonMP(ControlSurface):
         self._link.send({"m": "event", "type": etype, "payload": payload, "lseq": self._lseq})
         self._log("-> %s %r" % (etype, payload))
 
-    @staticmethod
-    def _script_sha():
+    def _script_sha(self):
         """Хеш власного джерела. Версія цього не ловить.
 
         SCRIPT_VERSION між комітами не змінюється, тож Live, який тримає
@@ -7367,15 +7367,48 @@ class AbletonMP(ControlSurface):
         коли SceneTimingSet мовчав, бо в запущеному скрипті його не було.
         Перевірка файлу на диску цього не бачить: вона звіряє диск, а не
         те, що Live прочитав під час старту.
+
+        Шляхів пробуємо кілька, і на це є причина з живого прогону: на
+        12.3.5 хеш не доїхав узагалі, а мовчазне порожнє значення нічим не
+        відрізняється від старого скрипта, який хеш рахувати ще не вміє.
+        Тож тепер невдача не мовчить -- вона каже, що саме не відкрилось.
         """
+        tried = []
+        for path in self._sha_candidates():
+            try:
+                with open(path, "rb") as handle:
+                    return hashlib.sha256(handle.read()).hexdigest()[:12]
+            except Exception as e:
+                tried.append("%s (%r)" % (path, e))
+        self._warn("хеш скрипта не порахувався, перевірка версій осліпла: %s"
+                   % ("; ".join(tried) or "жодного шляху не вийшло скласти",))
+        return ""
+
+    @staticmethod
+    def _sha_candidates():
+        """Де може лежати наше джерело. Порядок -- від найточнішого."""
+        out = []
         try:
-            path = os.path.abspath(__file__)
-            if path.endswith(".pyc"):
-                path = path[:-1]
-            with open(path, "rb") as handle:
-                return hashlib.sha256(handle.read()).hexdigest()[:12]
+            raw = __file__
         except Exception:
-            return ""
+            return out
+        for path in (raw, os.path.abspath(raw)):
+            if path.endswith(".pyc") or path.endswith(".pyo"):
+                path = path[:-1]
+            if path not in out:
+                out.append(path)
+        # __pycache__/AbletonMP.cpython-311.pyc -> AbletonMP.py поруч із пакетом:
+        # відрізання останнього символу тут дає шлях, якого не існує.
+        try:
+            folder = os.path.dirname(os.path.abspath(raw))
+            if os.path.basename(folder) == "__pycache__":
+                folder = os.path.dirname(folder)
+            direct = os.path.join(folder, "AbletonMP.py")
+            if direct not in out:
+                out.append(direct)
+        except Exception:
+            pass
+        return out
 
     def _live_version(self):
         try:
