@@ -19,6 +19,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const bridge = readFileSync(join(root, 'remote-script/AbletonMP/AbletonMP.py'), 'utf8');
 const mirror = readFileSync(join(root, 'daemon/tools/state-ops.js'), 'utf8');
+const mirror2 = readFileSync(join(root, 'daemon/tools/fake-live.js'), 'utf8');
 
 // Межі: від _state_to_ops до першого хелпера, що вже не про розкладку.
 const slice = (text, from, to) => {
@@ -58,4 +59,24 @@ test('кожна гілка знімка в bridge читає ту саму на
     assert.ok(pyOps.includes(`"${field}"`), `bridge не читає поле знімка ${field}`);
     assert.ok(mirror.includes(`.${field}`), `дзеркало не читає поле знімка ${field}`);
   }
+});
+
+test('знімок bridge і знімок емулятора мають ті самі поля верхнього рівня', () => {
+  // Якщо bridge не кладе в знімок цілу гілку, порівняння `diff` і застосування
+  // pull мовчки бачать порожнечу -- рівно так знімок місяцями їхав без
+  // song, cues і chains, а тести цього не помічали: fullState емулятора їх мав.
+  const py = slice(bridge, 'return {\n            "version": STATE_VERSION',
+    '    def _state_mixer');
+  const js = slice(mirror2, 'const fullState = () => ({', '\n});');
+
+  const pyKeys = new Set([...py.matchAll(/^\s{12}"([a-z_]+)":/gm)].map((m) => m[1]));
+  const jsKeys = new Set([...js.matchAll(/^\s{2}([a-z_]+):/gm)].map((m) => m[1]));
+  assert.ok(pyKeys.size >= 8, `у bridge знайдено лише ${pyKeys.size} полів знімка`);
+
+  const onlyJs = [...jsKeys].filter((k) => !pyKeys.has(k)).sort();
+  const onlyPy = [...pyKeys].filter((k) => !jsKeys.has(k)).sort();
+  assert.deepStrictEqual(onlyJs, [],
+    `емулятор кладе в знімок те, чого bridge не кладе: ${onlyJs.join(', ')}`);
+  assert.deepStrictEqual(onlyPy, [],
+    `bridge кладе в знімок те, чого емулятор не кладе: ${onlyPy.join(', ')}`);
 });

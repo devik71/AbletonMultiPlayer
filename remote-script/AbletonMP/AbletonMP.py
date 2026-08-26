@@ -5351,6 +5351,27 @@ class AbletonMP(ControlSurface):
         except Exception:
             playing = None
 
+        # Читаємо з LOM, а не з дзеркала: дзеркало -- це «що ми вже бачили»,
+        # а знімок мусить бути «що є зараз».
+        song = {}
+        for prop in SONG_PROPS:
+            value = self._song_prop_value(prop, self._safe_attr(self._doc, prop))
+            if value is not None:
+                song[prop] = value
+
+        chains = []
+        for rec in self._chain_records:
+            uid = rec.get("id")
+            chain = self._chains_reg.obj_of(uid) if uid else None
+            if chain is None:
+                continue
+            entry = {"id": uid}
+            entry.update(self._chain_state(chain))
+            chains.append(entry)
+
+        cues = [{"time": at, "name": name}
+                for at, name in sorted(self._cue_map().items())]
+
         return {
             "version": STATE_VERSION,
             "script": SCRIPT_VERSION,
@@ -5358,6 +5379,9 @@ class AbletonMP(ControlSurface):
             "at": time.time(),
             "tempo": tempo,
             "playing": playing,
+            "song": song,
+            "cues": cues,
+            "chains": chains,
             "tracks": tracks,
             "aux_tracks": aux_tracks,
             "scenes": scenes,
