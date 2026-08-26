@@ -2017,14 +2017,23 @@ class AbletonMP(ControlSurface):
     # позиції -- отже час і є ідентичність. Пересунути локатор не можна
     # взагалі: у Live це видалити й поставити заново.
 
-    def _cue_time(self, cue):
+    @staticmethod
+    def _valid_cue_time(raw):
+        """Одна перевірка на обидва напрямки.
+
+        Розійшовшись, вони дали б найдурніший з можливих багів: ми емітимо
+        локатор, який власний же приймальний бік відхиляє як некоректний.
+        """
         try:
-            value = round(float(cue.time), 6)
+            value = round(float(raw), 6)
         except Exception:
             return None
         if not math.isfinite(value) or value < 0 or value > CLIP_LENGTH_MAX:
             return None
         return value
+
+    def _cue_time(self, cue):
+        return self._valid_cue_time(self._safe_attr(cue, "time"))
 
     def _cue_map(self):
         state = {}
@@ -2067,13 +2076,7 @@ class AbletonMP(ControlSurface):
         return None
 
     def _cue_payload_time(self, payload):
-        try:
-            value = round(float(payload.get("time")), 6)
-        except Exception:
-            return None
-        if not math.isfinite(value) or value < 0 or value > CLIP_LENGTH_MAX:
-            return None
-        return value
+        return self._valid_cue_time(payload.get("time"))
 
     def _toggle_cue_at(self, time, gseq):
         """set_or_delete_cue працює у ПОТОЧНІЙ позиції, іншого шляху немає.
