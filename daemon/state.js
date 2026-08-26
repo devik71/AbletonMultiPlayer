@@ -20,9 +20,16 @@ function canonical(value) {
  * навмисно: digest існує саме для того, щоб порівняти два сети між машинами,
  * а вони ніколи не збігаються в часі й не зобовʼязані збігатись у версіях.
  * Ключі сортуються, бо JSON із Python і з JS має різний порядок полів.
+ *
+ * `playing` виключений із тієї самої причини, тільки гострішої: спільного
+ * плейхеда ми свідомо не робимо (docs/COVERAGE.md, тир 4), кожен грає своє --
+ * тож із ним у відбитку рядок «стан збігається повністю» був недосяжним
+ * за побудовою, і digest перетворювався на шум.
  */
 export function stateDigest(state) {
-  const { at: _at, script: _script, live: _live, ...content } = state || {};
+  const {
+    at: _at, script: _script, live: _live, playing: _playing, ...content
+  } = state || {};
   return createHash('sha256').update(canonical(content)).digest('hex').slice(0, 16);
 }
 

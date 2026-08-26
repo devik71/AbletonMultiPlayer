@@ -115,6 +115,10 @@ test('digest порівнює вміст, а не момент зняття', ()
   const theirs = { ...sample, at: 999, script: '0.18.0-fake', live: '12.3.5' };
   assert.equal(stateDigest(mine), stateDigest(theirs));
 
+  // Кожен грає своє: транспорт партнера не робить сети різними
+  assert.equal(stateDigest({ ...sample, playing: true }),
+    stateDigest({ ...sample, playing: false }));
+
   // Порядок ключів у JSON з Python і з JS різний, digest -- ні
   const reordered = { scenes: sample.scenes, tracks: sample.tracks, aux_tracks: sample.aux_tracks, tempo: sample.tempo, version: 1 };
   assert.equal(stateDigest(sample), stateDigest(reordered));
