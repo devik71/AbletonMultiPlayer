@@ -1519,6 +1519,20 @@ try {
     }
   });
 
+  await check('маркери семплу доїжджають — це не параметри девайса', async () => {
+    // У Simpler ручки S Start і S Length -- звичайні DeviceParameter, а
+    // маркери на хвилі живуть в окремому обʼєкті sample. Виміряно на живому
+    // 12.3.5: запис у S Start не рухає sample.start_marker узагалі.
+    const from = l2.out.length;
+    l1.stdin.write('sampleprop 0 start_marker 12345\n');
+    await waitFor(l2, /<- #\d+ SamplePropSet .*"start_marker".*12345/, 8000, from);
+    l1.stdin.write('sampleprop 0 warping true\n');
+    await waitFor(l2, /<- #\d+ SamplePropSet .*"warping".*true/, 8000, from);
+    if (/SamplePropSet ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер відхилив властивість семплу');
+    }
+  });
+
   await check('гучність і mute ланцюга в раку доїжджають', async () => {
     // У Drum Rack кожен пад -- це ланцюг. Його гучність і панорама -- частина
     // звучання, і досі вони не їхали взагалі.
@@ -1582,10 +1596,10 @@ try {
     }
   });
 
-  await check('журнал: 131 подія, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 133 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 131) throw new Error(`очікував 131 подію, у журналі ${lines.length}`);
+    if (lines.length !== 133) throw new Error(`очікував 133 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

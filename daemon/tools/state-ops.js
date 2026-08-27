@@ -37,17 +37,27 @@ const mixerOps = (ref, mixer) => {
   return ops;
 };
 
-const deviceOps = (ref, devices) => devices.flatMap((entry) =>
-  (entry.parameters || []).filter((p) => p.value !== undefined && p.value !== null).map((p) => {
-    const payload = {
-      track: ref,
-      device: entry.device,
-      parameter: { name: p.name, ordinal: p.ordinal },
-      value: p.value,
-    };
+const deviceOps = (ref, devices) => devices.flatMap((entry) => {
+  const ops = (entry.parameters || [])
+    .filter((p) => p.value !== undefined && p.value !== null)
+    .map((p) => {
+      const payload = {
+        track: ref,
+        device: entry.device,
+        parameter: { name: p.name, ordinal: p.ordinal },
+        value: p.value,
+      };
+      if (entry.chain_path?.length) payload.chain_path = entry.chain_path;
+      return ['DeviceParamSet', payload];
+    });
+  // Маркери на хвилі Simpler -- не параметри, у них власний блок у знімку.
+  for (const [prop, value] of Object.entries(entry.sample || {})) {
+    const payload = { track: ref, device: entry.device, prop, value };
     if (entry.chain_path?.length) payload.chain_path = entry.chain_path;
-    return ['DeviceParamSet', payload];
-  }));
+    ops.push(['SamplePropSet', payload]);
+  }
+  return ops;
+});
 
 export const noteRegionsFor = (meta, notes) => {
   let length = Math.max(Number(meta.length) || NOTE_TIME_SPAN, 0.001);

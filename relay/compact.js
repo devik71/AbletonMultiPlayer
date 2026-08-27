@@ -82,6 +82,12 @@ export function supersedeKey(ev) {
     case 'SlotStopButtonSet':
       // Перемикач слота: остання перемагає, як і будь-який інший перемикач.
       return `stopbtn:${p.track?.id}:${p.scene?.id}`;
+    case 'SamplePropSet':
+      // Своя адреса на пару (девайс, властивість): маркер тягнуть мишею, тож
+      // серія доїжджає останньою -- але start_marker не перекриває gain.
+      return `sampleprop:${trackKey(p.track)}`
+        + `:${(p.chain_path || []).map((c) => c.id).join('/')}`
+        + `:${p.device?.class_name}#${p.device?.ordinal}:${p.prop}`;
     case 'ClipNotesSet':
       // Регіон -- частина ключа: подія замінює ноти лише всередині нього,
       // тож два різні регіони одного кліпу не перекривають одне одного.

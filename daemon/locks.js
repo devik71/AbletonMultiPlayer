@@ -19,6 +19,7 @@ const CONTINUOUS = new Set([
   'ClipPropSet',
   'ClipWarpSet',
   'ChainMixerSet',
+  'SamplePropSet',
 ]);
 
 function trackName(registry, id, kind) {
@@ -37,6 +38,18 @@ export function lockTarget(type, payload, registry) {
   const p = payload || {};
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
+
+  if (type === 'SamplePropSet') {
+    // Лок на девайс, а не на властивість: людина крутить один семпл, і
+    // «зайнято» правильніше показувати про нього.
+    const track = p.track?.id;
+    if (!track) return null;
+    const chain = (p.chain_path || []).map((c) => c.id).join('/');
+    return {
+      object: `sample:${track}:${chain}:${p.device?.class_name}#${p.device?.ordinal}`,
+      label: [trackName(registry, track), p.device?.class_display_name].filter(Boolean).join(' / '),
+    };
+  }
 
   if (type === 'ChainMixerSet') {
     const chain = p.chain?.id;
