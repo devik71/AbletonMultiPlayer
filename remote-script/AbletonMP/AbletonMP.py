@@ -5189,6 +5189,25 @@ class AbletonMP(ControlSurface):
                 if isinstance(key, str):
                     out[key] = self._ai_serialize(value[key], depth + 1)
             return out
+        # Колекції LOM (tracks, scenes, clip_slots, devices, parameters) не є
+        # ні list, ні tuple -- це власний Vector. Досі вони серіалізувались
+        # як {"lom_type": "Vector"}, тобто перелічити треки через lom_get було
+        # неможливо взагалі: ні пробі, ні планувальнику, ні людині.
+        if self._is_lom_vector(value):
+            items = []
+            try:
+                total = len(value)
+            except Exception:
+                total = 0
+            for i in range(min(total, 64)):
+                try:
+                    items.append(self._ai_serialize(value[i], depth + 1))
+                except Exception:
+                    items.append(None)
+            if total > 64:
+                items.append({"truncated": total - 64})
+            return items
+
         out = {"lom_type": value.__class__.__name__}
         name = self._safe_name(value)
         if name:
@@ -5206,6 +5225,27 @@ class AbletonMP(ControlSurface):
         except Exception:
             pass
         return out
+
+    @staticmethod
+    def _is_lom_vector(value):
+        """Чи це колекція LOM, яку можна перелічити.
+
+        Перевіряємо поведінкою, а не назвою класу: у різних версіях Live
+        вона зветься по-різному, а от len() і [i] є завжди. Рядки й словники
+        сюди не потрапляють -- їх розбирають гілки вище.
+        """
+        if isinstance(value, (str, bytes, dict, list, tuple)):
+            return False
+        try:
+            len(value)
+        except Exception:
+            return False
+        try:
+            if len(value):
+                value[0]
+        except Exception:
+            return False
+        return True
 
     def _ai_set_optional_name_color(self, obj, action):
         if isinstance(action.get("name"), str):
