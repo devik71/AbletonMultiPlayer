@@ -118,6 +118,8 @@ const song = {
   // Локатори адресуються часом: CuePoint.time лише на читання, а два
   // локатори не бувають на одній позиції.
   cues: {},
+  // Link -- налаштування машини; подією не їде, але в знімку є
+  link: { enabled: false, start_stop_sync: false },
   props: { signature_numerator: 4, signature_denominator: 4,
            clip_trigger_quantization: 4, root_note: 0,
            scale_name: 'Major', scale_mode: false,
@@ -713,6 +715,7 @@ const fullState = () => ({
   tempo: song.tempo,
   playing: song.playing,
   song: { ...song.props },
+  link: { ...song.link },
   cues: Object.entries(song.cues).map(([time, name]) => ({ time: Number(time), name })),
   chains: chainRecords.map((rec) => { const c = chainById(rec.id); return { id: rec.id, ...(c?.mix || {}), mute: !!c?.mute, solo: !!c?.solo, name: c?.name, color: c?.color }; }),
   tracks: song.tracks.filter((t) => t.id).map((t, idx) => ({
@@ -1893,6 +1896,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       console.log(`сцена ${rest[0]}: темп ${block.tempo ?? '—'}, метр ${block.time_signature_numerator ?? '—'}/${block.time_signature_denominator ?? '—'}`);
       break;
     }
+    case 'link': {
+      // link on|off [startstop] -- локальне налаштування, подій не породжує
+      song.link.enabled = rest[0] !== 'off';
+      if (rest[1] !== undefined) song.link.start_stop_sync = rest[1] !== 'off';
+      console.log('Link: ' + (song.link.enabled ? 'увімкнено' : 'вимкнено')
+        + ', start/stop ' + (song.link.start_stop_sync ? 'увімкнено' : 'вимкнено'));
+      break;
+    }
     case 'songprop': {
       const prop = rest[0];
       const check = SONG_PROPS[prop];
@@ -2438,6 +2449,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         'лінійка:   arr <t> <s> <доля> | movearr <t> <idx> <доля> | delarr <t> <idx>',
         '           arrnote <t> <idx> <pitch> <start> <dur> [vel]',
         'семпли:    dropsample <t> <s> <шлях> | droppad <t> <нота> <шлях>',
+        'Link:      link on|off [on|off] -- локальне, подій не породжує',
         'пісня:     songprop <prop> <value> | scenetiming <n> [tempo] [num] [den]',
         '           cue <доля> [name] | delcue <доля>',
         'назви:     meta <track:N|return:N|master|scene:N|clip:T:S> <name|color> <v>',

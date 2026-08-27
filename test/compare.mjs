@@ -257,3 +257,21 @@ test('параметр, який є лише в одного, називаєть
   assert.ok(out.some((l) => l.includes('є в партнера, у тебе немає') && l.includes('Diffusion')),
     `зайві параметри партнера не названі: ${out.join(' | ')}`);
 });
+
+test('розбіжність Ableton Link названа окремо', () => {
+  // Link подією не їде -- це налаштування машини. Але коли в одного він
+  // увімкнений, а в іншого ні, спільної долі немає: квантований запуск
+  // кліпа спрацює в різні моменти, і це чути.
+  const out = compareStates(
+    { link: { enabled: true, start_stop_sync: false }, tracks: [], scenes: [] },
+    { link: { enabled: false, start_stop_sync: false }, tracks: [], scenes: [] });
+  assert.ok(out.some((l) => l.includes('Ableton Link') && l.includes('увімкнено')),
+    `Link не названий: ${out.join(' | ')}`);
+});
+
+test('однаковий Link не породжує рядка', () => {
+  const out = compareStates(
+    { link: { enabled: true, start_stop_sync: true }, tracks: [], scenes: [] },
+    { link: { enabled: true, start_stop_sync: true }, tracks: [], scenes: [] });
+  assert.deepEqual(out, []);
+});

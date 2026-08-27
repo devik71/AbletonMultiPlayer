@@ -152,6 +152,19 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
     }
   }
 
+  // Link -- налаштування машини, не документа, тож подією він не їде. Але
+  // коли в одного він увімкнений, а в іншого ні, спільної долі немає:
+  // квантований запуск кліпа спрацює в різні моменти, і це чути.
+  const myLink = mine?.link || {};
+  const theirLink = theirs?.link || {};
+  for (const [key, human] of [['enabled', 'Ableton Link'],
+                              ['start_stop_sync', 'Link Start Stop Sync']]) {
+    if (myLink[key] === undefined && theirLink[key] === undefined) continue;
+    if (!!myLink[key] === !!theirLink[key]) continue;
+    add(`${human}: у тебе ${myLink[key] ? 'увімкнено' : 'вимкнено'},`
+      + ` у партнера ${theirLink[key] ? 'увімкнено' : 'вимкнено'}`);
+  }
+
   const myCues = new Map((mine?.cues || []).map((c) => [num(c.time), c.name || '']));
   const theirCues = new Map((theirs?.cues || []).map((c) => [num(c.time), c.name || '']));
   for (const [time, name] of theirCues) {

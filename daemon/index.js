@@ -237,6 +237,15 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const counts = summarize(lastState);
       lines.push(`знімок ${stateDigest(lastState)}: ${counts.tracks} треків, ` +
                  `${counts.clips} кліпів, ${counts.notes} нот`);
+      // Link не синхронізується подіями -- це налаштування машини. Але коли
+      // в одного він увімкнений, а в іншого ні, спільної долі немає, і
+      // квантований запуск кліпа спрацює в різні моменти.
+      const link = lastState.link;
+      if (link) {
+        lines.push(`Ableton Link: ${link.enabled ? 'увімкнено' : 'вимкнено'}`
+          + `, start/stop ${link.start_stop_sync ? 'увімкнено' : 'вимкнено'}`
+          + (link.enabled ? '' : ' — спільної долі між машинами немає'));
+      }
     } else {
       lines.push('знімка ще немає — bridge його не віддавав');
     }

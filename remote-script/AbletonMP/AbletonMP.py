@@ -5733,6 +5733,8 @@ class AbletonMP(ControlSurface):
         cues = [{"time": at, "name": name}
                 for at, name in sorted(self._cue_map().items())]
 
+        link = self._link_state()
+
         return {
             "version": STATE_VERSION,
             "script": SCRIPT_VERSION,
@@ -5741,12 +5743,33 @@ class AbletonMP(ControlSurface):
             "tempo": tempo,
             "playing": playing,
             "song": song,
+            "link": link,
             "cues": cues,
             "chains": chains,
             "tracks": tracks,
             "aux_tracks": aux_tracks,
             "scenes": scenes,
         }
+
+    def _link_state(self):
+        """Стан Ableton Link. У знімок іде, у події -- НІ.
+
+        Link -- налаштування машини, а не документа: він вирівнює темп і фазу
+        долі між усіма, хто є в мережі, і вмикається на кожній машині окремо.
+        Возити його подією означало б керувати чужим клоком, а це рівно те,
+        чого ми не робимо (див. personal-not-shared у памʼяті).
+
+        Але знати про розбіжність треба: коли в одного Link увімкнено, а в
+        іншого ні, спільної долі немає, і квантований запуск кліпа спрацює
+        в різні моменти. Тому стан у знімку є, і `diff` про нього скаже.
+        """
+        state = {}
+        for prop, key in (("is_ableton_link_enabled", "enabled"),
+                          ("is_ableton_link_start_stop_sync_enabled", "start_stop_sync")):
+            value = self._safe_attr(self._doc, prop)
+            if value is not None:
+                state[key] = bool(value)
+        return state or None
 
     def _state_mixer(self, track):
         mixer = {}
