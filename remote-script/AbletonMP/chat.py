@@ -184,6 +184,7 @@ ACTION_HELP = {
         "set_device_parameter",
         "load_device",
         "lom_get",
+        "lom_dir",
         "lom_set",
         "lom_call",
     ],

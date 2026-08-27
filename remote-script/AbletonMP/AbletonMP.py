@@ -5125,6 +5125,13 @@ class AbletonMP(ControlSurface):
         if op == "lom_get":
             return self._ai_serialize(self._ai_resolve_path(action.get("path")))
 
+        if op == "lom_dir":
+            # Що обʼєкт узагалі показує. Потрібне для аудиту: у девайсів
+            # половина цікавого лежить повз parameters (sample у Simpler,
+            # chains у раках), а вгадувати імена по одному -- довго й ненадійно.
+            # Лише читання: викликів звідси немає, значення не чіпаються.
+            return self._ai_dir(self._ai_resolve_path(action.get("path")))
+
         if op == "lom_set":
             obj = self._ai_resolve_path(action.get("path"))
             prop = action.get("property", action.get("prop"))
@@ -5442,6 +5449,37 @@ class AbletonMP(ControlSurface):
         except Exception:
             return False
         return True
+
+    def _ai_dir(self, obj):
+        """Публічні атрибути обʼєкта, поділені на прості й обʼєктні.
+
+        Прості (число, рядок, булеве) нас не дивують -- цікаве саме те, що
+        віддає обʼєкт або колекцію: там ховається стан, якого немає серед
+        parameters, і саме його ми досі не синхронізували.
+        """
+        out = {"lom_type": obj.__class__.__name__,
+               "scalars": [], "objects": [], "collections": [], "callables": 0}
+        for name in sorted(dir(obj)):
+            if name.startswith("_"):
+                continue
+            try:
+                value = getattr(obj, name)
+            except Exception:
+                continue
+            if callable(value):
+                out["callables"] += 1
+                continue
+            if value is None or isinstance(value, (bool, int, float, str)):
+                out["scalars"].append(name)
+                continue
+            if self._is_lom_vector(value):
+                try:
+                    out["collections"].append("%s[%d]" % (name, len(value)))
+                except Exception:
+                    out["collections"].append(name)
+                continue
+            out["objects"].append("%s:%s" % (name, value.__class__.__name__))
+        return out
 
     def _ai_set_optional_name_color(self, obj, action):
         if isinstance(action.get("name"), str):
