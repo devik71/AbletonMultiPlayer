@@ -12,7 +12,7 @@
  * Без прапорця лише звіряє (код виходу 1 при розбіжності). З --install
  * перезаписує встановлену копію файлами з репозиторію.
  */
-import { copyFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,15 +48,40 @@ function findInstall() {
   return null;
 }
 
-const install = findInstall();
+const wantInstall = process.argv.includes("--install");
+
+/** Куди ставити на машині, де скрипта ще немає.
+ *
+ *  Беремо перший шлях, у якого вже існує сама User Library: її створює Live
+ *  при першому запуску, а от теки Remote Scripts може не бути зовсім. Так
+ *  ми не вгадуємо ні мову системи, ні OneDrive -- лише добудовуємо гілку
+ *  всередині теки, яку Live уже визнав своєю. */
+function freshTarget() {
+  for (const path of candidates()) {
+    const library = dirname(dirname(path));   // .../User Library
+    if (existsSync(library)) return path;
+  }
+  return null;
+}
+
+let install = findInstall();
+if (install === null && wantInstall) {
+  install = freshTarget();
+  if (install !== null) {
+    mkdirSync(install, { recursive: true });
+    console.log("встановленої копії не було, створюю: " + install);
+  }
+}
 if (install === null) {
   console.log("не знайшов встановленої копії AbletonMP у User Library");
   console.log("шукав у:");
   for (const path of candidates()) console.log("  " + path);
+  if (wantInstall) {
+    console.log("\nі не знайшов самої User Library -- схоже, Live на цій машині");
+    console.log("ще жодного разу не запускався. Запусти його один раз і повтори.");
+  }
   process.exit(1);
 }
-
-const wantInstall = process.argv.includes("--install");
 const diffs = [];
 
 for (const file of FILES) {
