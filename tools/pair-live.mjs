@@ -36,15 +36,26 @@ const ssh = (script) => execFileSync('ssh',
   ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', PEER, script],
   { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 
-/** Дія в Live через локальний HTTP-API bridge. */
-async function exec1(actions) {
+/** Дія в Live через локальний HTTP-API bridge.
+ *
+ *  З повтором: сервер усередині Live однопотоковий і час від часу рве
+ *  зʼєднання на паузі між тіками. Для проби це не новина про продукт,
+ *  а шум, через який вона падала посеред сценарію. */
+async function exec1(actions, tries = 3) {
   const token = readFileSync(join(homedir(), '.abletonmp', 'chat_token'), 'utf8').trim();
-  const res = await fetch('http://127.0.0.1:19847/api/exec', {
-    method: 'POST',
-    headers: { 'X-AbletonMP-Token': token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ actions }),
-  });
-  return res.json();
+  for (let i = 1; ; i += 1) {
+    try {
+      const res = await fetch('http://127.0.0.1:19847/api/exec', {
+        method: 'POST',
+        headers: { 'X-AbletonMP-Token': token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actions }),
+      });
+      return await res.json();
+    } catch (error) {
+      if (i >= tries) throw error;
+      await new Promise((r) => setTimeout(r, 800 * i));
+    }
+  }
 }
 
 /** Те саме, але в Live партнера -- curl запускається на його машині. */
