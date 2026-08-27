@@ -931,7 +931,7 @@ test('однакова версія з різним кодом не проход
       const msg = JSON.parse(raw);
       if (msg.m === 'welcome') {
         ws.send(JSON.stringify({
-          m: 'client_info', live: '12.3.5', script: '0.19.0-dev',
+          m: 'client_info', live: '12.3.5', script: '0.19.0',
           sha, features: [], events: ['TempoSet'],
         }));
         resolve(ws);

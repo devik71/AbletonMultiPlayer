@@ -370,7 +370,7 @@ const sendHello = () =>
   send({
     m: 'hello',
     live: arg('live', 'fake-12.3.8'),
-    script: arg('script', '0.19.0-dev-fake'),
+    script: arg('script', '0.19.0-fake'),
     pid: process.pid,
     features: ['apply_ack', 'full_state', 'state_apply', 'presence', 'view_follow'],
     events: arg('events',
@@ -709,7 +709,7 @@ const findDeviceByRef = (container, ref) => {
 
 const fullState = () => ({
   version: 1,
-  script: arg('script', '0.19.0-dev-fake'),
+  script: arg('script', '0.19.0-fake'),
   live: arg('live', 'fake-12.3.8'),
   at: Date.now() / 1000,
   tempo: song.tempo,

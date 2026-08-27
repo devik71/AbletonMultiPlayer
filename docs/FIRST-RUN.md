@@ -131,7 +131,7 @@ node index.js --author p2 --session jam --relay ws://<адреса-p1>:19870
 У кожному вікні daemon має бути:
 
 ```
-bridge підключився: Live 12.3.x, script 0.19.0-dev
+bridge підключився: Live 12.3.x, script 0.19.0
 relay: head=..., у сесії p1, p2
 ```
 

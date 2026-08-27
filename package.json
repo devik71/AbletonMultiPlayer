@@ -1,6 +1,6 @@
 {
   "name": "ableton-live-multiplayer",
-  "version": "0.19.0-dev",
+  "version": "0.19.0",
   "private": true,
   "type": "module",
   "scripts": {
