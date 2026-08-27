@@ -608,6 +608,11 @@ udp.on('message', (buf) => {
     case 'apply_ack': {
       const gseq = Number(msg.gseq);
       pendingSent.delete(gseq);
+      // Подія доїхала, але застосувати її не було до чого. Автор про це не
+      // дізнається нізвідки: у нього все спрацювало. Тож кажемо йому самі.
+      if (msg.gap && connected) {
+        ws.send(JSON.stringify({ m: 'apply_gap', gseq, gap: msg.gap, type: msg.type }));
+      }
       if (!msg.ok) {
         log(`bridge не підтвердив застосування #${gseq}: ${msg.error || 'невідома помилка'}`);
         break;
@@ -715,7 +720,10 @@ function connect() {
       case 'file_ack':
         filesync.onAck(msg);
         break;
-      case 'ack': {
+      case 'apply_gap':
+      noteApplyGap(msg);
+      break;
+    case 'ack': {
         // Подія вже була закомічена раніше -- relay не може повернути її
         // самою собою, бо стиснення прибрало її з журналу. Але outbox тримати
         // її більше не треба.
@@ -881,6 +889,25 @@ let staleWarned = null;
  *  у пам’яті виглядає точно як свіжий. Ловиться це лише хешем джерела --
  *  і ловити треба, бо мовчазний наслідок виглядає як «подія не працює»,
  *  а не як «скрипт застарів». */
+const gapSeen = new Map();
+
+/** Партнер не зміг застосувати нашу подію. Найчастіший випадок -- параметр,
+ *  перейменований між версіями Live: подія доходить, приймальний бік чесно
+ *  її пропускає, і без цього рядка про це не знає ніхто, крім його лога.
+ *
+ *  Однакові скарги склеюються: тягнення ручки дає їх десятками, а новина
+ *  в них одна. */
+function noteApplyGap(msg) {
+  const gap = msg.gap || {};
+  const who = msg.from || 'партнер';
+  const key = `${who}|${msg.type}|${JSON.stringify(gap)}`;
+  const seen = (gapSeen.get(key) || 0) + 1;
+  gapSeen.set(key, seen);
+  if (seen !== 1 && seen % 25 !== 0) return;
+  const tail = seen > 1 ? ` (${seen} разів)` : '';
+  log(`${who} не застосував твій ${msg.type}: ${describeGap(gap)}${tail}`);
+}
+
 function warnIfStaleScript(sha) {
   const key = sha || '(без хешу)';
   if (staleWarned === key) return;

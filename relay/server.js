@@ -486,6 +486,15 @@ class Session {
     return changed;
   }
 
+  /** Автор події за її gseq. null -- такої в журналі немає.
+   *  Шукаємо з кінця: скарга приходить майже одразу за подією. */
+  authorOf(gseq) {
+    for (let i = this.journal.length - 1; i >= 0; i -= 1) {
+      if (this.journal[i].gseq === gseq) return this.journal[i].author || null;
+    }
+    return null;
+  }
+
   lockList() {
     const now = Date.now() / 1000;
     return [...this.locks.values()].map((lock) => ({
@@ -1072,6 +1081,21 @@ wss.on('connection', (ws, req) => {
 
       // Undo не комітить сам: relay лише каже, яким значення було до дії.
       // Комітить клієнт -- своїм lseq і як звичайну подію.
+      // Партнер не зміг застосувати чиюсь подію. Це не помилка протоколу:
+      // адреси могло не існувати, параметр міг зватись інакше в іншій версії
+      // Live. Але автор події має про це дізнатись -- у нього все спрацювало.
+      case 'apply_gap': {
+        if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
+        const gseq = Number(msg.gseq);
+        const author = client.session.authorOf(gseq);
+        if (!author || author === client.author) break;
+        client.session.sendTo(author, {
+          m: 'apply_gap', from: client.author, gseq,
+          type: msg.type, gap: msg.gap,
+        });
+        break;
+      }
+
       case 'undo_request': {
         if (!client.session) return send({ m: 'error', code: 'not_joined', text: 'спершу join' });
         const author = typeof msg.author === 'string' && msg.author ? msg.author : client.author;

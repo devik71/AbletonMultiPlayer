@@ -1686,9 +1686,16 @@ udp.on('message', (buf) => {
   }
   if (msg.m === 'hello_request') sendHello();
   else if (msg.m === 'apply') {
+    // Прогалину рахуємо ДО застосування: apply на нерозвʼязану адресу мовчки
+    // виходить, і автор події через це не дізнається нічого. Дзеркало
+    // _dispatch у bridge.
+    let gap = null;
+    try { gap = opGap(msg.type, msg.payload || {}); } catch { gap = null; }
     try {
       apply(msg.type, msg.payload, msg.gseq);
-      send({ m: 'apply_ack', gseq: msg.gseq, ok: true });
+      const ack = { m: 'apply_ack', gseq: msg.gseq, ok: true };
+      if (gap) { ack.gap = gap; ack.type = msg.type; }
+      send(ack);
     } catch (error) {
       send({ m: 'apply_ack', gseq: msg.gseq, ok: false, error: error.message });
     }

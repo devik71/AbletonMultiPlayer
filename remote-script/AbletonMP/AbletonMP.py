@@ -4181,13 +4181,24 @@ class AbletonMP(ControlSurface):
         m = msg.get("m")
         if m == "apply":
             gseq = msg.get("gseq")
+            etype = msg.get("type")
+            payload = msg.get("payload") or {}
+            # Прогалину рахуємо ДО застосування: _apply на нерозвʼязану адресу
+            # мовчки виходить -- це правильна tombstone-семантика, але автор
+            # події через неї не дізнається нічого. Він крутить ручку, у
+            # партнера нічого не рухається, і жоден із двох не бачить причини.
+            gap = self._safe(self._op_gap, etype, payload)
             try:
-                self._apply(msg.get("type"), msg.get("payload") or {}, gseq)
+                self._apply(etype, payload, gseq)
             except Exception as e:
                 self._link.send({"m": "apply_ack", "gseq": gseq,
                                  "ok": False, "error": repr(e)})
                 raise
-            self._link.send({"m": "apply_ack", "gseq": gseq, "ok": True})
+            ack = {"m": "apply_ack", "gseq": gseq, "ok": True}
+            if gap:
+                ack["gap"] = gap
+                ack["type"] = etype
+            self._link.send(ack)
         elif m == "state_apply":
             self._safe(self._start_state_apply, msg.get("path"), msg.get("id"))
         elif m == "view_set":

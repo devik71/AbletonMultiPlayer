@@ -100,6 +100,33 @@ const inject = (event) => new Promise((resolve, reject) => {
   ws.on('error', reject);
 });
 
+/** Те саме, що inject, але сокет лишається відкритим і чекає на скаргу.
+ *
+ *  Скарга адресується АВТОРОВІ події -- отже саме тому, хто її подав. Тут це
+ *  ghost, і в цьому вся суть перевірки: relay мусить знайти автора за gseq
+ *  і достукатись до нього, а не до всіх підряд. */
+const injectAndWaitGap = (event, ms = 15000) => new Promise((resolve, reject) => {
+  const ws = new WebSocket(`ws://127.0.0.1:${RELAY_PORT}`);
+  const timer = setTimeout(() => {
+    ws.close();
+    reject(new Error('скарга від партнера не прийшла'));
+  }, ms);
+  ws.on('open', () => ws.send(JSON.stringify({
+    m: 'join', session: SESSION, author: 'ghost', since: 1e9, proto: 1,
+  })));
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw);
+    if (msg.m === 'welcome') {
+      ws.send(JSON.stringify({ m: 'submit', event: { ...event, lseq: Date.now() } }));
+    } else if (msg.m === 'apply_gap') {
+      clearTimeout(timer);
+      ws.close();
+      resolve(msg);
+    }
+  });
+  ws.on('error', (e) => { clearTimeout(timer); reject(e); });
+});
+
 // ------------------------------------------------------------------- сценарій
 
 try {
@@ -993,6 +1020,34 @@ try {
     await waitFor(l1, /режим переїзду: move/, 5000);
   });
 
+  await check('автор дізнається, що партнер не зміг застосувати його подію', async () => {
+    // Найдорожчий різновид розсинхрону: подія доходить, приймальний бік чесно
+    // її пропускає, і про це знає лише його лог. Автор крутить ручку, у
+    // партнера нічого не рухається, причини не бачить ніхто.
+    //
+    // Живий приклад: Ableton перейменувала параметри стокових девайсів між
+    // 12.3.5 і 12.4.3 -- Morph став Filter Morph. Виміряно на парі машин.
+    const state = JSON.parse(readFileSync(join(tmp, 'p1.e2e.state.json'), 'utf8'));
+    const track = state.tracks.find((t) => t.id && (t.devices || []).length);
+    if (!track) throw new Error('у знімку немає треку з девайсами');
+
+    const gap = await injectAndWaitGap({
+      type: 'DeviceParamSet',
+      payload: {
+        track: { id: track.id },
+        device: track.devices[0].device,
+        parameter: { name: 'ТакогоПараметраНемає', ordinal: 0 },
+        value: 0.5,
+      },
+    });
+    if (gap.gap?.what !== 'parameter') {
+      throw new Error(`скарга не про параметр: ${JSON.stringify(gap.gap)}`);
+    }
+    if (gap.gap?.name !== 'ТакогоПараметраНемає') {
+      throw new Error('скарга не назвала параметр поіменно');
+    }
+  });
+
   await check('за тим індексом інший девайс -- партнер не стирає його', async () => {
     // Індекс каже, що поїхало; сигнатура ловить те, що поїхало не те.
     // Без цієї звірки розбіжність станів стерла б партнеру чужий девайс мовчки.
@@ -1596,10 +1651,10 @@ try {
     }
   });
 
-  await check('журнал: 133 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 134 події, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 133) throw new Error(`очікував 133 події, у журналі ${lines.length}`);
+    if (lines.length !== 134) throw new Error(`очікував 134 події, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);
