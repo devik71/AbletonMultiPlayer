@@ -8,7 +8,9 @@ const NOTE_TIME_SPAN = 4;
 // Дзеркало CLIP_LENGTH_MAX із bridge: заглушка Live під час запису
 // (два роки в секундах) не сміє стати регіоном на два роки.
 const CLIP_LENGTH_MAX = 1e6;
-const NOTES_PER_REGION = 1024;
+// Дзеркало NOTES_PER_REGION із bridge. Нота важить ~134 байти в JSON, а
+// датаграма мусить лишатись під 8192 -- межа macOS, не Windows.
+const NOTES_PER_REGION = 48;
 
 export const metaOps = (kind, ref, src) => ['name', 'color']
   .filter((prop) => src[prop] !== undefined && src[prop] !== null)

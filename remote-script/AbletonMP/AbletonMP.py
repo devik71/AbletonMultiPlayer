@@ -83,12 +83,18 @@ FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_ap
             "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons"]
 
 STATE_VERSION = 1
-STATE_CHUNK_CHARS = 30000
-STATE_CHUNKS_PER_TICK = 6
+# Чанк знімка мусить лишатись під MAX_DATAGRAM разом із JSON-обгорткою.
+STATE_CHUNK_CHARS = 6000
+# Чанки поменшали вчетверо, тож за тік їх іде більше -- інакше знімок
+# великого сету повз би вп'ятеро довше, ніж досі.
+STATE_CHUNKS_PER_TICK = 24
 # Застосування знімка: тисячі записів у LOM порціями, щоб не підвісити Live.
 STATE_APPLY_PER_TICK = 12
 STATE_APPLY_MAX_BYTES = 64 * 1024 * 1024
-NOTES_PER_REGION = 1024
+# Нота в JSON важить ~134 байти, тож 1024 нот -- це 135 КБ: такий пакет не
+# влазив навіть у стелю Windows, і будь-який кліп від тисячі нот мовчки
+# губився на обох системах. 48 нот -- це ~6.5 КБ, з запасом під обгортку.
+NOTES_PER_REGION = 48
 # Скільки різних прогалин несе звіт: далі йде лише лічильник.
 MISSING_LIMIT = 50
 

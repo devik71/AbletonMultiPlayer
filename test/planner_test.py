@@ -263,3 +263,65 @@ class BridgeShapeTest(unittest.TestCase):
             src = fh.read()
         self.assertEqual(src.count(chr(34) + 'm' + chr(34) + ': ' + chr(34) + 'hello' + chr(34)), 1,
                          'hello збирається більш ніж в одному місці')
+
+
+class DatagramBudgetTest(unittest.TestCase):
+    """Що ми шлемо по UDP, мусить влазити в найвужчу з підтримуваних систем.
+
+    Windows пускає датаграму до 65507, macOS -- 9216 (net.inet.udp.maxdgram)
+    і просто відмовляє в sendto. Виміряно на живій парі Windows+macOS:
+    bridge на Mac не міг віддати жодного чанка знімка, черга ретраїла той
+    самий пакет десять разів на секунду, і `state`, `diff` та віддача знімка
+    партнеру з Mac не працювали взагалі.
+
+    Окремо: 1024 ноти в регіоні -- це ~135 КБ, тобто такий пакет не влазив
+    навіть у стелю Windows. Кліп від тисячі нот мовчки губився всюди.
+    """
+
+    MACOS_MAXDGRAM = 9216
+    NOTE_BYTES = 134   # {"pitch":…,"start_time":…,…} -- виміряно
+
+    def consts(self):
+        import re
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+        out = {}
+        for path, names in (
+                (os.path.join(base, 'remote-script', 'AbletonMP', 'link.py'),
+                 ('MAX_DATAGRAM',)),
+                (os.path.join(base, 'remote-script', 'AbletonMP', 'AbletonMP.py'),
+                 ('STATE_CHUNK_CHARS', 'NOTES_PER_REGION'))):
+            with io.open(path, encoding='utf-8-sig') as fh:
+                src = fh.read()
+            for name in names:
+                m = re.search(r'^%s = (\d+)$' % name, src, re.M)
+                self.assertIsNotNone(m, '%s не знайдено' % name)
+                out[name] = int(m.group(1))
+        return out
+
+    def test_ceiling_fits_the_narrowest_system(self):
+        c = self.consts()
+        self.assertLessEqual(c['MAX_DATAGRAM'], self.MACOS_MAXDGRAM,
+                             'стеля датаграми більша за межу macOS')
+
+    def test_state_chunk_fits_the_ceiling(self):
+        c = self.consts()
+        # чанк іде всередині JSON-обгортки {"m":"state","seq":…,"data":"…"}
+        self.assertLess(c['STATE_CHUNK_CHARS'] + 512, c['MAX_DATAGRAM'],
+                        'чанк знімка не влазить у датаграму')
+
+    def test_note_region_fits_the_ceiling(self):
+        c = self.consts()
+        payload = c['NOTES_PER_REGION'] * self.NOTE_BYTES
+        self.assertLess(payload + 512, c['MAX_DATAGRAM'],
+                        'регіон нот не влазить у датаграму: %d байтів' % payload)
+
+    def test_mirror_agrees_on_notes_per_region(self):
+        import re
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+        with io.open(os.path.join(base, 'daemon', 'tools', 'state-ops.js'),
+                     encoding='utf-8') as fh:
+            js = fh.read()
+        m = re.search(r'const NOTES_PER_REGION = (\d+);', js)
+        self.assertIsNotNone(m, 'NOTES_PER_REGION у дзеркалі не знайдено')
+        self.assertEqual(int(m.group(1)), self.consts()['NOTES_PER_REGION'],
+                         'дзеркало ріже ноти інакше, ніж bridge')
