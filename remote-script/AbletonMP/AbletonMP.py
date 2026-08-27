@@ -52,7 +52,7 @@ APPLY_TYPES = [
     "ChainMixerSet",
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
-    "SlotStopButtonSet", "SamplePropSet",
+    "SlotStopButtonSet", "SamplePropSet", "DeviceStateSet",
 ]
 
 # Як емітити перенесення девайса. "move" -- один DeviceMove через
@@ -80,7 +80,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons", "sample_props"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons", "sample_props", "device_state"]
 
 STATE_VERSION = 1
 # Чанк знімка мусить лишатись під MAX_DATAGRAM разом із JSON-обгорткою.
@@ -125,6 +125,63 @@ CLIP_PROPS = ("gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode",
               # Кліп має ВЛАСНИЙ розмір такту, окремий від пісні: він
               # визначає сітку й те, як читаються позиції нот усередині.
               "signature_numerator", "signature_denominator")
+
+# Стан девайса, якого НЕМАЄ серед parameters.
+#
+# Виміряно аудитом на живому 12.3.5 (docs/device-audit.md): із 85 стокових
+# девайсів 68 не мають нічого понад parameters -- вони покриті DeviceParamSet
+# повністю. Решта тримає частину звучання в звичайних властивостях: яка саме
+# таблиця в осциляторі Wavetable, який режим програвання в Simpler, який IR
+# у Hybrid Reverb, куди йде матриця модуляції в Drift.
+#
+# Перелік плоский навмисно, без таблиці "клас -> властивості". Імена тут
+# достатньо характерні, щоб не перетнутись, а перевірка ведеться через
+# hasattr: девайс, у якого властивості немає, просто не потрапляє в підписку.
+# Новий девайс потім = рядок у цьому переліку, а не гілка в коді.
+DEVICE_STATE_PROPS = (
+    # раки: яка варіація підсвічена. Самі значення макросів -- параметри,
+    # тож звучання доїжджає й без цього; сюди йде лише вибір.
+    "selected_variation_index",
+    # Simpler: режим програвання змінює те, ЧИМ девайс є
+    "playback_mode", "slicing_playback_mode", "multi_sample_mode",
+    "pad_slicing", "retrigger", "voices",
+    "pitch_bend_range", "note_pitch_bend_range",
+    # Wavetable: яка таблиця в кожному осциляторі -- це і є звук
+    "oscillator_1_wavetable_index", "oscillator_1_wavetable_category",
+    "oscillator_1_effect_mode",
+    "oscillator_2_wavetable_index", "oscillator_2_wavetable_category",
+    "oscillator_2_effect_mode",
+    "filter_routing", "unison_mode", "unison_voice_count",
+    "mono_poly", "poly_voices",
+    # Hybrid Reverb: який завантажений IR
+    "ir_category_index", "ir_file_index", "ir_attack_time",
+    "ir_decay_time", "ir_size_factor", "ir_time_shaping_on",
+    # Drift: уся матриця модуляції
+    "mod_matrix_source_1_index", "mod_matrix_source_2_index",
+    "mod_matrix_source_3_index",
+    "mod_matrix_target_1_index", "mod_matrix_target_2_index",
+    "mod_matrix_target_3_index",
+    "mod_matrix_lfo_source_index", "mod_matrix_shape_source_index",
+    "mod_matrix_filter_source_1_index", "mod_matrix_filter_source_2_index",
+    "mod_matrix_pitch_source_1_index", "mod_matrix_pitch_source_2_index",
+    "voice_count_index", "voice_mode_index",
+    # Meld
+    "selected_engine", "unison_voices",
+    # Spectral Resonator
+    "frequency_dial_mode", "midi_gate", "mod_mode", "pitch_mode", "polyphony",
+    # EQ Eight
+    "edit_mode", "global_mode", "oversample",
+    # Roar, Shifter
+    "env_listen", "routing_mode_index", "pitch_mode_index",
+    # CC Control: на що мапиться кожен CC
+    "custom_bool_target",
+    "custom_float_target_0", "custom_float_target_1", "custom_float_target_2",
+    "custom_float_target_3", "custom_float_target_4", "custom_float_target_5",
+    "custom_float_target_6", "custom_float_target_7", "custom_float_target_8",
+    "custom_float_target_9", "custom_float_target_10", "custom_float_target_11",
+    # Drum Sampler, Looper
+    "gain", "loop_length", "overdub_after_record", "record_length_index", "tempo",
+)
 
 # Властивості обʼєкта Sample усередині Simpler/Sampler. Це НЕ параметри
 # девайса: ручки S Start і S Length -- окремі DeviceParameter, а маркери на
@@ -215,7 +272,7 @@ class AbletonMP(ControlSurface):
             "device": {}, "notes": {}, "clips": {}, "meta": {}, "view": None,
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
             "scene_timing": {}, "clip_props": {}, "cues": None, "returns": None,
-            "warp": {}, "chain": {}, "stopbtn": {}, "sample": {},
+            "warp": {}, "chain": {}, "stopbtn": {}, "sample": {}, "devstate": {},
         }
         self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
         self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
@@ -490,6 +547,11 @@ class AbletonMP(ControlSurface):
                 for prop in SAMPLE_PROPS:
                     self._listen(sample, prop,
                                  self._make_sample_prop_cb(track, device, prop))
+            # Стан повз parameters. hasattr замість таблиці класів: девайс,
+            # у якого властивості немає, просто не потрапляє в підписку.
+            for prop in self._device_state_props(device):
+                self._listen(device, prop,
+                             self._make_device_state_cb(track, device, prop))
             if not self._device_has_chains(device):
                 continue
             for kind, chains in self._rack_chain_groups(device):
@@ -801,6 +863,7 @@ class AbletonMP(ControlSurface):
             self._prime_mixer()  # listener'Рё РјС–РєС€РµСЂР° РїРµСЂРµРІС–С€Р°РЅС– РЅР° РЅРѕРІС– РѕР±'С”РєС‚Рё
             self._prime_devices()
             self._prime_samples()
+            self._prime_device_state()
             self._prime_notes()
             self._prime_metadata()
             self._prime_clip_loops()
@@ -827,6 +890,7 @@ class AbletonMP(ControlSurface):
             self._prime_mixer()
             self._prime_devices()
             self._prime_samples()
+            self._prime_device_state()
             self._prime_notes()
             self._prime_metadata()
             self._prime_clip_loops()
@@ -858,6 +922,7 @@ class AbletonMP(ControlSurface):
             # інакше поява девайса дала б залп DeviceParamSet на кожну ручку.
             self._prime_devices()
             self._prime_samples()
+            self._prime_device_state()
             if changed:
                 self._persist_registry()
 
@@ -909,6 +974,7 @@ class AbletonMP(ControlSurface):
         self._prime_mixer()
         self._prime_devices()
         self._prime_samples()
+        self._prime_device_state()
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
@@ -1000,6 +1066,7 @@ class AbletonMP(ControlSurface):
         self._prime_mixer()
         self._prime_devices()
         self._prime_samples()
+        self._prime_device_state()
         self._prime_notes()
         self._prime_metadata()
         self._prime_clip_loops()
@@ -1911,6 +1978,87 @@ class AbletonMP(ControlSurface):
         except Exception:
             return None
         return sample
+
+    @staticmethod
+    def _device_state_props(device):
+        """Які з відомих властивостей стану є саме в цього девайса."""
+        found = []
+        for prop in DEVICE_STATE_PROPS:
+            try:
+                value = getattr(device, prop)
+            except Exception:
+                continue
+            if value is None or isinstance(value, (bool, int, float)):
+                found.append(prop)
+        return found
+
+    def _make_device_state_cb(self, track, device, prop):
+        def cb():
+            self._safe(self._on_device_state, track, device, prop)
+        return cb
+
+    @staticmethod
+    def _device_state_value(device, prop):
+        try:
+            value = getattr(device, prop)
+        except Exception:
+            return None
+        if isinstance(value, bool):
+            return value
+        try:
+            value = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(value):
+            return None
+        return int(value) if float(value).is_integer() else round(value, 6)
+
+    def _on_device_state(self, track, device, prop):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        track_ref = self._device_track_ref(track)
+        _container, device_ref, chain_path = self._device_location(track, device)
+        if not track_ref or device_ref is None or chain_path is None:
+            return
+        value = self._device_state_value(device, prop)
+        if value is None:
+            return
+        key = self._sample_key(track_ref, chain_path, device_ref, prop)
+        if self._mirror["devstate"].get(key) == value:
+            return
+        self._mirror["devstate"][key] = value
+        payload = {"track": track_ref, "device": device_ref,
+                   "prop": prop, "value": value}
+        if chain_path:
+            payload["chain_path"] = chain_path
+        # Частина цих властивостей -- перемикачі, частина крутиться мишею
+        # (ir_decay_time, gain). Дебаунс безпечний для обох.
+        self._defer("devstate:" + key, "DeviceStateSet", payload)
+
+    def _prime_device_state(self):
+        self._mirror["devstate"] = {}
+        for track in self._iter_device_tracks():
+            track_ref = self._device_track_ref(track)
+            if not track_ref:
+                continue
+            for container, device, chain_path in self._iter_track_devices(track):
+                device_ref = self._device_ref(container, device)
+                if device_ref is None:
+                    continue
+                for prop in self._device_state_props(device):
+                    value = self._device_state_value(device, prop)
+                    if value is not None:
+                        key = self._sample_key(track_ref, chain_path, device_ref, prop)
+                        self._mirror["devstate"][key] = value
+
+    def _device_state_block(self, device):
+        """Стан девайса для знімка. None -- нічого понад parameters."""
+        state = {}
+        for prop in self._device_state_props(device):
+            value = self._device_state_value(device, prop)
+            if value is not None:
+                state[prop] = value
+        return state or None
 
     def _make_sample_prop_cb(self, track, device, prop):
         def cb():
@@ -3673,6 +3821,7 @@ class AbletonMP(ControlSurface):
                 self._prime_mixer()
                 self._prime_devices()
                 self._prime_samples()
+                self._prime_device_state()
                 self._prime_notes()
                 self._prime_metadata()
                 self._prime_clip_loops()
@@ -3949,6 +4098,42 @@ class AbletonMP(ControlSurface):
                 actual = self._clip_loop_state(clip)
                 if actual is not None:
                     self._mirror["loop"][_key] = actual
+
+        elif etype == "DeviceStateSet":
+            prop = payload.get("prop")
+            if prop not in DEVICE_STATE_PROPS:
+                return self._warn("gseq %s: невідома властивість девайса %r" % (gseq, prop))
+            track, _tref = self._resolve_device_track(payload.get("track"))
+            device = self._resolve_device_only(track, payload.get("chain_path"),
+                                               payload.get("device"))
+            if device is None:
+                return  # tombstone: девайса немає, подія мовчки не діє
+            if not hasattr(device, prop):
+                return self._warn("gseq %s: у девайса немає %s" % (gseq, prop))
+            value = payload.get("value")
+            if not isinstance(value, bool) and not isinstance(value, (int, float)):
+                return self._warn("gseq %s: %s має бути числом або булевим" % (gseq, prop))
+            if not isinstance(value, bool):
+                value = float(value)
+                if not math.isfinite(value):
+                    return self._warn("gseq %s: %s не є скінченним" % (gseq, prop))
+                value = int(value) if value.is_integer() else round(value, 6)
+
+            track_ref = self._device_track_ref(track)
+            _c, device_ref, chain_path = self._device_location(track, device)
+            key = self._sample_key(track_ref, chain_path, device_ref, prop)
+            self._mirror["devstate"][key] = value   # ДО запису -- глушимо ехо
+            try:
+                setattr(device, prop, value)
+            except Exception as e:
+                self._warn("gseq %s: %s не записався: %r" % (gseq, prop, e))
+            # Live мовчки клампить значення поза діапазоном -- дзеркало має
+            # відповідати тому, що вийшло, інакше наступна зміна не помітиться.
+            actual = self._device_state_value(device, prop)
+            if actual is None:
+                self._mirror["devstate"].pop(key, None)
+            else:
+                self._mirror["devstate"][key] = actual
 
         elif etype == "SamplePropSet":
             prop = payload.get("prop")
@@ -4722,6 +4907,7 @@ class AbletonMP(ControlSurface):
             self._persist_registry()
             self._prime_devices()
             self._prime_samples()
+            self._prime_device_state()
             self._prime_drum_pads()
             self._suppress_struct = struct_was
 
@@ -5872,6 +6058,9 @@ class AbletonMP(ControlSurface):
             sample = self._sample_state(device)
             if sample:
                 entry["sample"] = sample
+            block = self._device_state_block(device)
+            if block:
+                entry["state"] = block
             if chain_path:
                 entry["chain_path"] = chain_path
             devices.append(entry)
@@ -6880,6 +7069,7 @@ class AbletonMP(ControlSurface):
         self._persist_registry()
         self._prime_devices()
         self._prime_samples()
+        self._prime_device_state()
 
     def _apply_device_insert(self, payload, gseq):
         container, _track = self._resolve_device_container(
@@ -7049,6 +7239,7 @@ class AbletonMP(ControlSurface):
             self._persist_registry()
             self._prime_devices()
             self._prime_samples()
+            self._prime_device_state()
             self._suppress_struct = struct_was
 
     def _op_gap(self, etype, payload):
@@ -7074,6 +7265,17 @@ class AbletonMP(ControlSurface):
             if self._browser_item(ref) is None:
                 return {"what": "device_item",
                         "name": ref.get("name"), "uri": ref.get("uri")}
+            return None
+
+        if etype == "DeviceStateSet":
+            device = self._resolve_device_only(track, payload.get("chain_path"),
+                                               payload.get("device"))
+            display = (payload.get("device") or {}).get("class_display_name")
+            if device is None:
+                return {"what": "device", "track": self._safe_name(track), "device": display}
+            if not hasattr(device, payload.get("prop") or ""):
+                return {"what": "device_state", "track": self._safe_name(track),
+                        "device": display, "name": payload.get("prop")}
             return None
 
         if etype == "SamplePropSet":
@@ -7320,6 +7522,11 @@ class AbletonMP(ControlSurface):
                 if chain_path:
                     payload["chain_path"] = chain_path
                 ops.append(("SamplePropSet", payload))
+            for prop, value in (entry.get("state") or {}).items():
+                payload = {"track": ref, "device": device, "prop": prop, "value": value}
+                if chain_path:
+                    payload["chain_path"] = chain_path
+                ops.append(("DeviceStateSet", payload))
         return ops
 
     def _clip_ops(self, ref, clips):

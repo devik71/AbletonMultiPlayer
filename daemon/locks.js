@@ -20,6 +20,7 @@ const CONTINUOUS = new Set([
   'ClipWarpSet',
   'ChainMixerSet',
   'SamplePropSet',
+  'DeviceStateSet',
 ]);
 
 function trackName(registry, id, kind) {
@@ -39,7 +40,7 @@ export function lockTarget(type, payload, registry) {
 
   if (type === 'TempoSet') return { object: 'song:tempo', label: 'темп' };
 
-  if (type === 'SamplePropSet') {
+  if (type === 'SamplePropSet' || type === 'DeviceStateSet') {
     // Лок на девайс, а не на властивість: людина крутить один семпл, і
     // «зайнято» правильніше показувати про нього.
     const track = p.track?.id;

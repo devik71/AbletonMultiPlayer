@@ -82,6 +82,12 @@ export function supersedeKey(ev) {
     case 'SlotStopButtonSet':
       // Перемикач слота: остання перемагає, як і будь-який інший перемикач.
       return `stopbtn:${p.track?.id}:${p.scene?.id}`;
+    case 'DeviceStateSet':
+      // Своя адреса на пару (девайс, властивість): режим програвання не
+      // перекриває вибір таблиці, а серія рухів однієї доїжджає останньою.
+      return `devstate:${trackKey(p.track)}`
+        + `:${(p.chain_path || []).map((c) => c.id).join('/')}`
+        + `:${p.device?.class_name}#${p.device?.ordinal}:${p.prop}`;
     case 'SamplePropSet':
       // Своя адреса на пару (девайс, властивість): маркер тягнуть мишею, тож
       // серія доїжджає останньою -- але start_marker не перекриває gain.

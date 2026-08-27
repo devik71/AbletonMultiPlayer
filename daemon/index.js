@@ -415,6 +415,7 @@ function describeGap(gap) {
       ? `${gap.track} — у тебе в групі${gap.name ? ` «${gap.name}»` : ''}, у партнера поза нею`
       : `${gap.track} — у партнера в групі${gap.name ? ` «${gap.name}»` : ''}, у тебе поза нею`;
   }
+  if (gap.what === 'device_state') return `${where} — немає властивості ${gap.name}`;
   if (gap.what === 'sample') return `${where} — у девайса немає семплу`;
   if (gap.what === 'chain') return `ланцюг ${gap.id} — такого немає в жодному раку`;
   if (gap.what === 'arr_clip') {

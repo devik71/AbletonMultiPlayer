@@ -1574,6 +1574,20 @@ try {
     }
   });
 
+  await check('стан девайса повз параметри доїжджає', async () => {
+    // DeviceParamSet возить будь-який DeviceParameter, тож параметри покриті
+    // всі. Але яка саме таблиця в осциляторі Wavetable -- не параметр, і без
+    // цієї події сет у партнера звучав би інакше при однакових ручках.
+    const from = l2.out.length;
+    l1.stdin.write('devstate oscillator_1_wavetable_index 4\n');
+    await waitFor(l2, /<- #\d+ DeviceStateSet .*"oscillator_1_wavetable_index".*4/, 8000, from);
+    l1.stdin.write('devstate poly_voices 3\n');
+    await waitFor(l2, /<- #\d+ DeviceStateSet .*"poly_voices".*3/, 8000, from);
+    if (/DeviceStateSet ВІДХИЛЕНО/.test(l2.out.slice(from))) {
+      throw new Error('партнер відхилив стан девайса');
+    }
+  });
+
   await check('маркери семплу доїжджають — це не параметри девайса', async () => {
     // У Simpler ручки S Start і S Length -- звичайні DeviceParameter, а
     // маркери на хвилі живуть в окремому обʼєкті sample. Виміряно на живому
@@ -1651,10 +1665,10 @@ try {
     }
   });
 
-  await check('журнал: 134 події, монотонний gseq, цілий hash-chain', async () => {
+  await check('журнал: 136 подій, монотонний gseq, цілий hash-chain', async () => {
     await new Promise((r) => setTimeout(r, 400));
     const lines = readFileSync(join(tmp, `${SESSION}.jsonl`), 'utf8').split('\n').filter(Boolean);
-    if (lines.length !== 134) throw new Error(`очікував 134 події, у журналі ${lines.length}`);
+    if (lines.length !== 136) throw new Error(`очікував 136 подій, у журналі ${lines.length}`);
     let prev = '';
     lines.forEach((line, i) => {
       const { hash, prev_hash: ph, ...body } = JSON.parse(line);

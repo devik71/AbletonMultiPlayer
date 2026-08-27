@@ -45,6 +45,21 @@ const fakeFilter = (value = 0.5) => ({
   parameters: [fakeParam('Frequency', value)],
 });
 // Simpler із семплом: єдиний девайс, у якого стан живе не лише в параметрах.
+// Девайс, стан якого живе НЕ в параметрах: саме такий випадок і ловить
+// DeviceStateSet. Числа взяті з живого Wavetable.
+const fakeWavetable = () => ({
+  class_name: 'InstrumentVector',
+  class_display_name: 'Wavetable',
+  parameters: [fakeParam('Osc 1 Gain', 0.5)],
+  state: {
+    oscillator_1_wavetable_index: 0,
+    oscillator_1_wavetable_category: 0,
+    filter_routing: 0,
+    mono_poly: 1,
+    poly_voices: 6,
+  },
+});
+
 const fakeSimpler = () => ({
   class_name: 'OriginalSimpler',
   class_display_name: 'Simpler',
@@ -56,7 +71,7 @@ const fakeNestedRack = () => ({
   class_name: 'AudioEffectGroupDevice',
   class_display_name: 'Audio Effect Rack',
   parameters: [fakeParam('Macro 1', 0.5)],
-  chains: [{ id: null, name: 'Inner Chain', devices: [fakeFilter(0.35), fakeSimpler()] }],
+  chains: [{ id: null, name: 'Inner Chain', devices: [fakeFilter(0.35), fakeSimpler(), fakeWavetable()] }],
   return_chains: [],
 });
 const fakeRack = () => ({
@@ -379,7 +394,7 @@ const sendHello = () =>
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
       'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,ClipWarpSet,ChainMixerSet,' +
       'ArrangementClipCreate,ArrangementClipMove,ArrangementClipDelete,ArrangementClipNotesSet,' +
-      'SlotStopButtonSet,SamplePropSet').split(','),
+      'SlotStopButtonSet,SamplePropSet,DeviceStateSet').split(','),
   });
 
 function emit(type, payload) {
@@ -493,6 +508,7 @@ const deviceEntries = (track) => {
         parameters,
       };
       if (device.sample) entry.sample = { ...device.sample };
+      if (device.state) entry.state = { ...device.state };
       if (chainPath.length) entry.chain_path = chainPath;
       out.push(entry);
       for (const [, chains] of chainGroups(device)) {
@@ -817,6 +833,17 @@ function opGap(type, payload) {
 
   // Ланцюг і кліп у лінійці адресуються власним uuid, повз сцену.
   // Без цих гілок пропущене рахувалось би застосованим.
+  if (type === 'DeviceStateSet') {
+    const { device } = resolveDeviceParameter(track, payload.chain_path, payload.device,
+                                              { name: '', ordinal: 0 });
+    const display = payload.device?.class_display_name;
+    if (!device) return { what: 'device', track: track?.name, device: display };
+    if (!device.state || !(payload.prop in device.state)) {
+      return { what: 'device_state', track: track?.name, device: display, name: payload.prop };
+    }
+    return null;
+  }
+
   if (type === 'SamplePropSet') {
     const { device } = resolveDeviceParameter(track, payload.chain_path, payload.device,
                                               { name: '', ordinal: 0 });
@@ -1265,6 +1292,18 @@ function apply(type, payload, gseq) {
       const clip = arrTarget ? arrTarget.clip : t.clips[s];
       if (!clip) break;   // tombstone: кліпа немає, подія мовчки не діє
       clip[payload.prop] = value;
+      break;
+    }
+    case 'DeviceStateSet': {
+      const t = deviceTrackByRef(payload.track);
+      if (!t) return reject('невідомий трек');
+      const { device } = resolveDeviceParameter(t, payload.chain_path, payload.device,
+                                                { name: '', ordinal: 0 });
+      if (!device) return reject('невідомий девайс');
+      if (!device.state || !(payload.prop in device.state)) {
+        return reject(`у девайса немає ${payload.prop}`);
+      }
+      device.state[payload.prop] = payload.value;
       break;
     }
     case 'SamplePropSet': {
@@ -1828,6 +1867,38 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       (t.stopOff || (t.stopOff = new Set()))[value ? 'delete' : 'add'](scene.id);
       emit('SlotStopButtonSet', { track: trackRef(t), scene: sceneRef(scene), value });
       console.log(`слот ${rest[0]}/${rest[1]}: стоп-кнопка ${value ? 'є' : 'немає'}`);
+      break;
+    }
+    case 'devstate': {
+      // devstate <prop> <значення> -- шукає девайс, у якого така властивість є
+      const prop = rest[0];
+      const raw = Number(rest[1]);
+      let found = null;
+      let owner = null;
+      for (const cand of song.tracks) {
+        const flat = [];
+        const walk = (c, path) => {
+          for (const d of c.devices || []) {
+            flat.push([d, path]);
+            for (const [, chains] of chainGroups(d)) {
+              for (const ch of chains) walk(ch, ch.id ? [...path, { id: ch.id }] : path);
+            }
+          }
+        };
+        walk(cand, []);
+        found = flat.find(([d]) => d.state && prop in d.state);
+        if (found) { owner = cand; break; }
+      }
+      if (!found) return console.log('у сеті немає девайса з такою властивістю');
+      const [dev, path] = found;
+      dev.state[prop] = raw;
+      emit('DeviceStateSet', {
+        track: trackRef(owner),
+        device: { class_name: dev.class_name, class_display_name: dev.class_display_name, ordinal: 0 },
+        prop, value: raw,
+        ...(path.length ? { chain_path: path } : {}),
+      });
+      console.log(`${dev.class_display_name}: ${prop} = ${raw}`);
       break;
     }
     case 'sampleprop': {
@@ -2453,6 +2524,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         '           delclip <t> <s> | loop <t> <s> <start> <end> | clipprop <t> <s> <prop> <v>',
         '           warp <t> <s> <доля:семпл> ... | stopbtn <t> <s> <0|1>',
         'семпл:     sampleprop <t> <prop> <значення> -- маркери на хвилі Simpler',
+        'девайс:    devstate <prop> <значення> -- стан повз параметри',
         'лінійка:   arr <t> <s> <доля> | movearr <t> <idx> <доля> | delarr <t> <idx>',
         '           arrnote <t> <idx> <pitch> <start> <dur> [vel]',
         'семпли:    dropsample <t> <s> <шлях> | droppad <t> <нота> <шлях>',

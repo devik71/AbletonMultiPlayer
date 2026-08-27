@@ -56,6 +56,13 @@ const deviceOps = (ref, devices) => devices.flatMap((entry) => {
     if (entry.chain_path?.length) payload.chain_path = entry.chain_path;
     ops.push(['SamplePropSet', payload]);
   }
+  // Стан девайса повз parameters: яка таблиця в осциляторі, який режим
+  // програвання, який IR. Виміряно аудитом -- docs/device-audit.md.
+  for (const [prop, value] of Object.entries(entry.state || {})) {
+    const payload = { track: ref, device: entry.device, prop, value };
+    if (entry.chain_path?.length) payload.chain_path = entry.chain_path;
+    ops.push(['DeviceStateSet', payload]);
+  }
   return ops;
 });
 
