@@ -82,6 +82,24 @@ function deviceDiff(where, my, their, add) {
     if (!other) continue;
     const a = paramMap(mine);
     const b = paramMap(other);
+
+    // Параметр, який є лише в одного, -- це не «дрібниця, якої не видно».
+    // На парі Live 12.3.5 + 12.4.3 саме через це digest розходився, а звіт
+    // казав «щось, чого порівняння не дивиться» -- тобто найгірше можливе:
+    // розбіжність є, вона названа не буде, і шукати нема де.
+    const onlyMine = [...a.keys()].filter((k) => !b.has(k));
+    const onlyTheirs = [...b.keys()].filter((k) => !a.has(k));
+    if (onlyMine.length || onlyTheirs.length) {
+      const show = (list) => list.slice(0, 3).map((k) => k.split('#')[0]).join(', ')
+        + (list.length > 3 ? ` та ще ${list.length - 3}` : '');
+      if (onlyMine.length) {
+        add(`${where}, ${mine.device?.class_display_name}: параметри є в тебе, у партнера немає — ${show(onlyMine)}`);
+      }
+      if (onlyTheirs.length) {
+        add(`${where}, ${mine.device?.class_display_name}: параметри є в партнера, у тебе немає — ${show(onlyTheirs)}`);
+      }
+    }
+
     const differing = [...a].filter(([name, value]) => b.has(name) && b.get(name) !== value);
     if (!differing.length) continue;
     const shown = differing.slice(0, 3)

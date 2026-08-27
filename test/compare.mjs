@@ -239,3 +239,21 @@ test('структура називається раніше за ланцюги
   const out = compareStates(mine, theirs, { limit: 10 });
   assert.ok(out[0].includes('«Bass»'), `першим має бути зниклий трек, а не ланцюг: ${out[0]}`);
 });
+
+test('параметр, який є лише в одного, називається окремо', () => {
+  // Live 12.3.5 і 12.4.3 віддають різну кількість параметрів стокових
+  // девайсів. Раніше через це digest розходився, а звіт казав «щось, чого
+  // порівняння не дивиться» — розбіжність є, названа не буде, шукати ніде.
+  const dev = (params) => ({
+    device: { class_name: 'Reverb', class_display_name: 'Reverb', ordinal: 0 },
+    parameters: params.map((n, i) => ({ name: n, ordinal: 0, value: 0.5 })),
+  });
+  const state = (params) => ({
+    tracks: [{ id: 't1', name: 'Bass', mixer: {}, clips: [], devices: [dev(params)] }],
+    scenes: [],
+  });
+  const out = compareStates(state(['DecayTime', 'DryWet']),
+                            state(['DecayTime', 'DryWet', 'Diffusion', 'Density']));
+  assert.ok(out.some((l) => l.includes('є в партнера, у тебе немає') && l.includes('Diffusion')),
+    `зайві параметри партнера не названі: ${out.join(' | ')}`);
+});
