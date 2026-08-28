@@ -302,6 +302,10 @@ class AbletonMP(ControlSurface):
             "warp": {}, "chain": {}, "stopbtn": {}, "sample": {}, "devstate": {},
         }
         self._obj_cbs = []  # (об'єкт, назва властивості, callback)
+        # Перепідписку не можна робити всередині callback-а слота: вона знімає
+        # ВСІ listener-и, і сусідня подія, яку Live ще не встиг доставити,
+        # помирає разом зі своєю підпискою. Тому -- прапорець і тік.
+        self._rewire_pending = False
         self._pending = {}   # key -> відкладена подія, схлопується за ключем
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._rec_pending = {}   # clip key -> кліп, що зараз пишеться
@@ -469,7 +473,19 @@ class AbletonMP(ControlSurface):
         except Exception:
             pass  # параметра тут немає (напр. arm на треку, який не озброюється)
 
+    def _request_rewire(self):
+        """Перепідписатись на наступному тіку, а не просто зараз.
+
+        Перетягування кліпа зі слота в слот -- це для Live дві зміни has_clip
+        в одному пакеті. Якщо обробник цільового слота перепідпишеться на
+        місці, підписка слота-джерела зникне ДО того, як Live її викличе:
+        ClipDelete не губиться в дорозі, він не народжується взагалі, і
+        партнер лишається з двома кліпами замість одного переїханого.
+        """
+        self._rewire_pending = True
+
     def _rewire_tracks(self):
+        self._rewire_pending = False
         self._unwire_tracks()
         for track in self._doc.tracks:
             self._listen(track, "playing_slot_index", self._make_slot_cb(track))
@@ -3080,7 +3096,7 @@ class AbletonMP(ControlSurface):
         """Track clip creation/deletion and rebind the note observer."""
         key = self._clip_key(track, scene)
         if key is None:
-            self._rewire_tracks()
+            self._request_rewire()
             return
         previous = self._mirror["clips"].get(key)
         current = None
@@ -3116,7 +3132,7 @@ class AbletonMP(ControlSurface):
                 self._safe(self._emit_sample_load_slot, clip, refs)
 
         # has_clip changed: the old clip listener is dead or a new one is needed.
-        self._rewire_tracks()
+        self._request_rewire()
         self._prime_metadata()
         self._prime_clip_loops()
         self._prime_stop_buttons()
@@ -4449,6 +4465,8 @@ class AbletonMP(ControlSurface):
             return
         for msg in self._link.poll():
             self._safe(self._dispatch, msg)
+        if self._rewire_pending:
+            self._safe(self._rewire_tracks)
         self._safe(self._flush_clips)
         self._safe(self._flush_notes)
         self._safe(self._flush_recording_clips)

@@ -179,3 +179,24 @@ test('українські рядки в bridge не побиті подвійн
   assert.deepEqual(bad, [],
     `подвійне кодування в рядках: ${bad.slice(0, 10).join(', ')}`);
 });
+
+test('перепідписка не робиться всередині callback-а слота', () => {
+  // _rewire_tracks знімає ВСІ listener-и й вішає нові замикання. Викликана
+  // з обробника слота, вона вбиває підписку сусіднього слота ДО того, як
+  // Live встиг її викликати. Наслідок виміряний на живій парі: перетягування
+  // кліпа зі слота в слот давало партнеру ДВА кліпи, бо ClipDelete не
+  // народжувався взагалі. Всередині обробника дозволено лише _request_rewire.
+  const from = src.indexOf('    def _on_slot_content(self');
+  assert.ok(from > 0, '_on_slot_content не знайдено');
+  const to = src.indexOf('\n    def ', from + 10);
+  const body = src.slice(from, to);
+  assert.ok(!/self\._rewire_tracks\(\)/.test(body),
+    '_on_slot_content мусить просити перепідписку через _request_rewire');
+  assert.ok(/self\._request_rewire\(\)/.test(body),
+    '_on_slot_content мусить хоч колись просити перепідписку');
+
+  // І сам тік мусить її виконувати -- інакше підписки не оновляться ніколи.
+  const pump = src.slice(src.indexOf('    def _pump(self)'));
+  assert.match(pump.slice(0, 900), /_rewire_pending/,
+    '_pump мусить виконувати відкладену перепідписку');
+});
