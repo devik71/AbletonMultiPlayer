@@ -4636,21 +4636,59 @@ class AbletonMP(ControlSurface):
         """
         sample = payload.get("sample") or {}
         rel = sample.get("path")
+        target = payload.get("target") or {}
+
+        # Слот -- найпростіший випадок, і для нього браузер не потрібен
+        # узагалі: ClipSlot.create_audio_clip бере абсолютний шлях напряму.
+        # Перевірено на 12.3.5 і 12.4.3.
+        #
+        # Це не оптимізація. На macOS вузол браузера "Current Project" буває
+        # ПОРОЖНІМ навіть при відкритому проєкті -- виміряно на живій парі,
+        # і через це семпли з Windows не доїжджали до Mac узагалі: подія
+        # мовчки крутилась у черзі три хвилини й здавалась. Прямий шлях
+        # цього не залежить, а заразом не смикає виділення.
+        if target.get("kind") == "slot":
+            return self._apply_sample_to_slot(payload, rel, gseq)
+
         item = self._project_browser_item(rel)
         if item is None:
             # Файл ще не доїхав або лежить не там: черга спробує ще раз
             return False
-        target = payload.get("target") or {}
         if target.get("kind") == "drum_pad":
             self._apply_sample_to_pad(payload, target, item, gseq)
             return True
         if target.get("kind") == "arrangement":
             self._apply_sample_to_arrangement(payload, target, item, gseq)
             return True
-        if target.get("kind") != "slot":
-            self._warn("gseq %s: невідома ціль для семпла %r"
-                       % (gseq, target.get("kind")))
-            return True
+        self._warn("gseq %s: невідома ціль для семпла %r"
+                   % (gseq, target.get("kind")))
+        return True
+
+    def _project_file_path(self, rel):
+        """Абсолютний шлях до семпла в теці проєкту, або None.
+
+        Розділювач беремо з os.path: подія несе шлях через скісну риску
+        завжди (так домовлено в протоколі), а от локальна файлова система
+        може вимагати іншого.
+        """
+        parts = [p for p in str(rel or "").split("/") if p]
+        if not parts:
+            return None
+        try:
+            als = self._doc_str(self._doc.file_path)
+        except Exception:
+            return None
+        if not als:
+            return None
+        folder = os.path.dirname(als)
+        full = os.path.join(folder, *parts)
+        return full if os.path.exists(full) else None
+
+    def _apply_sample_to_slot(self, payload, rel, gseq):
+        """Audio-кліп у слот напряму, без браузера. False -- файл ще не тут."""
+        full = self._project_file_path(rel)
+        if full is None:
+            return False   # файл ще їде filesync-ом, черга спробує ще раз
         track, scene, slot = self._resolve_clip_slot(payload, gseq)
         if slot is None:
             return True
@@ -4659,36 +4697,14 @@ class AbletonMP(ControlSurface):
                 return True  # ідемпотентність: у слоті вже щось є
         except Exception:
             return True
-
-        view = getattr(self._doc, "view", None)
-        if view is None:
-            return True
-        # Глушіння те саме, що у DeviceLoad: load_item рухає виділення, і без
-        # цього власний рух полетів би партнеру як присутність, а створений
-        # кліп -- назад як подія.
-        saved_slot = self._safe_attr(view, "highlighted_clip_slot")
-        saved_track = self._safe_attr(view, "selected_track")
         struct_was = self._suppress_struct
         self._suppress_struct = True
-        self._suppress_view = True
-        self._view_applied_at = time.time()
         try:
-            view.selected_track = track
-            view.highlighted_clip_slot = slot
-            Live.Application.get_application().browser.load_item(item)
+            slot.create_audio_clip(full)
         except Exception as e:
-            self._warn("gseq %s: семпл не завантажився: %r" % (gseq, e))
+            self._warn("gseq %s: audio-кліп не створився: %r" % (gseq, e))
         finally:
-            try:
-                if saved_slot is not None:
-                    view.highlighted_clip_slot = saved_slot
-                elif saved_track is not None:
-                    view.selected_track = saved_track
-            except Exception:
-                pass
-            self._view_applied_at = time.time()
-            self._suppress_view = False
-            self._mirror["view"] = self._view_signature()
+            self._suppress_struct = struct_was
             self._rewire_tracks()
             self._prime_metadata()
             self._prime_clip_loops()
@@ -4697,7 +4713,6 @@ class AbletonMP(ControlSurface):
             self._prime_all_clip_warp()
             self._prime_arrangement_clips()
             self._prime_chains_mix()
-            self._suppress_struct = struct_was
         return True
 
     def _apply_sample_to_arrangement(self, payload, target, item, gseq):

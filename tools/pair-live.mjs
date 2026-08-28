@@ -371,6 +371,80 @@ await check('кліп у лінійці доїжджає, переїжджає �
   await sleep(2500);
 });
 
+await check('audio-семпл доїжджає в слот партнера', async () => {
+  // Довго не працювало в бік macOS: вузол браузера «Current Project» там
+  // буває порожнім навіть при відкритому проєкті, і подія мовчки крутилась
+  // у черзі три хвилини. Тепер слот наповнюється через create_audio_clip
+  // за абсолютним шляхом -- браузер більше ні до чого.
+  const scene = 7;
+  const snap = await exec1([{ op: 'snapshot' }]);
+  const state = snap?.result?.snapshot || {};
+  const track = (state.tracks || []).find((t) => /Audio/.test(t.name || ''));
+  if (!track?.id) throw new Error('немає audio-треку');
+  const idx = (state.tracks || []).indexOf(track);
+
+  // Чистимо з обох боків: перевірка про створення, а не про залишок
+  await exec1([{ op: 'delete_clip', track_index: idx, scene_index: scene }]);
+  exec2([{ op: 'delete_clip', track_index: idx, scene_index: scene }]);
+  await sleep(2500);
+
+  // Природна дія: кладемо семпл у слот у себе. Далі має спрацювати
+  // звичайний ланцюг -- listener слота, подія, застосування в партнера.
+  const rel = 'Samples/Imported/OLIVER_118_drum_loop_mixready_lose_it.wav';
+  const dir = String(state.file_path || '').replace(/[\\/][^\\/]*$/, '');
+  const sep = dir.includes('\\') ? '\\' : '/';
+  const full = dir + sep + rel.split('/').join(sep);
+  const made = await exec1([{ op: 'lom_call',
+    path: ['tracks', idx, 'clip_slots', scene], method: 'create_audio_clip',
+    args: [full] }]);
+  if (!one(made)?.ok) throw new Error(`кліп не створився в себе: ${one(made)?.error}`);
+  await sleep(6000);
+
+  const there = val(exec2([{ op: 'lom_get',
+    path: ['tracks', idx, 'clip_slots', scene, 'has_clip'] }]));
+  if (there !== true) throw new Error('audio-кліпа в партнера немає');
+});
+
+
+await check('warp-маркери audio-кліпа доїжджають', async () => {
+  // Ті самі семпли, розтягнуті по-різному, звучать по-різному. Маркери
+  // описують відображення цілком, тож їдуть повним набором.
+  //
+  // Кліп шукаємо перебором, а не рахуємо індекс: у знімку порядок треків
+  // свій, і обчислений індекс уже раз завів перевірку не в той слот.
+  let clip = null;
+  outer:
+  for (let t = 0; t < 8; t += 1) {
+    for (const sc of [7, 6, 5]) {
+      const path = ['tracks', t, 'clip_slots', sc, 'clip'];
+      if (val(await exec1([{ op: 'lom_get', path: [...path, 'is_audio_clip'] }])) === true) {
+        clip = path;
+        break outer;
+      }
+    }
+  }
+  if (!clip) return console.log('       audio-кліпа в сеті немає — пропущено');
+
+  await exec1([{ op: 'lom_set', path: clip, property: 'warping', value: true }]);
+  await sleep(2500);
+  const before = val(exec2([{ op: 'lom_get', path: [...clip, 'warp_markers'] }]));
+  if (!Array.isArray(before)) throw new Error('у партнера немає цього кліпа');
+
+  const moved = await exec1([{ op: 'lom_call', path: clip,
+    method: 'move_warp_marker', args: [0, 0.25] }]);
+  if (!one(moved)?.ok) {
+    await exec1([{ op: 'lom_call', path: clip, method: 'set_warp_marker_at',
+                   args: [8, 2.0] }]);
+  }
+  await sleep(4500);
+
+  const after = val(exec2([{ op: 'lom_get', path: [...clip, 'warp_markers'] }])) || [];
+  if (JSON.stringify(after) === JSON.stringify(before)) {
+    throw new Error(`маркери в партнера не змінились (${after.length} шт.)`);
+  }
+});
+
+
 await check('знімок партнера доїжджає й порівнюється', async () => {
   if (!MY_CMD || !MY_LOG) throw new Error('потрібні --my-cmd і --my-log');
   const from = log1().length;
