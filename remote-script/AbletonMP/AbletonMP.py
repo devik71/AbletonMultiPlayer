@@ -141,6 +141,11 @@ CLIP_PROPS = ("gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode",
 # Наскільки має змінитись темп, щоб це вважалось зміною. Ableton Link несе
 # темп із похибкою в мільйонні долі BPM, і без порога кожен його дотик
 # виглядав як нова подія. Тисячна доля не чутна нікому.
+# Наскільки плейхед може не дотягнути до заданої позиції й це ще вважається
+# «став туди». Live округлює позицію до своєї сітки, і різниця в тисячні
+# долі долі -- це округлення, а не інша позиція.
+CUE_POSITION_EPSILON = 0.001
+
 TEMPO_EPSILON = 0.001
 
 DEVICE_STATE_PROPS = (
@@ -2426,57 +2431,81 @@ class AbletonMP(ControlSurface):
         return self._valid_cue_time(payload.get("time"))
 
     def _toggle_cue_at(self, time, gseq):
-        """set_or_delete_cue працює у ПОТОЧНІЙ позиції, іншого шляху немає.
+        """Перемикає локатор у заданій позиції. True -- зроблено або безнадійно.
 
-        Тобто щоб поставити локатор у партнера, доводиться на мить зрушити
-        його плейхед. Під час відтворення це чути, тож туди ми не ліземо --
-        подія чекає в черзі, доки транспорт зупиниться.
+        set_or_delete_cue працює у ПОТОЧНІЙ позиції, іншого шляху немає.
+        Тобто щоб поставити локатор у партнера, доводиться зрушити його
+        плейхед -- і зробити це доводиться в ОКРЕМОМУ тіку, бо запис
+        current_song_time не застосовується миттєво.
+
+        Під час відтворення ми туди не ліземо взагалі: подія чекає в черзі,
+        доки транспорт зупиниться, бо смикати чужий плейхед на льоту чути.
+
+        Позицію не відновлюємо: рух плейхеда при зупиненому транспорті --
+        це те саме, що клацнути в лінійці, і повертати його назад означало б
+        ще один такий самий стрибок.
         """
-        saved = self._safe_attr(self._doc, "current_song_time")
+        landed = self._safe_attr(self._doc, "current_song_time")
+        if landed is None or abs(float(landed) - float(time)) > CUE_POSITION_EPSILON:
+            # Плейхед ще не там. Просимо Live його зрушити й ЙДЕМО ГЕТЬ:
+            # запис current_song_time не встигає застосуватись у тому ж
+            # тіку, а set_or_delete_cue працює в поточній позиції -- тобто
+            # створив би локатор там, де плейхед лишився.
+            #
+            # Виміряно на живій парі: подія просила 52, плейхед лишився на
+            # 128, і локатор зʼявився на 128 -- та ще й полетів назад подією.
+            # Тому запит на рух і сам перемикач розведені по тіках.
+            try:
+                self._doc.current_song_time = time
+            except Exception as e:
+                self._warn("gseq %s: плейхед не рушив: %r" % (gseq, e))
+                return True   # безнадійно, знімаємо з черги
+            return False      # ще не зробили: спробуємо наступного тіка
+
         try:
-            self._doc.current_song_time = time
             self._doc.set_or_delete_cue()
         except Exception as e:
             self._warn("gseq %s: локатор не перемкнувся: %r" % (gseq, e))
-        finally:
-            try:
-                if saved is not None:
-                    self._doc.current_song_time = saved
-            except Exception:
-                pass
+        return True
 
     def _apply_cue_set(self, payload, gseq):
+        """True -- зроблено або безнадійно; False -- плейхед ще їде."""
         time = self._cue_payload_time(payload)
         if time is None:
             self._warn("gseq %s: некоректна позиція локатора %r" % (gseq, payload.get("time")))
-            return
+            return True
         name = self._doc_str(payload.get("name") or "")
         if len(name) > 64:
             name = name[:64]
         cue = self._cue_at(time)
         self._mirror.setdefault("cues", {})[time] = name  # ДО запису -- глушимо ехо
         if cue is None:
-            self._toggle_cue_at(time, gseq)
+            if not self._toggle_cue_at(time, gseq):
+                return False   # плейхед ще їде, спробуємо наступного тіка
             cue = self._cue_at(time)
             if cue is None:
                 self._warn("gseq %s: локатор на %s не створився" % (gseq, time))
-                return
+                return True
         if name:
             try:
                 cue.name = name
             except Exception as e:
                 self._warn("gseq %s: локатор не перейменувався: %r" % (gseq, e))
         self._mirror["cues"] = self._cue_map()
+        return True
 
     def _apply_cue_delete(self, payload, gseq):
+        """True -- зроблено або безнадійно; False -- плейхед ще їде."""
         time = self._cue_payload_time(payload)
         if time is None:
-            return
+            return True
         if self._cue_at(time) is None:
-            return  # tombstone: локатора вже немає
+            return True  # tombstone: локатора вже немає
         self._mirror.setdefault("cues", {}).pop(time, None)
-        self._toggle_cue_at(time, gseq)
+        if not self._toggle_cue_at(time, gseq):
+            return False
         self._mirror["cues"] = self._cue_map()
+        return True
 
     def _return_ids(self):
         """uuid Return-треків у порядку позицій."""
@@ -5626,6 +5655,18 @@ class AbletonMP(ControlSurface):
                 out[attr] = str(getattr(value, attr))
             except Exception:
                 pass
+        # Кілька скалярів, без яких обʼєкт непрозорий. CuePoint без time --
+        # це просто назва: ні знайти його, ні порівняти з чужим неможливо.
+        # Виявилось на пробі, яка не бачила локатора, що насправді доїхав.
+        for attr in ("time", "start_time", "end_time", "length"):
+            try:
+                number = getattr(value, attr)
+            except Exception:
+                continue
+            try:
+                out[attr] = round(float(number), 6)
+            except Exception:
+                pass
         try:
             out.update(self._ai_parameter_summary(value))
         except Exception:
@@ -6991,10 +7032,20 @@ class AbletonMP(ControlSurface):
                 self._warn("gseq %s: локатор не поставлено -- відтворення "
                            "триває надто довго" % (entry["gseq"],))
                 return True
-            self._load_queue.pop(0)
             handler = (self._apply_cue_set if etype == "CueSet"
                        else self._apply_cue_delete)
-            self._safe(handler, entry["payload"], entry["gseq"])
+            # Знімаємо з черги ЛИШЕ коли зроблено: першим тіком локатор
+            # просить плейхед зрушити, і зробити сам перемикач може аж
+            # наступним -- запис current_song_time не миттєвий.
+            done = self._safe(handler, entry["payload"], entry["gseq"])
+            if done:
+                self._load_queue.pop(0)
+                return True
+            if time.time() - entry["since"] < CUE_QUEUE_MAX_SEC:
+                return False
+            self._load_queue.pop(0)
+            self._warn("gseq %s: локатор не поставлено -- плейхед не став "
+                       "на місце" % (entry["gseq"],))
             return True
         if etype in ("DeviceLoad", "SampleLoad") and self._recording_guard():
             if time.time() - entry["since"] < LOAD_QUEUE_MAX_SEC:

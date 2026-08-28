@@ -68,7 +68,8 @@ function exec2(actions) {
   try { return JSON.parse(out); } catch { return { ok: false, raw: out }; }
 }
 
-const val = (r) => r?.result?.results?.[0]?.result;
+const one = (r) => r?.result?.results?.[0];
+const val = (r) => one(r)?.result;
 
 const log1 = () => (MY_LOG ? readFileSync(MY_LOG, 'utf8') : '');
 const log2 = () => ssh(`cat ${PEER_LOG}`);
@@ -234,6 +235,140 @@ await check('сцена створюється й зникає з обох бо�
   await sleep(3000);
   const after = val(exec2([{ op: 'lom_get', path: ['scenes'] }]))?.length;
   if (after !== before) throw new Error(`сцен лишилось ${after} замість ${before}`);
+});
+
+await check('локатори доїжджають і зникають', async () => {
+  // Локатор -- структура документа, а не чиясь позначка: партнер без них
+  // бачить голу лінійку. Адресуються часом, бо CuePoint.time лише на читання.
+  // Позиція має лягати на сітку: Live мовчки не пускає плейхед куди
+  // завгодно, а локатор ставиться саме в поточній позиції.
+  const at = 48 + (Date.now() % 8) * 4;
+  await exec1([{ op: 'lom_set', path: ['song'], property: 'current_song_time', value: at }]);
+  await exec1([{ op: 'lom_call', path: ['song'], method: 'set_or_delete_cue', args: [] }]);
+  await sleep(3000);
+  const times = (n) => {
+    const list = val(exec2([{ op: 'lom_get', path: ['song', 'cue_points'] }])) || [];
+    return list.map((c, i) => (typeof c?.time === 'number'
+      ? c.time
+      : val(exec2([{ op: 'lom_get', path: ['song', 'cue_points', i, 'time'] }]))));
+  };
+  const cues = times();
+  if (!cues.some((t) => Math.abs(t - at) < 0.001)) {
+    throw new Error(`локатора на ${at} у партнера немає (є: ${cues.join(', ') || '—'})`);
+  }
+
+  // І назад: повторний виклик у тій самій позиції прибирає локатор
+  await exec1([{ op: 'lom_call', path: ['song'], method: 'set_or_delete_cue', args: [] }]);
+  await sleep(3000);
+  if (times().some((t) => Math.abs(t - at) < 0.001)) {
+    throw new Error('локатор не зник у партнера');
+  }
+});
+
+await check('темп сцени доїжджає одним блоком', async () => {
+  // Сцена, що мовчки перемикає темп в одного і не перемикає в іншого,
+  // розводить пару миттєво. Live тримає це пʼятіркою повʼязаних полів.
+  const P = ['scenes', 1];
+  await exec1([{ op: 'lom_set', path: P, property: 'tempo', value: 96 }]);
+  await exec1([{ op: 'lom_set', path: P, property: 'tempo_enabled', value: true }]);
+  await sleep(3000);
+  const there = val(exec2([{ op: 'lom_get', path: [...P, 'tempo'] }]));
+  const on = val(exec2([{ op: 'lom_get', path: [...P, 'tempo_enabled'] }]));
+  if (Math.abs(there - 96) > 0.01 || on !== true) {
+    throw new Error(`у партнера темп сцени ${there}, увімкнено ${on}`);
+  }
+  await exec1([{ op: 'lom_set', path: P, property: 'tempo_enabled', value: false }]);
+  await sleep(2000);
+});
+
+await check('мікшер ланцюга в раку доїжджає', async () => {
+  // У Drum Rack кожен пад -- це ланцюг. Його гучність частина звучання,
+  // і адресується вона власним uuid ланцюга, а не позицією.
+  const chain = ['tracks', 0, 'devices', 0, 'chains', 0];
+  const probe = exec2([{ op: 'lom_get', path: [...chain, 'mixer_device', 'volume', 'value'] }]);
+  if (!one(probe)?.ok) return console.log('       у партнера немає такого ланцюга — пропущено');
+  await exec1([{ op: 'lom_set', path: [...chain, 'mixer_device', 'volume'],
+                 property: 'value', value: 0.42 }]);
+  await sleep(3000);
+  const there = val(exec2([{ op: 'lom_get', path: [...chain, 'mixer_device', 'volume', 'value'] }]));
+  if (Math.abs(there - 0.42) > 0.005) throw new Error(`у партнера ${there}`);
+  await exec1([{ op: 'lom_set', path: [...chain, 'mixer_device', 'volume'],
+                 property: 'value', value: 0.85 }]);
+  await sleep(1500);
+});
+
+await check('стан девайса повз параметри доїжджає', async () => {
+  // playback_mode у Simpler -- не параметр, а звичайна властивість. Без
+  // DeviceStateSet сет у партнера звучав би інакше при однакових ручках.
+  const dev = ['tracks', 0, 'devices', 0, 'chains', 0, 'devices', 0];
+  const was = val(await exec1([{ op: 'lom_get', path: [...dev, 'playback_mode'] }]));
+  if (typeof was !== 'number') return console.log('       Simpler не знайдено — пропущено');
+  const next = was === 0 ? 1 : 0;
+  await exec1([{ op: 'lom_set', path: dev, property: 'playback_mode', value: next }]);
+  await sleep(3000);
+  const there = val(exec2([{ op: 'lom_get', path: [...dev, 'playback_mode'] }]));
+  if (there !== next) throw new Error(`у партнера ${there}, чекали ${next}`);
+  await exec1([{ op: 'lom_set', path: dev, property: 'playback_mode', value: was }]);
+  await sleep(1500);
+});
+
+await check('маркери семплу доїжджають окремо від ручок', async () => {
+  const dev = ['tracks', 0, 'devices', 0, 'chains', 0, 'devices', 0, 'sample'];
+  const was = val(await exec1([{ op: 'lom_get', path: [...dev, 'start_marker'] }]));
+  if (typeof was !== 'number') return console.log('       семплу немає — пропущено');
+  const next = was > 1000 ? 500 : 4321;
+  await exec1([{ op: 'lom_set', path: dev, property: 'start_marker', value: next }]);
+  await sleep(3000);
+  const there = val(exec2([{ op: 'lom_get', path: [...dev, 'start_marker'] }]));
+  if (there !== next) throw new Error(`у партнера ${there}, чекали ${next}`);
+  await exec1([{ op: 'lom_set', path: dev, property: 'start_marker', value: was }]);
+  await sleep(1500);
+});
+
+await check('стоп-кнопка порожнього слота доїжджає', async () => {
+  // Саме порожній слот зі стоп-кнопкою вирішує, чи зупинить трек запуск
+  // сцени. Тобто це не косметика вʼю, а те, як сет звучить на переходах.
+  const slot = ['tracks', 0, 'clip_slots', 2];
+  const was = val(await exec1([{ op: 'lom_get', path: [...slot, 'has_stop_button'] }]));
+  if (typeof was !== 'boolean') return console.log('       стоп-кнопка не читається — пропущено');
+  await exec1([{ op: 'lom_set', path: slot, property: 'has_stop_button', value: !was }]);
+  await sleep(3000);
+  const there = val(exec2([{ op: 'lom_get', path: [...slot, 'has_stop_button'] }]));
+  if (there !== !was) throw new Error(`у партнера ${there}`);
+  await exec1([{ op: 'lom_set', path: slot, property: 'has_stop_button', value: was }]);
+  await sleep(1500);
+});
+
+await check('кліп у лінійці доїжджає, переїжджає і зникає', async () => {
+  // Найтонше місце: у партнера кліп збирається в тимчасовому слоті Session
+  // і вже звідти дублюється в лінійку. Тимчасовий кліп не має протекти.
+  const scene = 6;
+  await exec1([{ op: 'delete_clip', track_index: 1, scene_index: scene }]).catch(() => {});
+  await sleep(800);
+  await exec1([{ op: 'create_midi_clip', track_index: 1, scene_index: scene, length: 4 }]);
+  await sleep(2000);
+  // Підпис виміряно з живого Live: duplicate_clip_to_arrangement(clip, time)
+  // викликається НА ТРЕКУ, а не на кліпі.
+  const dup = await exec1([{ op: 'lom_call', path: ['tracks', 1],
+                             method: 'duplicate_clip_to_arrangement',
+                             args: [{ $path: ['tracks', 1, 'clip_slots', scene, 'clip'] }, 160] }]);
+  if (!one(dup)?.ok) throw new Error(`дублювання в лінійку не вдалось: ${one(dup)?.error}`);
+  await sleep(4000);
+
+  const arr = val(exec2([{ op: 'lom_get', path: ['tracks', 1, 'arrangement_clips'] }])) || [];
+  const got = arr.filter((c) => Math.abs((c?.start_time ?? -1) - 160) < 0.01);
+  if (!got.length) throw new Error(`кліпа на 160-й долі в партнера немає (${arr.length} у лінійці)`);
+
+  // Прибираємо за собою з обох боків
+  const mine = val(await exec1([{ op: 'lom_get', path: ['tracks', 1, 'arrangement_clips'] }])) || [];
+  for (let i = mine.length - 1; i >= 0; i -= 1) {
+    if (Math.abs((mine[i]?.start_time ?? -1) - 160) < 0.01) {
+      await exec1([{ op: 'lom_call', path: ['tracks', 1], method: 'delete_clip',
+                     args: [{ $path: ['tracks', 1, 'arrangement_clips', i] }] }]);
+    }
+  }
+  await exec1([{ op: 'delete_clip', track_index: 1, scene_index: scene }]);
+  await sleep(2500);
 });
 
 await check('знімок партнера доїжджає й порівнюється', async () => {
