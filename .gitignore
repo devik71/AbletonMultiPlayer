@@ -29,3 +29,6 @@ conversations/
 extensions-sdk-*/
 extension/vendor/*.tgz
 extension/dist/
+
+# адреса relay, яку запамʼятовує start-p2.bat -- у кожного своя
+.relay-address

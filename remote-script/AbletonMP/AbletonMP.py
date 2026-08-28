@@ -1,11 +1,11 @@
 ﻿# -*- coding: utf-8 -*-
-"""AbletonMP -- С‚РѕРЅРєРёР№ bridge РјС–Р¶ Live Object Model С– Р»РѕРєР°Р»СЊРЅРёРј daemon.
+"""AbletonMP -- тонкий bridge між Live Object Model і локальним daemon.
 
-Р†РЅРІР°СЂС–Р°РЅС‚ С†СЊРѕРіРѕ С„Р°Р№Р»Сѓ: **Р·РІС–РґСЃРё РЅС–РєРѕР»Рё РЅРµ РІРёР»С–С‚Р°С” РІРёРЅСЏС‚РѕРє Сѓ Live**. РљРѕР¶РµРЅ callback
-Р· Р±РѕРєСѓ Live С– РєРѕР¶РµРЅ tick Р·Р°РіРѕСЂРЅСѓС‚С– РІ _safe(). Р’СЃСЏ Р»РѕРіС–РєР°, СЏРєСѓ РјРѕР¶РЅР° РІРёРЅРµСЃС‚Рё РЅР°Р·РѕРІРЅС–,
-РІРёРЅРµСЃРµРЅР° РІ daemon.
+Інваріант цього файлу: **звідси ніколи не вилітає виняток у Live**. Кожен callback
+з боку Live і кожен tick загорнуті в _safe(). Вся логіка, яку можна винести назовні,
+винесена в daemon.
 
-Р¤Р°Р·Р° 1: transport (play/stop), tempo, clip launch/stop.
+Фаза 1: transport (play/stop), tempo, clip launch/stop.
 """
 
 import json
@@ -19,7 +19,7 @@ import Live
 
 try:
     from ableton.v2.control_surface import ControlSurface
-except ImportError:  # СЃС‚Р°СЂС–С€С–/С–РЅС€С– Р·Р±С–СЂРєРё
+except ImportError:  # старіші/інші збірки
     from _Framework.ControlSurface import ControlSurface
 
 from .link import UdpLink
@@ -64,11 +64,11 @@ DEVICE_MOVE_MODE = (os.environ.get("ABLETONMP_DEVICE_MOVE") or "move").strip().l
 HEARTBEAT_SEC = 2.0
 LOG_MAX_BYTES = 512 * 1024
 
-# Р”РµР±Р°СѓРЅСЃ РЅРµРїРµСЂРµСЂРІРЅРёС… РїР°СЂР°РјРµС‚СЂС–РІ: Р¶СѓСЂРЅР°Р» РјР°С” РЅРµСЃС‚Рё РґС–С— РєРѕСЂРёСЃС‚СѓРІР°С‡Р°, Р° РЅРµ РєРѕР¶РµРЅ
-# РєСЂРѕРє СЂСѓС‡РєРё. DEBOUNCE_SEC -- С‚РёС€Р° РїС–СЃР»СЏ РѕСЃС‚Р°РЅРЅСЊРѕС— Р·РјС–РЅРё, РїС–СЃР»СЏ СЏРєРѕС— Р¶РµСЃС‚
-# РІРІР°Р¶Р°С”С‚СЊСЃСЏ Р·Р°РІРµСЂС€РµРЅРёРј. DEBOUNCE_MAX_HOLD -- СЃС‚РµР»СЏ: РїС–Рґ С‡Р°СЃ РґРѕРІРіРѕРіРѕ Р±РµР·РїРµСЂРµСЂРІРЅРѕРіРѕ
-# Р¶РµСЃС‚Сѓ РїРѕРґС–СЏ РІСЃРµ РѕРґРЅРѕ Р№РґРµ СЂР°Р· РЅР° СЃРµРєСѓРЅРґСѓ, С‰РѕР± С…РІРёР»РёРЅРЅРёР№ СЂСѓС… РЅРµ РїСЂРѕРїР°РІ РїСЂРё СЂРѕР·СЂРёРІС–
-# (С‚РѕР№ СЃР°РјРёР№ checkpoint, С‰Рѕ Р№ Сѓ vision.md В§5.5).
+# Дебаунс неперервних параметрів: журнал має нести дії користувача, а не кожен
+# крок ручки. DEBOUNCE_SEC -- тиша після останньої зміни, після якої жест
+# вважається завершеним. DEBOUNCE_MAX_HOLD -- стеля: під час довгого безперервного
+# жесту подія все одно йде раз на секунду, щоб хвилинний рух не пропав при розриві
+# (той самий checkpoint, що й у vision.md §5.5).
 DEBOUNCE_SEC = 0.2
 DEBOUNCE_MAX_HOLD = 1.0
 
@@ -255,10 +255,10 @@ NOTE_FIELDS = (
     "probability", "velocity_deviation", "release_velocity",
 )
 
-# РљР»СЋС‡С– РґР»СЏ set_data/get_data -- Р·Р±РµСЂС–РіР°РЅРЅСЏ РІСЃРµСЂРµРґРёРЅС– СЃР°РјРѕРіРѕ .als.
-# РџСЂС–РѕСЂРёС‚РµС‚ Р·Р° DATA_KEY_OBJ: uuid Р»РµР¶РёС‚СЊ РЅР° СЃР°РјРѕРјСѓ РѕР±'С”РєС‚С–, С‚РѕР¶ РїРµСЂРµР¶РёРІР°С”
-# РїРµСЂРµСЃС‚Р°РІР»СЏРЅРЅСЏ С‚СЂРµРєС–РІ РјС–Р¶ СЃРµСЃС–СЏРјРё. DATA_KEY_MAP -- С„РѕР»Р±РµРє РѕРґРЅС–С”СЋ РјР°РїРѕСЋ РЅР° Song,
-# СЏРєС‰Рѕ РѕР±'С”РєС‚Рё РЅРµ РїС–РґС‚СЂРёРјСѓСЋС‚СЊ set_data; РІС–РЅ РїСЂРёРІ'СЏР·Р°РЅРёР№ РґРѕ РїРѕР·РёС†С–Р№ С– СЃР»Р°Р±С€РёР№.
+# Ключі для set_data/get_data -- зберігання всередині самого .als.
+# Пріоритет за DATA_KEY_OBJ: uuid лежить на самому об'єкті, тож переживає
+# переставляння треків між сесіями. DATA_KEY_MAP -- фолбек однією мапою на Song,
+# якщо об'єкти не підтримують set_data; він прив'язаний до позицій і слабший.
 DATA_KEY_OBJ = "abletonmp_id"
 DATA_KEY_MAP = "abletonmp_registry"
 
@@ -301,13 +301,13 @@ class AbletonMP(ControlSurface):
             "scene_timing": {}, "clip_props": {}, "cues": None, "returns": None,
             "warp": {}, "chain": {}, "stopbtn": {}, "sample": {}, "devstate": {},
         }
-        self._obj_cbs = []  # (РѕР±'С”РєС‚, РЅР°Р·РІР° РІР»Р°СЃС‚РёРІРѕСЃС‚С–, callback)
-        self._pending = {}   # key -> РІС–РґРєР»Р°РґРµРЅР° РїРѕРґС–СЏ, СЃС…Р»РѕРїСѓС”С‚СЊСЃСЏ Р·Р° РєР»СЋС‡РµРј
+        self._obj_cbs = []  # (об'єкт, назва властивості, callback)
+        self._pending = {}   # key -> відкладена подія, схлопується за ключем
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._rec_pending = {}   # clip key -> кліп, що зараз пишеться
         self._load_queue = []    # DeviceLoad: по одному за тік
         self._browser_cache = None
-        self._clip_buf = {}  # track_idx -> psi, РЅР°РєРѕРїРёС‡СѓС”С‚СЊСЃСЏ РјС–Р¶ С‚С–РєР°РјРё
+        self._clip_buf = {}  # track_idx -> psi, накопичується між тіками
         self._unshared_tracks = set()  # групи: uuid є, але в мережу не йдуть
         self._group_warned = set()
         self._exc_seen = set()   # про кожне місце -- один рядок партнеру
@@ -331,11 +331,11 @@ class AbletonMP(ControlSurface):
         self._saved_arr_records = []
         self._arr_records = []
         self._chain_records = []
-        # РґРѕ Р±СѓС‚СЃС‚СЂР°РїСѓ uuid С‰Рµ РЅРµ СЃРїС–Р»СЊРЅС– Р· РїР°СЂС‚РЅРµСЂРѕРј, С‚РѕР¶ РїРѕРґС–С— Р· РїРѕСЃРёР»Р°РЅРЅСЏРјРё
-        # РЅР° РѕР±'С”РєС‚Рё РЅС–РєСѓРґРё РЅРµ РІС–РґРїСЂР°РІР»СЏС”РјРѕ -- РІРѕРЅРё Р± Сѓ РЅСЊРѕРіРѕ РЅРµ Р·Р°СЂРµР·РѕР»РІРёР»РёСЃСЊ
+        # до бутстрапу uuid ще не спільні з партнером, тож події з посиланнями
+        # на об'єкти нікуди не відправляємо -- вони б у нього не зарезолвились
         self._registry_ready = False
-        # РїРѕРєРё Р·Р°СЃС‚РѕСЃРѕРІСѓС”РјРѕ С‡СѓР¶Сѓ СЃС‚СЂСѓРєС‚СѓСЂРЅСѓ РїРѕРґС–СЋ, СЃРІС–Р№ listener РјР°С” РјРѕРІС‡Р°С‚Рё:
-        # С–РЅР°РєС€Рµ СЃС‚РІРѕСЂРµРЅРёР№ С‚СЂРµРє РѕРґСЂР°Р·Сѓ РїРѕС—С…Р°РІ Р±Рё РЅР°Р·Р°Рґ СЏРє РІР»Р°СЃРЅРёР№ TrackCreate
+        # поки застосовуємо чужу структурну подію, свій listener має мовчати:
+        # інакше створений трек одразу поїхав би назад як власний TrackCreate
         self._suppress_struct = False
         self._safe(self._setup)
 
@@ -366,8 +366,8 @@ class AbletonMP(ControlSurface):
                 pass  # властивості немає в цій збірці Live
         self._doc.add_tracks_listener(self._cb_tracks)
         self._doc.add_scenes_listener(self._cb_scenes)
-        # РїРѕСЏРІР°/Р·РЅРёРєРЅРµРЅРЅСЏ return-С‚СЂРµРєСѓ Р·РјС–РЅСЋС” РєС–Р»СЊРєС–СЃС‚СЊ send-С–РІ РЅР° РєРѕР¶РЅРѕРјСѓ С‚СЂРµРєСѓ,
-        # Р° С†Рµ РѕРєСЂРµРјС– listener'Рё -- Р±РµР· С†СЊРѕРіРѕ РЅРѕРІС– send-Рё Р»РёС€РёР»РёСЃСЊ Р±Рё РЅС–РјРёРјРё
+        # поява/зникнення return-треку змінює кількість send-ів на кожному треку,
+        # а це окремі listener'и -- без цього нові send-и лишились би німими
         self._doc.add_return_tracks_listener(self._cb_tracks)
         self._rewire_tracks()
         self._wire_view()
@@ -399,10 +399,10 @@ class AbletonMP(ControlSurface):
         }
 
     def _probe_persistence(self):
-        """Р©Рѕ РґРѕСЃС‚СѓРїРЅРѕ РґР»СЏ Р·Р±РµСЂС–РіР°РЅРЅСЏ СЂРµС”СЃС‚СЂСѓ РІ С†С–Р№ Р·Р±С–СЂС†С– Live.
+        """Що доступно для зберігання реєстру в цій збірці Live.
 
-        РќС–С‡РѕРіРѕ РЅРµ РїРёС€Рµ -- Р»РёС€Рµ РґРёРІРёС‚СЊСЃСЏ. Р”СЂСѓРіР° РјР°С€РёРЅР° РјРѕР¶Рµ РјР°С‚Рё С–РЅС€Сѓ РІРµСЂСЃС–СЋ Live,
-        С– С‚РѕРґС– С†РµР№ СЂСЏРґРѕРє Сѓ Р»РѕР·С– РѕРґСЂР°Р·Сѓ РїРѕСЏСЃРЅСЋС”, С‡РѕРјСѓ СЂРµС”СЃС‚СЂ РЅРµ РїРµСЂРµР¶РёРІ СЃРµСЃС–СЋ.
+        Нічого не пише -- лише дивиться. Друга машина може мати іншу версію Live,
+        і тоді цей рядок у лозі одразу пояснює, чому реєстр не пережив сесію.
         """
         caps = {
             "song.set_data": hasattr(self._doc, "set_data"),
@@ -413,9 +413,9 @@ class AbletonMP(ControlSurface):
             "master_track.set_data": hasattr(self._doc.master_track, "set_data"),
         }
         try:
-            caps["file_path"] = str(self._doc.file_path) or "(РЅРµ Р·Р±РµСЂРµР¶РµРЅРѕ)"
+            caps["file_path"] = str(self._doc.file_path) or "(не збережено)"
         except Exception:
-            caps["file_path"] = "(РЅРµРґРѕСЃС‚СѓРїРЅРѕ)"
+            caps["file_path"] = "(недоступно)"
         self._log("persistence: %r" % (caps,))
         self._link.send({"m": "log", "level": "info", "text": "persistence: %r" % (caps,)})
 
@@ -424,7 +424,7 @@ class AbletonMP(ControlSurface):
         ControlSurface.disconnect(self)
 
     def _teardown(self):
-        # РЅРµР·Р°РІРµСЂС€РµРЅРёР№ Р¶РµСЃС‚ РЅРµ РјР°С” РїСЂРѕРїР°СЃС‚Рё СЂР°Р·РѕРј С–Р· Р·Р°РєСЂРёС‚С‚СЏРј Live
+        # незавершений жест не має пропасти разом із закриттям Live
         self._safe(self._flush_clips)
         self._safe(self._flush_notes, True)
         self._safe(self._flush_pending, True)
@@ -459,15 +459,15 @@ class AbletonMP(ControlSurface):
     # ------------------------------------------------------------- listeners
 
     def _listen(self, obj, prop, cb, store=None):
-        """РЈР·Р°РіР°Р»СЊРЅРµРЅР° РїС–РґРїРёСЃРєР°: LOM С‚СЂРёРјР°С” С”РґРёРЅСѓ СЃС…РµРјСѓ add_/remove_/_has_listener,
-        С‚РѕР¶ РїРµСЂРµР»С–С‡СѓРІР°С‚Рё РєРѕР¶РµРЅ РїР°СЂР°РјРµС‚СЂ РѕРєСЂРµРјРѕ РЅРµ С‚СЂРµР±Р°."""
+        """Узагальнена підписка: LOM тримає єдину схему add_/remove_/_has_listener,
+        тож перелічувати кожен параметр окремо не треба."""
         if store is None:
             store = self._obj_cbs
         try:
             getattr(obj, "add_%s_listener" % prop)(cb)
             store.append((obj, prop, cb))
         except Exception:
-            pass  # РїР°СЂР°РјРµС‚СЂР° С‚СѓС‚ РЅРµРјР°С” (РЅР°РїСЂ. arm РЅР° С‚СЂРµРєСѓ, СЏРєРёР№ РЅРµ РѕР·Р±СЂРѕСЋС”С‚СЊСЃСЏ)
+            pass  # параметра тут немає (напр. arm на треку, який не озброюється)
 
     def _rewire_tracks(self):
         self._unwire_tracks()
@@ -596,7 +596,7 @@ class AbletonMP(ControlSurface):
                 if getattr(obj, "%s_has_listener" % prop)(cb):
                     getattr(obj, "remove_%s_listener" % prop)(cb)
             except Exception:
-                pass  # РѕР±'С”РєС‚ СѓР¶Рµ РІРёРґР°Р»РµРЅРёР№ -- Р·РІРµСЂС‚Р°РЅРЅСЏ РєРёРґР°С” RuntimeError
+                pass  # об'єкт уже видалений -- звертання кидає RuntimeError
         self._obj_cbs = []
 
     def _make_slot_cb(self, track):
@@ -659,7 +659,7 @@ class AbletonMP(ControlSurface):
     def _on_is_playing(self):
         playing = bool(self._doc.is_playing)
         if self._mirror["playing"] == playing:
-            return  # С†Рµ РІС–РґР»СѓРЅРЅСЏ РЅР°С€РѕРіРѕ РІР»Р°СЃРЅРѕРіРѕ apply
+            return  # це відлуння нашого власного apply
         self._mirror["playing"] = playing
         self._emit("TransportSet", {"playing": playing})
 
@@ -885,12 +885,12 @@ class AbletonMP(ControlSurface):
                 self._mirror["scene_timing"][sid] = actual
 
     def _on_tracks(self):
-        # СЃС‚СЂСѓРєС‚СѓСЂР° С‚СЂРµРєС–РІ Р·РјС–РЅРёР»Р°СЃСЊ: РїРµСЂРµРїС–РґРїРёСЃСѓС”РјРѕСЃСЊ С– СЃРєРёРґР°С”РјРѕ РґР·РµСЂРєР°Р»Рѕ СЃР»РѕС‚С–РІ,
-        # С–РЅР°РєС€Рµ Р·СЃСѓРІ С–РЅРґРµРєСЃС–РІ РїРѕСЂРѕРґРёС‚СЊ С„Р°РЅС‚РѕРјРЅС– ClipLaunch
+        # структура треків змінилась: перепідписуємось і скидаємо дзеркало слотів,
+        # інакше зсув індексів породить фантомні ClipLaunch
         self._flush_notes(True)
         self._rewire_tracks()
         self._mirror["psi"] = {}
-        self._clip_buf = {}  # РЅР°РєРѕРїРёС‡РµРЅРµ РїРѕСЃРёР»Р°С”С‚СЊСЃСЏ РЅР° СЃС‚Р°СЂС– С–РЅРґРµРєСЃРё
+        self._clip_buf = {}  # накопичене посилається на старі індекси
         self._prime_mirror(transport=False)
         if self._registry_ready:
             self._diff_tracks(emit=not self._suppress_struct)
@@ -899,7 +899,7 @@ class AbletonMP(ControlSurface):
                 self._safe(self._diff_returns)
             if self._refresh_chains() or aux_changed:
                 self._persist_registry()
-            self._prime_mixer()  # listener'Рё РјС–РєС€РµСЂР° РїРµСЂРµРІС–С€Р°РЅС– РЅР° РЅРѕРІС– РѕР±'С”РєС‚Рё
+            self._prime_mixer()  # listener'и мікшера перевішані на нові об'єкти
             self._prime_devices()
             self._prime_samples()
             self._prime_device_state()
@@ -967,9 +967,9 @@ class AbletonMP(ControlSurface):
 
     @staticmethod
     def _norm_psi(value):
-        """Live РјР°С” РєС–Р»СЊРєР° РІС–РґКјС”РјРЅРёС… Р·РЅР°С‡РµРЅСЊ РґР»СЏ В«РЅРµ РіСЂР°С”В» (-1 РЅС–С‡РѕРіРѕ, -2 С” fired slot).
-        Р”Р»СЏ Р¶СѓСЂРЅР°Р»Сѓ С†Рµ РѕРґРёРЅ СЃС‚Р°РЅ; Р±РµР· РЅРѕСЂРјР°Р»С–Р·Р°С†С–С— РїРµСЂРµС…С–Рґ -1 -> -2 РІРёРіР»СЏРґР°С” СЏРє
-        Р·СѓРїРёРЅРєР° РєР»С–РїСѓ С– РїРѕСЂРѕРґР¶СѓС” С„Р°РЅС‚РѕРјРЅРёР№ ClipStop."""
+        """Live має кілька відʼємних значень для «не грає» (-1 нічого, -2 є fired slot).
+        Для журналу це один стан; без нормалізації перехід -1 -> -2 виглядає як
+        зупинка кліпу і породжує фантомний ClipStop."""
         if value is None or value < 0:
             return -1
         return value
@@ -982,21 +982,21 @@ class AbletonMP(ControlSurface):
         if self._mirror["psi"].get(idx) == psi:
             return
         self._mirror["psi"][idx] = psi
-        # РќРµ РІС–РґРїСЂР°РІР»СЏС”РјРѕ РѕРґСЂР°Р·Сѓ: Р·Р°РїСѓСЃРє СЃС†РµРЅРё СЃРјРёРєР°С” listener РЅР° РєРѕР¶РЅРѕРјСѓ С‚СЂРµРєСѓ
-        # РѕРєСЂРµРјРѕ. РќР°РєРѕРїРёС‡СѓС”РјРѕ РґРѕ РЅР°СЃС‚СѓРїРЅРѕРіРѕ С‚С–РєСѓ С– С‚Р°Рј РІРёСЂС–С€СѓС”РјРѕ, С‰Рѕ С†Рµ Р±СѓР»Рѕ.
+        # Не відправляємо одразу: запуск сцени смикає listener на кожному треку
+        # окремо. Накопичуємо до наступного тіку і там вирішуємо, що це було.
         self._clip_buf[idx] = psi
 
     # -------------------------------------------------------------- registry
 
     def _build_registry(self):
-        """Р’РёРґР°С” uuid СѓСЃС–Рј РѕР±'С”РєС‚Р°Рј. Р РµР·СѓР»СЊС‚Р°С‚ СЃС‚Р°С” РїРѕРґС–С”СЋ RegistryInit Сѓ Р¶СѓСЂРЅР°Р»С–."""
+        """Видає uuid усім об'єктам. Результат стає подією RegistryInit у журналі."""
         self._tracks_reg.clear()
         self._scenes_reg.clear()
         self._aux_tracks_reg.clear()
         self._chains_reg.clear()
         self._arr_reg.clear()
-        # СЃРїРµСЂС€Сѓ РїС–РґРЅС–РјР°С”РјРѕ uuid С–Р· СЃР°РјРѕРіРѕ .als: СЏРєС‰Рѕ РѕР±РёРґРІС– РјР°С€РёРЅРё РІС–РґРєСЂРёР»Рё С‚РѕР№
-        # СЃР°РјРёР№ С„Р°Р№Р», РІРѕРЅРё РѕС‚СЂРёРјР°СЋС‚СЊ РѕРґРЅР°РєРѕРІС– uuid С‰Рµ РґРѕ Р±СѓРґСЊ-СЏРєРѕРіРѕ РѕР±РјС–РЅСѓ
+        # спершу піднімаємо uuid із самого .als: якщо обидві машини відкрили той
+        # самий файл, вони отримають однакові uuid ще до будь-якого обміну
         restored = self._restore_registry()
         reg = {"tracks": [], "scenes": []}
         for i, t in enumerate(self._doc.tracks):
@@ -1038,28 +1038,28 @@ class AbletonMP(ControlSurface):
         return reg
 
     def _adopt_registry(self, reg):
-        """РќР°РєР»Р°РґР°С” С‡СѓР¶С– uuid РЅР° СЃРІРѕС— РѕР±'С”РєС‚Рё Р·Р° РїРѕР·РёС†С–С”СЋ, Р·РІС–СЂСЏСЋС‡Рё С–РјРµРЅР°.
+        """Накладає чужі uuid на свої об'єкти за позицією, звіряючи імена.
 
-        Р¦Рµ С”РґРёРЅРµ РјС–СЃС†Рµ, РґРµ С–РЅРґРµРєСЃ С‰Рµ С” Р°РґСЂРµСЃРѕСЋ -- РѕРґРЅРѕСЂР°Р·РѕРІРѕ, РЅР° Р±СѓС‚СЃС‚СЂР°РїС–.
-        Р”Р°Р»С– С–РЅРґРµРєСЃРё РІ РїСЂРѕС‚РѕРєРѕР»С– РЅРµ С„С–РіСѓСЂСѓСЋС‚СЊ РІР·Р°РіР°Р»С–.
+        Це єдине місце, де індекс ще є адресою -- одноразово, на бутстрапі.
+        Далі індекси в протоколі не фігурують взагалі.
         """
         self._tracks_reg.clear()
         self._scenes_reg.clear()
         self._aux_tracks_reg.clear()
         self._chains_reg.clear()
         self._arr_reg.clear()
-        # uuid, Р·Р±РµСЂРµР¶РµРЅС– РІ .als, РіРѕР»РѕРІРЅС–С€С– Р·Р° РїРѕР·РёС†С–СЋ: С–Рј'СЏ С‚СЂРµРєСѓ РІ Live
-        # Р·РјС–РЅСЋС”С‚СЊСЃСЏ СЃР°РјРµ СЃРѕР±РѕСЋ РІС–Рґ РєРёРЅСѓС‚РѕРіРѕ РґРµРІР°Р№СЃР°, С‚РѕР¶ Р·РІС–СЂРєР° Р·Р° С–РјРµРЅРµРј
-        # РІС–РґРєРёРґР°Р»Р° Р± С†С–Р»РєРѕРј Р»РµРіС–С‚РёРјРЅС– Р·Р±С–РіРё
+        # uuid, збережені в .als, головніші за позицію: ім'я треку в Live
+        # змінюється саме собою від кинутого девайса, тож звірка за іменем
+        # відкидала б цілком легітимні збіги
         self._restore_registry()
         problems = []
         by_data = 0
         by_position = 0
-        matched = {}  # Р·Р° РІРёРґРѕРј: СЃРєС–Р»СЊРєРё Р·Р°РїРёСЃС–РІ Р±СѓР»Рѕ С– СЃРєС–Р»СЊРєРё Р·С–Р№С€Р»РѕСЃСЊ
+        matched = {}  # за видом: скільки записів було і скільки зійшлось
 
         for kind, records, objects, reg_obj in (
-            ("С‚СЂРµРє", reg.get("tracks") or [], self._doc.tracks, self._tracks_reg),
-            ("СЃС†РµРЅР°", reg.get("scenes") or [], self._doc.scenes, self._scenes_reg),
+            ("трек", reg.get("tracks") or [], self._doc.tracks, self._tracks_reg),
+            ("сцена", reg.get("scenes") or [], self._doc.scenes, self._scenes_reg),
         ):
             matched[kind] = [len(records), 0]
             for rec in records:
@@ -1067,15 +1067,15 @@ class AbletonMP(ControlSurface):
                 if uid and reg_obj.obj_of(uid) is not None:
                     by_data += 1
                     matched[kind][1] += 1
-                    continue  # С†РµР№ РѕР±'С”РєС‚ СѓР¶Рµ РІРїС–Р·РЅР°РІ СЃРµР±Рµ СЃР°Рј
+                    continue  # цей об'єкт уже впізнав себе сам
 
                 i = rec.get("idx")
                 if not isinstance(i, int) or i < 0 or i >= len(objects):
-                    problems.append("%s %r: РїРѕР·РёС†С–С— %r С‚СѓС‚ РЅРµРјР°С”" % (kind, rec.get("name"), i))
+                    problems.append("%s %r: позиції %r тут немає" % (kind, rec.get("name"), i))
                     continue
                 want = rec.get("name")
                 if want and self._safe_name(objects[i]) != want:
-                    problems.append("%s %d: С‚СѓС‚ %r, Сѓ РїР°СЂС‚РЅРµСЂР° %r"
+                    problems.append("%s %d: тут %r, у партнера %r"
                                     % (kind, i, self._safe_name(objects[i]), want))
                     continue
                 reg_obj.bind(uid, objects[i])
@@ -1123,26 +1123,26 @@ class AbletonMP(ControlSurface):
         self._prime_cues()
         self._prime_returns()
         self._prime_arrangement()
-        # РєР°РЅРѕРЅС–С‡РЅС– uuid С–Р· Р¶СѓСЂРЅР°Р»Сѓ Р»СЏРіР°СЋС‚СЊ Сѓ .als, С‰РѕР± РЅР°СЃС‚СѓРїРЅРѕРіРѕ СЂР°Р·Сѓ РїСЂРѕС”РєС‚
-        # РІС–РґРєСЂРёРІСЃСЏ РІР¶Рµ Р· РЅРёРјРё С– Р±СѓС‚СЃС‚СЂР°Рї Р·Р° РїРѕР·РёС†С–СЏРјРё РЅРµ Р·РЅР°РґРѕР±РёРІСЃСЏ
+        # канонічні uuid із журналу лягають у .als, щоб наступного разу проєкт
+        # відкрився вже з ними і бутстрап за позиціями не знадобився
         self._persist_registry()
         self._log("registry adopted: %d tracks, %d scenes, %d aux tracks, %d Rack chains "
                   "(%d stored, %d by position)"
                   % (len(self._tracks_reg), len(self._scenes_reg), len(self._aux_track_records),
                      len(self._chain_records), by_data, by_position))
         if problems:
-            # РїСЂРѕС”РєС‚Рё СЂРѕР·С–Р№С€Р»РёСЃСЊ; РїРѕРґС–С— РЅР° РЅРµР·С–СЃС‚Р°РІР»РµРЅС– РѕР±'С”РєС‚Рё РїСЂРѕСЃС‚Рѕ РЅРµ Р·Р°СЃС‚РѕСЃСѓСЋС‚СЊСЃСЏ
-            self._warn("Р±СѓС‚СЃС‚СЂР°Рї СЂРµС”СЃС‚СЂСѓ, РЅРµР·С–СЃС‚Р°РІР»РµРЅРѕ %d: %s"
+            # проєкти розійшлись; події на незіставлені об'єкти просто не застосуються
+            self._warn("бутстрап реєстру, незіставлено %d: %s"
                        % (len(problems), "; ".join(problems[:5])))
-        # Р Р°С…СѓС”РјРѕ РѕРєСЂРµРјРѕ РїРѕ РІРёРґР°С…: СЃС†РµРЅРё С‡Р°СЃС‚Рѕ Р·С–СЃС‚Р°РІР»СЏСЋС‚СЊСЃСЏ РЅР°РІС–С‚СЊ Сѓ С‡СѓР¶РѕРјСѓ
-        # РїСЂРѕС”РєС‚С– (С—С… Р°РґСЂРµСЃСѓС” РїРѕР·РёС†С–СЏ РІ РјР°РїС–), С– СЃСѓРјР°СЂРЅРёР№ Р»С–С‡РёР»СЊРЅРёРє С†Рµ РјР°СЃРєСѓРІР°РІ Р±Рё.
-        # РќСѓР»СЊ С‚СЂРµРєС–РІ -- С†Рµ РїРѕРІРЅР° РЅС–РјРѕС‚Р°: Р±РµР· uuid С‚СЂРµРєР° Р¶РѕРґРЅР° РїРѕРґС–СЏ РјС–РєС€РµСЂР°,
-        # РєР»С–РїР° С‡Рё СЃС‚СЂСѓРєС‚СѓСЂРё РЅРµ РјР°С” Р°РґСЂРµСЃРё.
+        # Рахуємо окремо по видах: сцени часто зіставляються навіть у чужому
+        # проєкті (їх адресує позиція в мапі), і сумарний лічильник це маскував би.
+        # Нуль треків -- це повна німота: без uuid трека жодна подія мікшера,
+        # кліпа чи структури не має адреси.
         for kind, (total, ok) in matched.items():
             if total and not ok:
-                self._warn("Р–РћР”Р•Рќ %s РЅРµ Р·С–СЃС‚Р°РІРёРІСЃСЏ (%d Сѓ СЃРµСЃС–С—) -- С†РµР№ РїСЂРѕС”РєС‚ РЅРµ С‚РѕР№, "
-                           "С‰Рѕ РІ СЃРµСЃС–С— relay. РџРѕРґС–С— РїРѕ %sС… РїСЂР°С†СЋРІР°С‚Рё РЅРµ Р±СѓРґСѓС‚СЊ; "
-                           "РІС–РґРєСЂРёР№ С‚РѕР№ СЃР°РјРёР№ .als Р°Р±Рѕ Р·Р°РІРµРґРё РЅРѕРІСѓ --session"
+                self._warn("ЖОДЕН %s не зіставився (%d у сесії) -- цей проєкт не той, "
+                           "що в сесії relay. Події по %sх працювати не будуть; "
+                           "відкрий той самий .als або заведи нову --session"
                            % (kind, total, kind))
 
     # ----------------------------------------------------- persistence (.als)
@@ -1164,12 +1164,12 @@ class AbletonMP(ControlSurface):
         return v if isinstance(v, str) else ""
 
     def _restore_registry(self):
-        """РџС–РґРЅС–РјР°С” uuid, Р·Р±РµСЂРµР¶РµРЅС– РІ .als. РџРѕРІРµСЂС‚Р°С” РєС–Р»СЊРєС–СЃС‚СЊ РІС–РґРЅРѕРІР»РµРЅРёС….
+        """Піднімає uuid, збережені в .als. Повертає кількість відновлених.
 
-        РћР±РёРґРІР° РјРµС…Р°РЅС–Р·РјРё РїСЂР°С†СЋСЋС‚СЊ СЂР°Р·РѕРј, РЅРµ Р·Р°РјС–СЃС‚СЊ РѕРґРЅРѕРіРѕ: Сѓ Live 12 С‚СЂРµРє С‚СЂРёРјР°С”
-        set_data, Р° СЃС†РµРЅР° -- РЅС–, С‚РѕР¶ С‡Р°СЃС‚РёРЅР° РѕР±'С”РєС‚С–РІ РІРїС–Р·РЅР°С” СЃРµР±Рµ СЃР°РјР°, Р° СЂРµС€С‚Сѓ
-        РґРѕРІРѕРґРёС‚СЊСЃСЏ РґС–СЃС‚Р°РІР°С‚Рё Р· РјР°РїРё РЅР° Song. Р Р°РЅРЅС–Р№ РІРёС…С–Рґ РїС–СЃР»СЏ РїРµСЂС€РѕРіРѕ РїСЂРѕС…РѕРґСѓ
-        Р·Р°Р»РёС€Р°РІ Р±Рё СЃС†РµРЅРё Р±РµР· С–РґРµРЅС‚РёС‡РЅРѕСЃС‚С– РЅР°Р·Р°РІР¶РґРё.
+        Обидва механізми працюють разом, не замість одного: у Live 12 трек тримає
+        set_data, а сцена -- ні, тож частина об'єктів впізнає себе сама, а решту
+        доводиться діставати з мапи на Song. Ранній вихід після першого проходу
+        залишав би сцени без ідентичності назавжди.
         """
         by_object = 0
         for reg, objects in ((self._tracks_reg, self._doc.tracks),
@@ -1205,7 +1205,7 @@ class AbletonMP(ControlSurface):
                     if not isinstance(i, int) or not (0 <= i < len(objects)):
                         continue
                     if reg.id_of(objects[i], create=False):
-                        continue  # РѕР±'С”РєС‚ СѓР¶Рµ РІРїС–Р·РЅР°РІ СЃРµР±Рµ С‡РµСЂРµР· set_data
+                        continue  # об'єкт уже впізнав себе через set_data
                     if rec.get("name") and self._safe_name(objects[i]) != rec["name"]:
                         continue
                     reg.bind(rec.get("id"), objects[i])
@@ -1257,16 +1257,16 @@ class AbletonMP(ControlSurface):
                     by_map += 1
 
         if by_object or by_map:
-            self._log("Р· .als РІС–РґРЅРѕРІР»РµРЅРѕ %d uuid (%d РЅР° РѕР±'С”РєС‚Р°С…, %d Р· РјР°РїРё)"
+            self._log("з .als відновлено %d uuid (%d на об'єктах, %d з мапи)"
                       % (by_object + by_map, by_object, by_map))
         return by_object + by_map
 
     def _persist_registry(self):
-        """РљР»Р°РґРµ РїРѕС‚РѕС‡РЅС– uuid Сѓ .als. РЎРµС‚ РїРѕР·РЅР°С‡Р°С”С‚СЊСЃСЏ Р·РјС–РЅРµРЅРёРј -- С†Рµ РѕС‡С–РєСѓРІР°РЅРѕ.
+        """Кладе поточні uuid у .als. Сет позначається зміненим -- це очікувано.
 
-        РњР°РїР° РЅР° Song РїРёС€РµС‚СЊСЃСЏ Р·Р°РІР¶РґРё, Р° РЅРµ Р»РёС€Рµ РєРѕР»Рё РїРµСЂ-РѕР±'С”РєС‚РЅРёР№ Р·Р°РїРёСЃ СѓРїР°РІ:
-        Scene.set_data РЅРµ РєРёРґР°С” РІРёРЅСЏС‚РєСѓ, Р°Р»Рµ Р№ РЅРµ РґРѕР¶РёРІР°С” РґРѕ РЅР°СЃС‚СѓРїРЅРѕРіРѕ РІС–РґРєСЂРёС‚С‚СЏ
-        С„Р°Р№Р»Сѓ, С‚РѕР¶ РґРµС‚РµРєС‚СѓРІР°С‚Рё РїСЂРѕР±Р»РµРјСѓ РїРѕ exception РЅРµ РјРѕР¶РЅР°.
+        Мапа на Song пишеться завжди, а не лише коли пер-об'єктний запис упав:
+        Scene.set_data не кидає винятку, але й не доживає до наступного відкриття
+        файлу, тож детектувати проблему по exception не можна.
         """
         for reg, objects in ((self._tracks_reg, self._doc.tracks),
                              (self._scenes_reg, self._doc.scenes),
@@ -1293,7 +1293,7 @@ class AbletonMP(ControlSurface):
         try:
             self._doc.set_data(DATA_KEY_MAP, json.dumps(snap))
         except Exception as e:
-            self._warn("СЂРµС”СЃС‚СЂ РЅРµ Р·Р±РµСЂРµР¶РµРЅРѕ РІ .als: %r" % (e,))
+            self._warn("реєстр не збережено в .als: %r" % (e,))
 
     def _iter_aux_tracks(self):
         """Yield stable locator parts for Return tracks and the Master track."""
@@ -1678,7 +1678,7 @@ class AbletonMP(ControlSurface):
             ret = self._send_return_ref(idx)
             if ret:
                 payload["return"] = ret
-        # РЅРµРїРµСЂРµСЂРІРЅР° РІРµР»РёС‡РёРЅР° -- РґРµР±Р°СѓРЅСЃРёРјРѕ, СЏРє tempo: СЂСѓС… С„РµР№РґРµСЂР° С†Рµ РѕРґРёРЅ Р¶РµСЃС‚
+        # неперервна величина -- дебаунсимо, як tempo: рух фейдера це один жест
         self._defer("mix:" + key, "MixerSet", payload)
 
     def _on_toggle(self, track, prop):
@@ -1695,7 +1695,7 @@ class AbletonMP(ControlSurface):
         if self._mirror["mix"].get(key) == value:
             return
         self._mirror["mix"][key] = value
-        # РґРёСЃРєСЂРµС‚РЅРµ РїРµСЂРµРјРёРєР°РЅРЅСЏ -- РґРµР±Р°СѓРЅСЃ С‚СѓС‚ Р»РёС€Рµ РґРѕРґР°РІ Р±Рё Р·Р°С‚СЂРёРјРєРё
+        # дискретне перемикання -- дебаунс тут лише додав би затримки
         self._emit("TrackToggle", {"track": track_ref, "param": prop, "value": value})
 
     # ------------------------------------------------------------- devices
@@ -3715,7 +3715,7 @@ class AbletonMP(ControlSurface):
     # ------------------------------------------------------------ coalescing
 
     def _defer(self, key, etype, payload):
-        """Р’С–РґРєР»Р°РґР°С” РїРѕРґС–СЋ; РїРѕРІС‚РѕСЂРЅРёР№ РІРёРєР»РёРє Р· С‚РёРј СЃР°РјРёРј РєР»СЋС‡РµРј Р·Р°С‚РёСЂР°С” РїРѕРїРµСЂРµРґРЅСЋ."""
+        """Відкладає подію; повторний виклик з тим самим ключем затирає попередню."""
         now = time.time()
         prev = self._pending.get(key)
         self._pending[key] = {
@@ -3734,17 +3734,17 @@ class AbletonMP(ControlSurface):
                 self._emit(e["type"], e["payload"])
 
     def _flush_clips(self):
-        """Р РѕР·Р±РёСЂР°С” РЅР°РєРѕРїРёС‡РµРЅС– Р·РјС–РЅРё СЃР»РѕС‚С–РІ Сѓ СЃРµРјР°РЅС‚РёС‡РЅС– РїРѕРґС–С—.
+        """Розбирає накопичені зміни слотів у семантичні події.
 
-        Р—Р°РїСѓСЃРє СЃС†РµРЅРё РІРёРґРЅРѕ СЏРє В«РєС–Р»СЊРєР° С‚СЂРµРєС–РІ РѕРґРЅРѕС‡Р°СЃРЅРѕ РїРѕС—С…Р°Р»Рё РЅР° С‚РѕР№ СЃР°РјРёР№ С–РЅРґРµРєСЃВ»:
-        Р·РіРѕСЂС‚Р°С”РјРѕ РІ РѕРґРЅСѓ SceneLaunch. РЎСѓРїСѓС‚РЅС– Р·СѓРїРёРЅРєРё С‚СЂРµРєС–РІ Р±РµР· РєР»С–РїСѓ РІ С†С–Р№ СЃС†РµРЅС–
-        РЅРµ РІС–РґРїСЂР°РІР»СЏС”РјРѕ -- scene.fire() РЅР° С‚РѕРјСѓ Р±РѕС†С– РІС–РґС‚РІРѕСЂРёС‚СЊ С—С… СЃР°Рј.
+        Запуск сцени видно як «кілька треків одночасно поїхали на той самий індекс»:
+        згортаємо в одну SceneLaunch. Супутні зупинки треків без кліпу в цій сцені
+        не відправляємо -- scene.fire() на тому боці відтворить їх сам.
         """
         if not self._clip_buf:
             return
         if not self._registry_ready:
             self._clip_buf = {}
-            self._warn("СЂРµС”СЃС‚СЂ С‰Рµ РЅРµ РіРѕС‚РѕРІРёР№ -- Р·РјС–РЅРё РєР»С–РїС–РІ РЅРµ РІС–РґРїСЂР°РІР»РµРЅРѕ")
+            self._warn("реєстр ще не готовий -- зміни кліпів не відправлено")
             return
         buf, self._clip_buf = self._clip_buf, {}
 
@@ -3754,9 +3754,9 @@ class AbletonMP(ControlSurface):
             self._emit("SceneLaunch", {"scene": self._scene_ref(targets.pop())})
             return
 
-        # Stop All Clips: СѓСЃРµ, С‰Рѕ Р·РјС–РЅРёР»РѕСЃСЊ, Р·СѓРїРёРЅРёР»РѕСЃСЊ, С– РЅС–РґРµ Р±С–Р»СЊС€Рµ РЅС–С‡РѕРіРѕ РЅРµ РіСЂР°С”.
-        # Р”СЂСѓРіР° СѓРјРѕРІР° РѕР±РѕРІКјСЏР·РєРѕРІР° -- Р±РµР· РЅРµС— РґРІС– Р·СѓРїРёРЅРєРё РїРѕСЃРїС–Р»СЊ РІ РѕРґРЅРѕРјСѓ С‚С–РєСѓ
-        # РІРёРіР»СЏРґР°Р»Рё Р± СЏРє РіР»РѕР±Р°Р»СЊРЅРёР№ СЃС‚РѕРї С– Р·Р°РіР»СѓС€РёР»Рё Р± РїР°СЂС‚РЅРµСЂСѓ СЂРµС€С‚Сѓ С‚СЂРµРєС–РІ.
+        # Stop All Clips: усе, що змінилось, зупинилось, і ніде більше нічого не грає.
+        # Друга умова обовʼязкова -- без неї дві зупинки поспіль в одному тіку
+        # виглядали б як глобальний стоп і заглушили б партнеру решту треків.
         if len(launched) == 0 and len(buf) >= 2:
             if not [v for v in self._mirror["psi"].values() if v >= 0]:
                 self._emit("StopAllClips", {})
@@ -3765,7 +3765,7 @@ class AbletonMP(ControlSurface):
         tracks = self._doc.tracks
         for idx in sorted(buf):
             if idx >= len(tracks):
-                continue  # С‚СЂРµРє Р·РЅРёРє РјС–Р¶ С‚С–РєРѕРј С– С„Р»Р°С€РµРј
+                continue  # трек зник між тіком і флашем
             ref = self._track_ref(tracks[idx], idx)
             if buf[idx] < 0:
                 self._emit("ClipStop", {"track": ref})
@@ -3779,7 +3779,7 @@ class AbletonMP(ControlSurface):
 
         if etype == "TransportSet":
             want = bool(payload.get("playing"))
-            self._mirror["playing"] = want  # Р”Рћ Р·Р°РїРёСЃСѓ РІ LOM -- РіР»СѓС€РёРјРѕ РµС…Рѕ
+            self._mirror["playing"] = want  # ДО запису в LOM -- глушимо ехо
             if want:
                 self._doc.start_playing()
             else:
@@ -3823,7 +3823,7 @@ class AbletonMP(ControlSurface):
                 return
             sidx = self._resolve_scene(payload.get("scene"))
             if sidx is None or sidx >= len(track.clip_slots):
-                self._warn("gseq %s: СЃС†РµРЅР° %r РїРѕР·Р° РјРµР¶Р°РјРё" % (gseq, payload.get("scene")))
+                self._warn("gseq %s: сцена %r поза межами" % (gseq, payload.get("scene")))
                 return
             self._mirror["psi"][idx] = sidx
             track.clip_slots[sidx].fire()
@@ -3831,10 +3831,10 @@ class AbletonMP(ControlSurface):
         elif etype == "SceneLaunch":
             sidx = self._resolve_scene(payload.get("scene"))
             if sidx is None:
-                self._warn("gseq %s: СЃС†РµРЅР° %r РЅРµ СЂРµР·РѕР»РІРёС‚СЊСЃСЏ" % (gseq, payload.get("scene")))
+                self._warn("gseq %s: сцена %r не резолвиться" % (gseq, payload.get("scene")))
                 return
-            # РґР·РµСЂРєР°Р»Рѕ С‚СЂРµР±Р° Р·РІРµСЃС‚Рё РґРѕ С‚РѕРіРѕ, С‰Рѕ СЃС‚Р°РЅРµС‚СЊСЃСЏ РџР†РЎР›РЇ fire(): С‚СЂРµРєРё Р· РєР»С–РїРѕРј
-            # Сѓ С†С–Р№ СЃС†РµРЅС– Р·Р°РіСЂР°СЋС‚СЊ С—С—, СЂРµС€С‚Р° Р·СѓРїРёРЅСЏС‚СЊСЃСЏ -- С–РЅР°РєС€Рµ РїС–РґРµ РµС…Рѕ
+            # дзеркало треба звести до того, що станеться ПІСЛЯ fire(): треки з кліпом
+            # у цій сцені заграють її, решта зупиняться -- інакше піде ехо
             for i, t in enumerate(self._doc.tracks):
                 try:
                     has_clip = sidx < len(t.clip_slots) and t.clip_slots[sidx].has_clip
@@ -3847,7 +3847,7 @@ class AbletonMP(ControlSurface):
             ref = payload.get("track") or {}
             uid = ref.get("id")
             if not uid or self._tracks_reg.obj_of(uid) is not None:
-                return  # С‚Р°РєРёР№ С‚СЂРµРє СѓР¶Рµ С” -- РїРѕРІС‚РѕСЂРЅРµ Р·Р°СЃС‚РѕСЃСѓРІР°РЅРЅСЏ РЅРµ СЃС‚РІРѕСЂСЋС” РґСѓР±Р»СЊ
+                return  # такий трек уже є -- повторне застосування не створює дубль
             idx = payload.get("idx")
             if not isinstance(idx, int) or idx < 0 or idx > len(self._doc.tracks):
                 idx = len(self._doc.tracks)
@@ -3935,7 +3935,7 @@ class AbletonMP(ControlSurface):
             uid = (payload.get("track") or {}).get("id")
             track = self._tracks_reg.obj_of(uid) if uid else None
             if track is None:
-                return  # tombstone: РѕР±'С”РєС‚Р° РІР¶Рµ РЅРµРјР°С”, РґС–СЏ РІ РїРѕСЂРѕР¶РЅРµС‡Сѓ РЅРµ Р№РґРµ
+                return  # tombstone: об'єкта вже немає, дія в порожнечу не йде
             idx = self._track_index(track)
             if idx is None:
                 return
@@ -4351,14 +4351,14 @@ class AbletonMP(ControlSurface):
                     return
             p = self._mix_param(track, param, idx)
             if p is None:
-                self._warn("gseq %s: РїР°СЂР°РјРµС‚СЂ %r/%r РІС–РґСЃСѓС‚РЅС–Р№" % (gseq, param, idx))
+                self._warn("gseq %s: параметр %r/%r відсутній" % (gseq, param, idx))
                 return
             try:
                 value = float(payload.get("value"))
             except Exception:
                 return
-            # DeviceParameter РєРёРґР°С” РїСЂРё РІРёС…РѕРґС– Р·Р° РјРµР¶С–, Р° РјРµР¶С– send-С–РІ
-            # РІС–РґСЂС–Р·РЅСЏСЋС‚СЊСЃСЏ РІС–Рґ volume -- Р±РµСЂРµРјРѕ С—С… Р· СЃР°РјРѕРіРѕ РїР°СЂР°РјРµС‚СЂР°
+            # DeviceParameter кидає при виході за межі, а межі send-ів
+            # відрізняються від volume -- беремо їх з самого параметра
             value = max(p.min, min(p.max, value))
             self._mirror["mix"][self._mix_key(track_ref, param, idx)] = round(value, 6)
             p.value = value
@@ -4408,14 +4408,14 @@ class AbletonMP(ControlSurface):
                 return
             prop = payload.get("param")
             if prop not in self._toggle_props(track):
-                self._warn("gseq %s: РЅРµРІС–РґРѕРјРёР№ РїРµСЂРµРјРёРєР°С‡ %r" % (gseq, prop))
+                self._warn("gseq %s: невідомий перемикач %r" % (gseq, prop))
                 return
             value = bool(payload.get("value"))
             self._mirror["mix"][self._toggle_key(track_ref, prop)] = value
             try:
                 setattr(track, prop, value)
             except Exception as e:
-                self._warn("gseq %s: %s РЅРµ РІСЃС‚Р°РЅРѕРІР»СЋС”С‚СЊСЃСЏ: %r" % (gseq, prop, e))
+                self._warn("gseq %s: %s не встановлюється: %r" % (gseq, prop, e))
 
         elif etype == "StopAllClips":
             for i in range(len(self._doc.tracks)):
@@ -4430,12 +4430,12 @@ class AbletonMP(ControlSurface):
             track.stop_all_clips()
 
         else:
-            self._warn("РЅРµРІС–РґРѕРјРёР№ С‚РёРї РїРѕРґС–С— %r (gseq %s)" % (etype, gseq))
+            self._warn("невідомий тип події %r (gseq %s)" % (etype, gseq))
 
     # --------------------------------------------------------------- pumping
 
     def update_display(self):
-        """Live РєР»РёС‡Рµ С†Рµ ~10 СЂР°Р·С–РІ РЅР° СЃРµРєСѓРЅРґСѓ -- РЅР°С€ С”РґРёРЅРёР№ РЅР°РґС–Р№РЅРёР№ tick."""
+        """Live кличе це ~10 разів на секунду -- наш єдиний надійний tick."""
         try:
             ControlSurface.update_display(self)
         except Exception:
@@ -4517,7 +4517,7 @@ class AbletonMP(ControlSurface):
         return None
 
     def _track_ref(self, track, idx=None):
-        """РђРґСЂРµСЃР° -- uuid. idx С– name Р»РёС€Р°СЋС‚СЊСЃСЏ С‚С–Р»СЊРєРё РґР»СЏ С‡РёС‚Р°Р±РµР»СЊРЅРѕСЃС‚С– Р»РѕРіС–РІ."""
+        """Адреса -- uuid. idx і name лишаються тільки для читабельності логів."""
         return {"id": self._tracks_reg.id_of(track), "name": self._safe_name(track)}
 
     def _scene_ref(self, idx):
@@ -4526,22 +4526,22 @@ class AbletonMP(ControlSurface):
             return {"id": None}
         scene = scenes[idx]
         ref = {"id": self._scenes_reg.id_of(scene)}
-        # РЈ СЃС†РµРЅ Live Р·Р° Р·Р°РјРѕРІС‡СѓРІР°РЅРЅСЏРј С–РјРµРЅС– РЅРµРјР°С” (С†РёС„СЂРё РІ UI -- С†Рµ С–РЅРґРµРєСЃРё,
-        # РЅРµ РЅР°Р·РІРё), С‚РѕР¶ РїРѕСЂРѕР¶РЅС” РїРѕР»Рµ РЅРµ РєР»Р°РґРµРјРѕ РІР·Р°РіР°Р»С–.
+        # У сцен Live за замовчуванням імені немає (цифри в UI -- це індекси,
+        # не назви), тож порожнє поле не кладемо взагалі.
         name = self._safe_name(scene)
         if name:
             ref["name"] = name
         return ref
 
     def _resolve_track(self, ref):
-        """РџРѕРІРµСЂС‚Р°С” (РѕР±'С”РєС‚, РїРѕС‚РѕС‡РЅРёР№ С–РЅРґРµРєСЃ) Р°Р±Рѕ (None, None)."""
+        """Повертає (об'єкт, поточний індекс) або (None, None)."""
         if not isinstance(ref, dict):
             return None, None
         uid = ref.get("id")
         track = self._tracks_reg.obj_of(uid) if uid else None
         if track is None:
-            # РЅРµРІС–РґРѕРјРёР№ uuid = РѕР±'С”РєС‚Р° С‚СѓС‚ РЅРµРјР°С” Р°Р±Рѕ РІС–РЅ РІРёРґР°Р»РµРЅРёР№ (tombstone)
-            self._warn("С‚СЂРµРє %r РЅРµРІС–РґРѕРјРёР№, РїРѕРґС–СЋ РїСЂРѕРїСѓС‰РµРЅРѕ" % (uid,))
+            # невідомий uuid = об'єкта тут немає або він видалений (tombstone)
+            self._warn("трек %r невідомий, подію пропущено" % (uid,))
             return None, None
         return track, self._track_index(track)
 
@@ -4564,13 +4564,13 @@ class AbletonMP(ControlSurface):
         return track, {"id": uid, "kind": kind}
 
     def _resolve_scene(self, ref):
-        """РЎС†РµРЅСѓ Р°РґСЂРµСЃСѓС”РјРѕ uuid, Р°Р»Рµ LOM РїСЂР°С†СЋС” С–РЅРґРµРєСЃР°РјРё -- РІРµСЂС‚Р°С”РјРѕ С–РЅРґРµРєСЃ."""
+        """Сцену адресуємо uuid, але LOM працює індексами -- вертаємо індекс."""
         if not isinstance(ref, dict):
             return None
         uid = ref.get("id")
         scene = self._scenes_reg.obj_of(uid) if uid else None
         if scene is None:
-            self._warn("СЃС†РµРЅР° %r РЅРµРІС–РґРѕРјР°, РїРѕРґС–СЋ РїСЂРѕРїСѓС‰РµРЅРѕ" % (uid,))
+            self._warn("сцена %r невідома, подію пропущено" % (uid,))
             return None
         scenes = self._doc.scenes
         for i in range(len(scenes)):
@@ -5027,13 +5027,13 @@ class AbletonMP(ControlSurface):
             self._suppress_struct = struct_was
 
     def _scan_samples(self):
-        """РЇРєС– СЃРµРјРїР»Рё Р»РµР¶Р°С‚СЊ РїРѕР·Р° С‚РµРєРѕСЋ РїСЂРѕС”РєС‚Сѓ С– СЏРєРёС… Р±СЂР°РєСѓС” Р»РѕРєР°Р»СЊРЅРѕ.
+        """Які семпли лежать поза текою проєкту і яких бракує локально.
 
-        Live Р·Р° Р·Р°РјРѕРІС‡СѓРІР°РЅРЅСЏРј РЅРµ РєРѕРїС–СЋС” СЃРµРјРїР» Сѓ РїСЂРѕС”РєС‚ -- .als С‚СЂРёРјР°С” РїРѕСЃРёР»Р°РЅРЅСЏ
-        РЅР° РѕСЂРёРіС–РЅР°Р». РўР°РєРёР№ РїСЂРѕС”РєС‚ РЅРµРїРµСЂРµРЅРѕСЃРёРјРёР№: Сѓ РїР°СЂС‚РЅРµСЂР° Р°Р±СЃРѕР»СЋС‚РЅРёР№ С€Р»СЏС…
-        РЅРµ С–СЃРЅСѓС”, С– Live РїРѕРєР°Р¶Рµ missing media. Collect All and Save С‡РµСЂРµР· LOM
-        РЅРµ РІРёРєР»РёРєР°С”С‚СЊСЃСЏ, Р° clip.file_path РґРѕСЃС‚СѓРїРЅРёР№ Р»РёС€Рµ РЅР° С‡РёС‚Р°РЅРЅСЏ, С‚РѕР¶
-        РІРёРїСЂР°РІРёС‚Рё С†Рµ РєРѕРґРѕРј РЅРµ РјРѕР¶РЅР° -- Р»РёС€Рµ РІС‡Р°СЃРЅРѕ СЃРєР°Р·Р°С‚Рё.
+        Live за замовчуванням не копіює семпл у проєкт -- .als тримає посилання
+        на оригінал. Такий проєкт непереносимий: у партнера абсолютний шлях
+        не існує, і Live покаже missing media. Collect All and Save через LOM
+        не викликається, а clip.file_path доступний лише на читання, тож
+        виправити це кодом не можна -- лише вчасно сказати.
         """
         try:
             root = os.path.dirname(str(self._doc.file_path))
@@ -5845,7 +5845,7 @@ class AbletonMP(ControlSurface):
     # ------------------------------------------------------------- snapshots
 
     def _prime_mirror(self, transport=True):
-        """Р—Р°РїРѕРІРЅСЋС” РґР·РµСЂРєР°Р»Рѕ РїРѕС‚РѕС‡РЅРёРј СЃС‚Р°РЅРѕРј, С‰РѕР± РЅР° СЃС‚Р°СЂС‚С– РЅРµ РІРёСЃС‚СЂРµР»РёС‚Рё РїР°С‡РєРѕСЋ РїРѕРґС–Р№."""
+        """Заповнює дзеркало поточним станом, щоб на старті не вистрелити пачкою подій."""
         if transport:
             self._mirror["playing"] = bool(self._doc.is_playing)
             self._mirror["tempo"] = round(float(self._doc.tempo), 6)
@@ -5890,10 +5890,10 @@ class AbletonMP(ControlSurface):
                     pass
 
     def _prime_mixer(self):
-        """Р—Р°РїРѕРІРЅСЋС” РґР·РµСЂРєР°Р»Рѕ РјС–РєС€РµСЂР° РїС–СЃР»СЏ Р±СѓС‚СЃС‚СЂР°РїСѓ СЂРµС”СЃС‚СЂСѓ.
+        """Заповнює дзеркало мікшера після бутстрапу реєстру.
 
-        Р‘РµР· С†СЊРѕРіРѕ РїРµСЂС€РёР№ Р¶Рµ СЂСѓС… Р±СѓРґСЊ-СЏРєРѕРіРѕ С„РµР№РґРµСЂР° РІРёРіР»СЏРґР°РІ Р±Рё СЏРє Р·РјС–РЅР° РІС–РґРЅРѕСЃРЅРѕ
-        None С– РїРѕСЂРѕРґР¶СѓРІР°РІ РїРѕРґС–СЋ -- Р° РЅР° СЃС‚Р°СЂС‚С– С‚Р°РєРёС… В«Р·РјС–РЅВ» РѕРґСЂР°Р·Сѓ РґРµСЃСЏС‚РєРё.
+        Без цього перший же рух будь-якого фейдера виглядав би як зміна відносно
+        None і породжував подію -- а на старті таких «змін» одразу десятки.
         """
         self._mirror["mix"] = {}
         for track in self._iter_device_tracks():
@@ -8016,7 +8016,7 @@ class AbletonMP(ControlSurface):
         "song": dict((p, self._song_prop_value(p, self._safe_attr(self._doc, p)))
                      for p in SONG_PROPS
                      if self._song_prop_value(p, self._safe_attr(self._doc, p)) is not None),
-            "file_path": file_path,  # daemon РІРёРІРѕРґРёС‚СЊ С–Р· РЅСЊРѕРіРѕ С‚РµРєСѓ РїСЂРѕС”РєС‚Сѓ
+            "file_path": file_path,  # daemon виводить із нього теку проєкту
             "samples": self._safe(self._scan_samples) or {},
             "tracks": tracks,
             "scenes": scenes,

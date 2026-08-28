@@ -129,3 +129,53 @@ test('у bridge немає методів, які нікому не потріб
   assert.deepEqual(dead, ['__init__'],
     `методи без викликів: ${dead.filter((n) => n !== '__init__').join(', ')}`);
 });
+
+// Верхня половина cp1251: символ на позиції i відповідає байту 0x80 + i.
+// Node такого кодування не має, тож таблиця своя -- без неї перевірка
+// нижче мовчки не спрацьовує ніколи. Перша версія саме такою й була:
+// зелена і порожня, бо Buffer.from(..., 'win1251') просто кидав виняток.
+const CP1251_HIGH = '\u0402\u0403\u201A\u0453\u201E\u2026\u2020\u2021\u20AC\u2030\u0409\u2039\u040A\u040C\u040B\u040F\u0452\u2018\u2019\u201C\u201D\u2022\u2013\u2014\uFFFF\u2122\u0459\u203A\u045A\u045C\u045B\u045F\u00A0\u040E\u045E\u0408\u00A4\u0490\u00A6\u00A7\u0401\u00A9\u0404\u00AB\u00AC\u00AD\u00AE\u0407\u00B0\u00B1\u0406\u0456\u0491\u00B5\u00B6\u00B7\u0451\u2116\u0454\u00BB\u0458\u0405\u0455\u0457\u0410\u0411\u0412\u0413\u0414\u0415\u0416\u0417\u0418\u0419\u041A\u041B\u041C\u041D\u041E\u041F\u0420\u0421\u0422\u0423\u0424\u0425\u0426\u0427\u0428\u0429\u042A\u042B\u042C\u042D\u042E\u042F\u0430\u0431\u0432\u0433\u0434\u0435\u0436\u0437\u0438\u0439\u043A\u043B\u043C\u043D\u043E\u043F\u0440\u0441\u0442\u0443\u0444\u0445\u0446\u0447\u0448\u0449\u044A\u044B\u044C\u044D\u044E\u044F';
+
+const cp1251Byte = (ch) => {
+  const code = ch.codePointAt(0);
+  if (code < 0x80) return code;
+  const i = CP1251_HIGH.indexOf(ch);
+  return i < 0 ? -1 : i + 0x80;
+};
+
+// Кирилиця, прочитана як cp1251 і збережена ще раз як UTF-8, лишається
+// валідним UTF-8: жоден парсер не свариться. Ловиться лише зворотним ходом.
+function doubleEncoded(line) {
+  const bytes = [];
+  for (const ch of line) {
+    const b = cp1251Byte(ch);
+    if (b < 0) return false;          // cp1251 такого символу не знає
+    bytes.push(b);
+  }
+  const back = Buffer.from(bytes).toString('utf8');
+  if (back === line || back.includes('\uFFFD')) return false;
+  return /[\u0400-\u04FF]/.test(back);
+}
+
+const mojibakeOf = (text) => [...Buffer.from(text, 'utf8')]
+  .map((b) => (b < 0x80 ? String.fromCharCode(b) : CP1251_HIGH[b - 0x80]))
+  .join('');
+
+test('перевірка кодування справді ловить кашу', () => {
+  // Без цього наступний тест може бути зелений просто тому, що нічого не
+  // перевіряє -- рівно так і сталося з його першою версією.
+  assert.ok(doubleEncoded(mojibakeOf('бутстрап реєстру')), 'каша має ловитись');
+  assert.ok(!doubleEncoded('бутстрап реєстру'), 'чистий текст ловитись не має');
+  assert.ok(!doubleEncoded('    def _prime_devices(self):'), 'ASCII ловитись не має');
+});
+
+test('українські рядки в bridge не побиті подвійним кодуванням', () => {
+  // 127 рядків жили побитими крізь кілька релізів: тести лишались зелені,
+  // а партнер посеред прогону читав у daemon кашу замість діагностики.
+  const bad = [];
+  src.split('\n').forEach((line, i) => {
+    if (doubleEncoded(line)) bad.push(i + 1);
+  });
+  assert.deepEqual(bad, [],
+    `подвійне кодування в рядках: ${bad.slice(0, 10).join(', ')}`);
+});
