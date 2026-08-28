@@ -236,6 +236,13 @@ SAMPLE_QUEUE_MAX_SEC = 180.0
 CUE_QUEUE_MAX_SEC = 300.0
 # Стеля на набір warp-маркерів: подія має лишатись подією, а не файлом.
 WARP_MARKERS_MAX = 512
+# add_warp_marker бере лише справжній TWarpMarker. Виміряно на живому
+# 12.4.3: словник відкинуто, іменований кортеж із тими самими полями --
+# теж ("No registered converter ... from this Python object of type
+# WarpMarker"). Поля наявного маркера до того ж read-only. Єдиний спосіб
+# зробити свій -- узяти клас із маркера, який у кліпі вже є; тому warp
+# синхронізується тільки для кліпів, де хоч один маркер існує. Для warp-
+# кліпа це завжди так: Live тримає щонайменше один.
 # Мікшер ланцюга рака: у Drum Rack кожен пад -- це ланцюг, тож його
 # гучність і панорама -- частина звучання, а не оздоблення.
 CHAIN_MIX_PARAMS = ("volume", "panning")
@@ -257,7 +264,17 @@ DATA_KEY_MAP = "abletonmp_registry"
 
 
 def _log_path():
-    base = os.environ.get("APPDATA") or os.environ.get("TMPDIR") or "."
+    # На macOS TMPDIR -- це приватна тека процесу виду /var/folders/xx/.../T,
+    # яку система вичищає і яку неможливо назвати наперед. Лог там ніби й є,
+    # але знайти його не може ні людина, ні жива проба: warn про warp-маркери
+    # ми через це шукали вручну по всьому диску. Кладемо в передбачуване місце.
+    base = os.environ.get("APPDATA")
+    if not base:
+        home = os.path.expanduser("~")
+        mac_logs = os.path.join(home, "Library", "Logs")
+        base = mac_logs if os.path.isdir(mac_logs) else (
+            os.environ.get("XDG_STATE_HOME")
+            or os.environ.get("TMPDIR") or home or ".")
     d = os.path.join(base, "AbletonMP")
     try:
         if not os.path.isdir(d):
@@ -2707,20 +2724,17 @@ class AbletonMP(ControlSurface):
         current = self._warp_markers(clip)
         if current is None or current == want:
             return
+        make = self._warp_marker_factory(clip)
+        if make is None:
+            self._warn("gseq %s: маркери не застосовано -- у кліпі немає "
+                       "жодного маркера, з якого взяти тип" % (gseq,))
+            return   # дзеркала НЕ чіпаємо: розбіжність має лишитись видимою
         if key is not None:
             self._mirror["warp"][key] = want   # ДО запису -- глушимо ехо
         have = dict((m["beat_time"], m["sample_time"]) for m in current)
         # Спершу додаємо, потім прибираємо: кліп без жодного маркера Live
         # не приймає, і порожній проміжний стан коштував би нам маркерів.
-        for marker in want:
-            if have.get(marker["beat_time"]) == marker["sample_time"]:
-                continue
-            try:
-                clip.add_warp_marker({"beat_time": marker["beat_time"],
-                                      "sample_time": marker["sample_time"]})
-            except Exception as e:
-                self._warn("gseq %s: маркер на %s не додався: %r"
-                           % (gseq, marker["beat_time"], e))
+        pending = self._add_warp_markers(clip, make, want, have)
         keep = set(m["beat_time"] for m in want)
         for beat in sorted(have):
             if beat in keep:
@@ -2729,10 +2743,50 @@ class AbletonMP(ControlSurface):
                 clip.remove_warp_marker(beat)
             except Exception:
                 pass  # Live не дає прибрати останній -- це не помилка
+        # Друга спроба. Маркер часто не лізе не сам по собі, а через сусіда,
+        # якого ми щойно прибрали: Live міряє відрізок між сусідами й на
+        # нульовому каже "Segment length out of range". Так було з маркером
+        # на 0.25 при живому маркері на 0 -- обидва з sample_time 0.
+        if pending:
+            pending = self._add_warp_markers(clip, make,
+                                             [m for m, _ in pending], {})
+        if pending:
+            self._warn("gseq %s: не додано %d warp-маркер(ів), перший на "
+                       "%s: %r" % (gseq, len(pending), pending[0][0]["beat_time"],
+                                   pending[0][1]))
         if key is not None:
             actual = self._warp_markers(clip)
             if actual is not None:
                 self._mirror["warp"][key] = actual
+
+    @staticmethod
+    def _add_warp_markers(clip, make, want, have):
+        """Додає маркери, яких бракує. Віддає (маркер, помилка) для неприйнятих."""
+        left = []
+        for marker in want:
+            if have.get(marker["beat_time"]) == marker["sample_time"]:
+                continue
+            try:
+                clip.add_warp_marker(make(beat_time=marker["beat_time"],
+                                          sample_time=marker["sample_time"]))
+            except Exception as e:
+                left.append((marker, e))
+        return left
+
+    @staticmethod
+    def _warp_marker_factory(clip):
+        """Конструктор TWarpMarker, узятий з наявного маркера кліпа.
+
+        Свій тип із тими самими полями Live відкидає, а поля наявного
+        маркера не мають сетера -- лишається тільки клас із живого обʼєкта.
+        """
+        try:
+            markers = clip.warp_markers
+            if not len(markers):
+                return None
+            return type(markers[0])
+        except Exception:
+            return None
 
     def _wire_arrangement_clips(self, track):
         """Підписки на кліпи в лінійці. Адреса в них -- uuid, не сцена."""
@@ -5673,7 +5727,11 @@ class AbletonMP(ControlSurface):
         # Кілька скалярів, без яких обʼєкт непрозорий. CuePoint без time --
         # це просто назва: ні знайти його, ні порівняти з чужим неможливо.
         # Виявилось на пробі, яка не бачила локатора, що насправді доїхав.
-        for attr in ("time", "start_time", "end_time", "length"):
+        # WarpMarker без цих двох чисел -- порожня коробка: саме через це
+        # жива перевірка порівнювала однакові {"lom_type": "WarpMarker"} і
+        # рапортувала збіг, поки маркери насправді не застосовувались.
+        for attr in ("time", "start_time", "end_time", "length",
+                     "beat_time", "sample_time"):
             try:
                 number = getattr(value, attr)
             except Exception:

@@ -438,8 +438,16 @@ await check('warp-маркери audio-кліпа доїжджають', async (
   }
   await sleep(4500);
 
+  // Порівнюємо з ТИМ, ЩО В МЕНЕ, а не просто «змінилось»: попередня
+  // версія перевірки бачила будь-яку різницю й тому не помітила, що
+  // маркери насправді не додавались — Live не приймав наш словник.
+  const mine = val(await exec1([{ op: 'lom_get', path: [...clip, 'warp_markers'] }])) || [];
   const after = val(exec2([{ op: 'lom_get', path: [...clip, 'warp_markers'] }])) || [];
-  if (JSON.stringify(after) === JSON.stringify(before)) {
+  const key = (list) => list.map((m) => `${m.beat_time}:${m.sample_time}`).join(",");
+  if (key(after) !== key(mine)) {
+    throw new Error(`набори не збігаються: у мене ${mine.length}, у партнера ${after.length}`);
+  }
+  if (key(after) === key(before)) {
     throw new Error(`маркери в партнера не змінились (${after.length} шт.)`);
   }
 });
