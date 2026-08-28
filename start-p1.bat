@@ -29,7 +29,8 @@ if errorlevel 1 (
 
 echo.
 echo   Твоя адреса для партнера -- одна з цих:
-for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do echo       ws:%%a:19870
+rem  Друкуємо ГОЛУ адресу: саме її чекає start-p2.bat першим аргументом.
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do @for /f "tokens=*" %%b in ("%%a") do @echo        %%b
 echo.
 
 start "AbletonMP relay" cmd /k "cd /d "%~dp0relay" && node server.js"
