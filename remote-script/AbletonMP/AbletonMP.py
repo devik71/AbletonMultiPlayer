@@ -306,6 +306,9 @@ class AbletonMP(ControlSurface):
         # ВСІ listener-и, і сусідня подія, яку Live ще не встиг доставити,
         # помирає разом зі своєю підпискою. Тому -- прапорець і тік.
         self._rewire_pending = False
+        # (трек, ланцюг, девайс) -> скільки разів подія не знайшла цілі.
+        # Потрібне саме для того, щоб НЕ повторювати те саме попередження.
+        self._missing_chain_warned = {}
         self._pending = {}   # key -> відкладена подія, схлопується за ключем
         self._note_pending = {}  # clip key -> {track, scene, clip, due, first}
         self._rec_pending = {}   # clip key -> кліп, що зараз пишеться
@@ -1808,18 +1811,73 @@ class AbletonMP(ControlSurface):
                 pass
         return groups
 
-    def _chain_locator(self, track_ref, parent_id, container, rack, kind, idx, chain):
+    def _rack_chain_slots(self, device):
+        """(kind, адреса, ланцюг) для кожного ланцюга раку.
+
+        Для Drum Rack адреса -- НОТА пада, а не позиція в device.chains.
+        Причина виміряна на живій парі: device.chains містить лише заповнені
+        пади, тож один зайвий пад у партнера зсуває всі наступні індекси, і
+        разом з ними злітає ідентичність усіх ланцюгів після нього. Нота ж
+        означає те саме на обох машинах незалежно від вмісту.
+
+        Назву пада в адресу теж не беремо: це назва семплу, тобто рівно те,
+        що ми синхронізуємо. Адресувати об'єкт тим, що змінюється, -- це
+        гарантований розсинхрон при першій же заміні семплу.
+        """
+        pads = []
+        try:
+            pads = list(device.drum_pads)
+        except Exception:
+            pads = []
+        if not pads:
+            out = []
+            for kind, chains in self._rack_chain_groups(device):
+                for idx, chain in enumerate(chains):
+                    out.append((kind, {"idx": idx,
+                                       "name": self._safe_name(chain)}, chain))
+            return out
+
+        out = []
+        for pad in pads:
+            note = self._safe_attr(pad, "note")
+            if note is None:
+                continue
+            try:
+                chains = list(pad.chains)
+            except Exception:
+                continue
+            for sub_idx, chain in enumerate(chains):
+                out.append(("chains", {"note": int(note), "sub": sub_idx}, chain))
+        try:
+            for idx, chain in enumerate(device.return_chains):
+                out.append(("return_chains", {"idx": idx,
+                                              "name": self._safe_name(chain)}, chain))
+        except Exception:
+            pass
+        return out
+
+    # Поля адреси -- рівно ті, що можуть бути в локаторі. Один перелік на
+    # побудову і на розбір запису: розійдуться -- і збережений реєстр тихо
+    # перестане зіставлятись сам із собою.
+    CHAIN_LOCATOR_FIELDS = ("track", "parent_chain", "rack", "kind",
+                            "idx", "name", "note", "sub", "track_kind")
+
+    def _chain_locator(self, track_ref, parent_id, container, rack, kind, addr, chain):
         locator = {
             "track": track_ref.get("id"),
             "parent_chain": parent_id,
             "rack": self._device_ref(container, rack),
             "kind": kind,
-            "idx": idx,
-            "name": self._safe_name(chain),
         }
+        locator.update(addr)
         if track_ref.get("kind"):
             locator["track_kind"] = track_ref["kind"]
         return locator
+
+    @classmethod
+    def _chain_locator_of_record(cls, rec):
+        """Локатор із збереженого запису -- рівно ті поля, що в ньому є."""
+        return dict((k, rec[k]) for k in cls.CHAIN_LOCATOR_FIELDS if k in rec)
 
     @staticmethod
     def _chain_locator_key(locator):
@@ -1844,20 +1902,14 @@ class AbletonMP(ControlSurface):
                                  separators=(",", ":"))
         preferred = {}
         for rec in (preferred_records or []):
-            locator = {key: rec.get(key) for key in
-                       ("track", "parent_chain", "rack", "kind", "idx", "name")}
-            if rec.get("track_kind"):
-                locator["track_kind"] = rec["track_kind"]
             if rec.get("id"):
-                preferred[self._chain_locator_key(locator)] = rec["id"]
+                key = self._chain_locator_key(self._chain_locator_of_record(rec))
+                preferred[key] = rec["id"]
         saved = {}
         for rec in self._saved_chain_records:
-            locator = {key: rec.get(key) for key in
-                       ("track", "parent_chain", "rack", "kind", "idx", "name")}
-            if rec.get("track_kind"):
-                locator["track_kind"] = rec["track_kind"]
             if rec.get("id"):
-                saved[self._chain_locator_key(locator)] = rec["id"]
+                key = self._chain_locator_key(self._chain_locator_of_record(rec))
+                saved[key] = rec["id"]
 
         records = []
         changed = False
@@ -1876,28 +1928,43 @@ class AbletonMP(ControlSurface):
             for rack in devices:
                 if not self._device_has_chains(rack):
                     continue
-                for kind, chains in self._rack_chain_groups(rack):
-                    for idx, chain in enumerate(chains):
-                        locator = self._chain_locator(
-                            track_ref, parent_id, container, rack, kind, idx, chain)
-                        if locator["rack"] is None:
-                            continue
-                        locator_key = self._chain_locator_key(locator)
-                        uid = self._chains_reg.id_of(chain, create=False)
-                        if uid is None:
-                            uid = self._free_id(
-                                self._chains_reg, chain,
-                                preferred.get(locator_key),
-                                self._obj_stored_id(chain),
-                                saved.get(locator_key))
-                            if not uid:
-                                uid = hashlib.sha256(locator_key.encode("utf-8")).hexdigest()[:12]
-                            self._chains_reg.bind(uid, chain)
-                            changed = True
-                        rec = dict(locator)
-                        rec["id"] = uid
-                        records.append(rec)
-                        walk(track, chain, uid, depth + 1)
+                for kind, addr, chain in self._rack_chain_slots(rack):
+                    locator = self._chain_locator(
+                        track_ref, parent_id, container, rack, kind, addr, chain)
+                    if locator["rack"] is None:
+                        continue
+                    locator_key = self._chain_locator_key(locator)
+                    uid = self._chains_reg.id_of(chain, create=False)
+                    if uid is None:
+                        # Порядок тут -- це вибір між "моя правда" і "спільна
+                        # правда", і спільна має вигравати. Канонічний запис
+                        # від партнера -- перший. Далі ДЕТЕРМІНОВАНИЙ хеш від
+                        # локатора: обидві машини рахують його однаково, тож
+                        # ланцюг, якого партнер ніколи не бачив, усе одно
+                        # дістане в нас той самий uuid, що й у нього.
+                        #
+                        # Збережений id стоїть НИЖЧЕ хеша навмисно. Раніше він
+                        # був вищий -- і кожна машина трималась за uuid, який
+                        # намінтила сама; зійтись вони не могли вже ніколи.
+                        # На живій парі це давало 53 "device at chain path is
+                        # absent" за один прогін: параметри всередині раків
+                        # не їхали взагалі.
+                        by_hash = hashlib.sha256(
+                            locator_key.encode("utf-8")).hexdigest()[:12]
+                        uid = self._free_id(
+                            self._chains_reg, chain,
+                            preferred.get(locator_key),
+                            by_hash,
+                            self._obj_stored_id(chain),
+                            saved.get(locator_key))
+                        if not uid:
+                            uid = by_hash
+                        self._chains_reg.bind(uid, chain)
+                        changed = True
+                    rec = dict(locator)
+                    rec["id"] = uid
+                    records.append(rec)
+                    walk(track, chain, uid, depth + 1)
 
         for track in self._iter_device_tracks():
             walk(track, track, None, 0)
@@ -2803,6 +2870,34 @@ class AbletonMP(ControlSurface):
             return type(markers[0])
         except Exception:
             return None
+
+    def _warn_missing_chain_device(self, gseq, track_ref, device_ref, chain_path):
+        """Пояснює недосяжний девайс один раз на адресу, а не на кожну ручку.
+
+        Один рух фейдера в раку -- це десятки DeviceParamSet. Коли рак у
+        партнера інакший, кожна з них не знаходить цілі, і в лозі виростає
+        стіна однакових рядків: на живому прогоні їх було 53 за сеанс, і з
+        них неможливо було зрозуміти ані що зламалось, ані що робити.
+        """
+        addr = (track_ref.get("id") if track_ref else None,
+                json.dumps(chain_path, sort_keys=True), str(device_ref))
+        seen = self._missing_chain_warned.get(addr, 0)
+        self._missing_chain_warned[addr] = seen + 1
+        if seen:
+            return   # про цю саму адресу вже сказано
+
+        name = (device_ref or {}).get("class_display_name") or "девайс"
+        if chain_path:
+            self._warn(
+                "gseq %s: %s усередині раку недосяжний -- ланцюга за адресою "
+                "%r тут немає. Найчастіша причина: рак у партнера має інший "
+                "вміст (інший кит, інший набір падів). Значення всередині "
+                "поїдуть, щойно рак стане однаковим; структуру раку синк не "
+                "переносить -- завантаж той самий."
+                % (gseq, name, chain_path))
+        else:
+            self._warn("gseq %s: %s на треку недосяжний, подію пропущено"
+                       % (gseq, name))
 
     def _wire_arrangement_clips(self, track):
         """Підписки на кліпи в лінійці. Адреса в них -- uuid, не сцена."""
@@ -4389,8 +4484,7 @@ class AbletonMP(ControlSurface):
             device, parameter = self._resolve_device_parameter(
                 track, chain_path, device_ref, parameter_ref)
             if device is None:
-                self._warn("gseq %s: device %r at chain path %r is absent; parameter event skipped"
-                           % (gseq, device_ref, chain_path))
+                self._warn_missing_chain_device(gseq, track_ref, device_ref, chain_path)
                 return
             if parameter is None:
                 self._warn("gseq %s: parameter %r is absent on device %r; event skipped"
