@@ -141,9 +141,9 @@ const song = {
            loop: false, loop_start: 0, loop_length: 16,
            punch_in: false, punch_out: false },
   tracks: [
-    { id: null, name: '1-MIDI', color: 0xff8c00, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '2-MIDI', color: 0x33aa55, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
-    { id: null, name: '3-Audio', color: 0x3388dd, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false },
+    { id: null, name: '1-MIDI', color: 0xff8c00, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false, routing: {} },
+    { id: null, name: '2-MIDI', color: 0x33aa55, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false, routing: {} },
+    { id: null, name: '3-Audio', color: 0x3388dd, playing_slot_index: -1, slots: 8, clips: emptyClips(8), devices: fakeDevices(), mix: {}, mute: false, solo: false, arm: false, routing: {} },
   ],
   return_tracks: [
     { id: null, kind: 'return', name: 'A-Return', color: 0xaa55dd, devices: [fakeFilter(0.2), fakeRack()], mix: {}, mute: false, solo: false },
@@ -394,7 +394,8 @@ const sendHello = () =>
       'ClipCreate,ClipDelete,ClipNotesSet,ClipLoopSet,DeviceLoad,' +
       'DeviceInsert,DeviceDelete,DeviceMove,SampleLoad,SongPropSet,SceneTimingSet,ClipPropSet,CueSet,CueDelete,ReturnCreate,ReturnDelete,ClipWarpSet,ChainMixerSet,' +
       'ArrangementClipCreate,ArrangementClipMove,ArrangementClipDelete,ArrangementClipNotesSet,' +
-      'SlotStopButtonSet,SamplePropSet,DeviceStateSet').split(','),
+      'SlotStopButtonSet,SamplePropSet,DeviceStateSet,' +
+      'ClipEnvelopeSet,TrackRoutingSet').split(','),
   });
 
 function emit(type, payload) {
@@ -540,6 +541,7 @@ const clipShape = (clip) => {
   }
   if (Object.keys(props).length) out.props = props;
   if (clip.warp_markers?.length) out.warp = clip.warp_markers;
+  if (clip.envelopes?.length) out.envelopes = clip.envelopes;
   const loop = {};
   for (const prop of CLIP_LOOP_PROPS) {
     if (clip[prop] !== undefined) loop[prop] = clip[prop];
@@ -743,6 +745,7 @@ const fullState = () => ({
     group: t.group || null,
     mixer: mixerState(t),
     devices: deviceEntries(t),
+    routing: t.routing || {},
     clips: clipsState(t),
     stop_off: [...(t.stopOff || [])],
     arrangement: arrState(t),
@@ -816,6 +819,36 @@ function opGap(type, payload) {
     const item = browserItem(payload.item);
     if (!item) {
       return { what: 'device_item', name: payload.item?.name, uri: payload.item?.uri };
+    }
+    return null;
+  }
+
+  if (type === 'ClipEnvelopeSet') {
+    // Конверт живе на парі (кліп, параметр), тож бракувати може будь-що
+    // з трьох. Без цієї гілки пропущене рахувалось би застосованим.
+    const { device, parameter } = resolveDeviceParameter(
+      track, payload.chain_path, payload.device, payload.parameter);
+    const display = payload.device?.class_display_name;
+    if (!device) return { what: 'device', track: track?.name, device: display };
+    if (!parameter) {
+      return { what: 'parameter', track: track?.name, device: display, name: payload.parameter?.name };
+    }
+    const slot = resolveClipSlot(track, payload.scene);
+    if (!slot?.clip) {
+      return { what: 'clip', track: track?.name, scene: payload.scene?.id };
+    }
+    return null;
+  }
+
+  if (type === 'TrackRoutingSet') {
+    // Ціль маршруту -- інший трек, і саме його може бракувати. Тоді в
+    // партнера звук піде не туди, куди домовлялись.
+    const want = payload.routing?.target?.id;
+    if (want && !state.tracks.some((t) => t.id === want)) {
+      return {
+        what: 'routing_target', id: want,
+        track: track?.name, name: payload.routing?.name,
+      };
     }
     return null;
   }
@@ -1257,6 +1290,52 @@ function apply(type, payload, gseq) {
       (chain.mix || (chain.mix = {}))[payload.param] = payload.value;
       break;
     }
+    case 'TrackRoutingSet': {
+      const t = trackById(payload.track?.id);
+      if (!t) break;   // tombstone
+      const dir = payload.dir;
+      if (dir !== 'input' && dir !== 'output') return reject('невідомий напрям маршруту');
+      const routing = payload.routing || {};
+      // Та сама межа, що в bridge: залізо не переносимо.
+      if (![3, 4, 6].includes(routing.category)) {
+        return reject('маршрут на залізо не переносимо');
+      }
+      t.routing = { ...(t.routing || {}), [dir]: routing };
+      break;
+    }
+
+    case 'ClipEnvelopeSet': {
+      const t = trackById(payload.track?.id);
+      const s2 = sceneIdx(payload.scene?.id);
+      if (!t) break;   // tombstone
+      if (s2 < 0) return reject('невідома сцена');
+      const clip = t.clips[s2];
+      if (!clip) break;   // tombstone
+      const steps = payload.steps;
+      if (!Array.isArray(steps) || !steps.length || steps.length > 256) {
+        return reject('некоректний конверт');
+      }
+      for (const st of steps) {
+        if (!Number.isFinite(st?.[0]) || !Number.isFinite(st?.[1])) {
+          return reject('сходинка конверта без часу чи значення');
+        }
+      }
+      // Ключ той самий, що в bridge: конверт живе на трійці
+      // (кліп, девайс, параметр), і Frequency не перекриває Resonance.
+      const key = [payload.device?.class_name, payload.device?.ordinal,
+        (payload.chain_path || []).map((c) => c?.id).join(','),
+        payload.parameter?.name, payload.parameter?.ordinal].join(':');
+      clip.envelopes = (clip.envelopes || []).filter((e) => e.key !== key);
+      clip.envelopes.push({
+        key,
+        device: payload.device,
+        parameter: payload.parameter,
+        ...(payload.chain_path ? { chain_path: payload.chain_path } : {}),
+        steps,
+      });
+      break;
+    }
+
     case 'ClipWarpSet': {
       const t = trackById(payload.track?.id);
       const arrW = payload.clip?.id ? arrClipById(payload.clip.id) : null;
@@ -1448,7 +1527,7 @@ function apply(type, payload, gseq) {
         ? JSON.parse(JSON.stringify(src))
         : { name: payload.track?.name || 'copy', color: 0x777777, playing_slot_index: -1,
             slots: song.scenes.length, clips: emptyClips(song.scenes.length),
-            devices: [], mix: {}, mute: false, solo: false, arm: false };
+            devices: [], mix: {}, mute: false, solo: false, arm: false, routing: {} };
       if (!src) console.log(`<- #${gseq} TrackDuplicate: джерела немає, роблю порожній трек`);
       copy.id = payload.track.id;
       copy.playing_slot_index = -1;
@@ -2029,7 +2108,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'addtrack': {
       const kind = rest[0] === 'audio' ? 'audio' : 'midi';
       const idx = Number.isInteger(Number(rest[1])) && rest[1] !== undefined ? Number(rest[1]) : song.tracks.length;
-      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, color: 0x777777, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), devices: [], mix: {}, mute: false, solo: false, arm: false };
+      const t = { id: newId(), name: `${idx + 1}-${kind === 'midi' ? 'MIDI' : 'Audio'}`, color: 0x777777, playing_slot_index: -1, slots: song.scenes.length, clips: emptyClips(song.scenes.length), devices: [], mix: {}, mute: false, solo: false, arm: false, routing: {} };
       song.tracks.splice(idx, 0, t);
       emit('TrackCreate', { track: { id: t.id, name: t.name, color: t.color }, idx, kind });
       onDevices(true);

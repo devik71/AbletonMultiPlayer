@@ -6639,6 +6639,7 @@ class AbletonMP(ControlSurface):
                 "group": self._group_of(track),
                 "mixer": self._state_mixer(track),
                 "devices": self._state_devices(track),
+                "routing": self._track_routing_state(track),
                 "clips": self._state_clips(track, doc_scenes),
                 "stop_off": self._state_stop_off(track, doc_scenes),
                 "arrangement": self._state_arrangement(track),
@@ -6810,6 +6811,53 @@ class AbletonMP(ControlSurface):
                 out.append(sid)
         return out
 
+    def _track_routing_state(self, track):
+        """Портативні маршрути треку для знімка. Залізо сюди не потрапляє."""
+        out = {}
+        for direction in ROUTING_DIRS:
+            desc = self._routing_ref(track, direction)
+            if desc is not None:
+                out[direction] = desc
+        return out
+
+    def _clip_envelopes_state(self, track, clip):
+        """Конверти кліпа для знімка: [{device, parameter, chain_path, steps}].
+
+        Перебір обмежений тими самими стелями, що й опитування: знімок
+        збирається всередині процесу Live, і необмежений прохід по всіх
+        параметрах усіх девайсів коштував би тут так само дорого.
+        """
+        out = []
+        try:
+            length = float(clip.length)
+        except Exception:
+            return out
+        budget = ENVELOPE_PARAMS_PER_POLL
+        for container, device, chain_path in self._iter_track_devices(track):
+            try:
+                params = list(device.parameters)
+            except Exception:
+                continue
+            for param in params:
+                if budget <= 0:
+                    return out
+                budget -= 1
+                env = self._envelope_of(clip, param)
+                if env is None:
+                    continue
+                steps = self._envelope_steps(clip, env, length)
+                if not steps:
+                    continue
+                pref = self._device_parameter_ref(device, param)
+                dref = self._device_ref(container, device)
+                if pref is None or dref is None:
+                    continue
+                item = {"device": dref, "parameter": pref, "steps": steps}
+                if chain_path:
+                    item["chain_path"] = chain_path
+                out.append(item)
+        return out
+
     def _state_clips(self, track, scenes):
         clips = []
         try:
@@ -6841,6 +6889,13 @@ class AbletonMP(ControlSurface):
             markers = self._warp_markers(clip)
             if markers:
                 entry["warp"] = markers
+            try:
+                if clip.has_envelopes:
+                    envelopes = self._clip_envelopes_state(track, clip)
+                    if envelopes:
+                        entry["envelopes"] = envelopes
+            except Exception:
+                pass
             try:
                 if clip.is_midi_clip:
                     entry["notes"] = self._clip_notes(clip)
@@ -8019,6 +8074,40 @@ class AbletonMP(ControlSurface):
                 return {"what": "sample", "track": self._safe_name(track), "device": display}
             return None
 
+        if etype == "ClipEnvelopeSet":
+            # Конверт живе на парі (кліп, параметр), тож бракувати може
+            # будь-що з трьох. Без цієї гілки подія на відсутній девайс
+            # порахувалась би застосованою: _apply на нерозвʼязану адресу
+            # мовчки виходить -- це правильна tombstone-семантика, але для
+            # звіту вона означає брехню.
+            device, parameter = self._resolve_device_parameter(
+                track, payload.get("chain_path"), payload.get("device"),
+                payload.get("parameter"))
+            display = (payload.get("device") or {}).get("class_display_name")
+            if device is None:
+                return {"what": "device", "track": self._safe_name(track),
+                        "device": display}
+            if parameter is None:
+                return {"what": "parameter", "track": self._safe_name(track),
+                        "device": display,
+                        "name": (payload.get("parameter") or {}).get("name")}
+            clip, _key = self._resolve_any_clip(payload, "state")
+            if clip is None:
+                return {"what": "clip", "track": self._safe_name(track),
+                        "scene": (payload.get("scene") or {}).get("id")}
+            return None
+
+        if etype == "TrackRoutingSet":
+            # Ціль маршруту -- інший трек, і саме його може бракувати.
+            # Тоді в партнера звук піде не туди, куди домовлялись.
+            desc = payload.get("routing") or {}
+            want = (desc.get("target") or {}).get("id")
+            if want and self._tracks_reg.obj_of(want) is None:
+                return {"what": "routing_target", "id": want,
+                        "track": self._safe_name(track),
+                        "name": desc.get("name")}
+            return None
+
         if etype == "DeviceParamSet":
             device, parameter = self._resolve_device_parameter(
                 track, payload.get("chain_path"), payload.get("device"),
@@ -8097,6 +8186,12 @@ class AbletonMP(ControlSurface):
                 continue
             ops.extend(self._meta_ops("track", ref, track))
             ops.extend(self._mixer_ops(ref, track.get("mixer") or {}))
+            # Маршрут -- після мікшера й ДО девайсів: він визначає, куди
+            # взагалі йде звук треку, і ставити його останнім означало б
+            # ганяти сигнал не туди весь час застосування знімка.
+            for direction, desc in (track.get("routing") or {}).items():
+                ops.append(("TrackRoutingSet", {"track": ref, "dir": direction,
+                                                "routing": desc}))
             ops.extend(self._device_ops(ref, track.get("devices") or []))
             ops.extend(self._clip_ops(ref, track.get("clips") or []))
             for sid in track.get("stop_off") or []:
@@ -8286,6 +8381,17 @@ class AbletonMP(ControlSurface):
             if markers:
                 ops.append(("ClipWarpSet", {"track": ref, "scene": scene,
                                             "markers": markers}))
+            # Конверти -- після властивостей: створення конверта чіпає
+            # параметр, а не кліп, тож порядок із warp неважливий, але
+            # кліп на цей момент уже мусить існувати.
+            for env in (entry.get("envelopes") or []):
+                payload = {"track": ref, "scene": scene,
+                           "device": env.get("device"),
+                           "parameter": env.get("parameter"),
+                           "steps": env.get("steps")}
+                if env.get("chain_path"):
+                    payload["chain_path"] = env["chain_path"]
+                ops.append(("ClipEnvelopeSet", payload))
             loop = entry.get("loop")
             if loop:
                 payload = {"track": ref, "scene": scene}

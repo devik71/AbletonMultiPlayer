@@ -418,6 +418,11 @@ function describeGap(gap) {
   if (gap.what === 'device_state') return `${where} — немає властивості ${gap.name}`;
   if (gap.what === 'sample') return `${where} — у девайса немає семплу`;
   if (gap.what === 'chain') return `ланцюг ${gap.id} — такого немає в жодному раку`;
+  if (gap.what === 'routing_target') {
+    // Маршрут веде на трек, якого тут немає. Мовчати про це найгірше:
+    // звук піде не туди, куди домовлялись, і зрозуміти чому буде важко.
+    return `${gap.track || '?'} — маршрут веде на «${gap.name || gap.id}», а такого треку тут немає`;
+  }
   if (gap.what === 'arr_clip') {
     return `${gap.track || '?'} — у лінійці немає кліпа ${gap.id}`;
   }

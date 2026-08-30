@@ -116,6 +116,17 @@ const clipOps = (ref, clips) => clips.flatMap((entry) => {
   if (entry.warp?.length) {
     ops.push(['ClipWarpSet', { track: ref, scene, markers: entry.warp }]);
   }
+  // Конверти автоматизації -- після властивостей. Кліп на цей момент уже
+  // мусить існувати: створення конверта чіпає параметр, але прив'язане
+  // саме до кліпа.
+  for (const env of entry.envelopes || []) {
+    const payload = {
+      track: ref, scene, device: env.device,
+      parameter: env.parameter, steps: env.steps,
+    };
+    if (env.chain_path) payload.chain_path = env.chain_path;
+    ops.push(['ClipEnvelopeSet', payload]);
+  }
   if (entry.loop) {
     ops.push(['ClipLoopSet', { track: ref, scene, ...entry.loop }]);
   }
@@ -138,8 +149,14 @@ export function stateToOps(state) {
   for (const track of state.tracks || []) {
     if (!track.id) continue;
     const ref = { id: track.id };
-    ops.push(...metaOps('track', ref, track), ...mixerOps(ref, track.mixer || {}),
-      ...deviceOps(ref, track.devices || []), ...clipOps(ref, track.clips || []));
+    ops.push(...metaOps('track', ref, track), ...mixerOps(ref, track.mixer || {}));
+    // Маршрут -- після мікшера й ДО девайсів: він визначає, куди взагалі
+    // йде звук треку, і ставити його останнім означало б ганяти сигнал
+    // не туди весь час застосування знімка.
+    for (const [dir, routing] of Object.entries(track.routing || {})) {
+      ops.push(['TrackRoutingSet', { track: ref, dir, routing }]);
+    }
+    ops.push(...deviceOps(ref, track.devices || []), ...clipOps(ref, track.clips || []));
     // Перелічені лише ВИМКНЕНІ стоп-кнопки: ввімкнена -- стан за замовчуванням,
     // а перелік усіх слотів сету означав би тисячі подій на дрібницю.
     for (const sid of track.stop_off || []) {

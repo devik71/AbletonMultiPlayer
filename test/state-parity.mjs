@@ -111,3 +111,32 @@ test('кожен застосовний тип названий у докуме�
   const silent = applied.filter((t) => !docs.includes(t)).sort();
   assert.deepStrictEqual(silent, [], `тип є в коді, але не названий у docs: ${silent.join(', ')}`);
 });
+
+test('підполя треку й кліпа в знімку звуться однаково з обох боків', () => {
+  // Наявні перевірки стежили лише за ВЕРХНІМ рівнем знімка. Розійтись же
+  // легше всередині: коли bridge почав класти в трек "routing", а в кліп
+  // "envelopes", емулятор про них не знав -- і знімок мовчки їхав без
+  // маршрутів і автоматизації. Верхній рівень при цьому збігався ідеально.
+  //
+  // Шукаємо саме в БУДІВНИКАХ знімка, а не по всьому файлу: перша версія
+  // цієї перевірки була зелена й порожня, бо "routing:" знаходилось у
+  // заготовці треку емулятора, а не в тому місці, де збирається знімок.
+  const pyTrack = slice(bridge, 'tracks.append({', '            })');
+  const pyClip = slice(bridge, '    def _state_clips(self, track, scenes):',
+    '    # ----------------------------------------------------------- state apply');
+  const jsSnap = slice(mirror2, 'const fullState = () => ({', '\n});');
+  const jsClip = slice(mirror2, 'const clipShape = (clip) => {', '\n};');
+  const jsOps = mirror;   // clipOps і stateToOps лежать в одному файлі
+
+  for (const field of ['mixer', 'devices', 'clips', 'routing']) {
+    assert.match(pyTrack, new RegExp(`"${field}":`), `bridge не кладе в трек ${field}`);
+    assert.match(jsSnap, new RegExp(`^\\s+${field}:`, 'm'), `емулятор не кладе в трек ${field}`);
+    assert.match(jsOps, new RegExp(`track\\.${field}`), `state-ops не читає трек.${field}`);
+  }
+
+  for (const field of ['props', 'warp', 'loop', 'envelopes']) {
+    assert.match(pyClip, new RegExp(`entry\\["${field}"\\]`), `bridge не кладе в кліп ${field}`);
+    assert.match(jsClip, new RegExp(`out\\.${field}`), `емулятор не кладе в кліп ${field}`);
+    assert.match(jsOps, new RegExp(`entry\\.${field}`), `state-ops не читає кліп.${field}`);
+  }
+});

@@ -22,6 +22,18 @@ const paramMap = (d) => new Map((d.parameters || [])
 /** Ті самі семпли, розтягнуті по-різному, звучать по-різному. */
 const warpKey = (list) => (list || []).map((m) => `${num(m.beat_time)}:${num(m.sample_time)}`).join(',');
 
+// Конверт порівнюється змістом, а не кількістю точок: два конверти з
+// однаковою кількістю сходинок і різними значеннями -- це різний звук.
+const envOne = (e) => `${e.device?.class_name}:${e.device?.ordinal}`
+  + `:${(e.chain_path || []).map((c) => c?.id).join(',')}`
+  + `:${e.parameter?.name}:${e.parameter?.ordinal}`
+  + `=${(e.steps || []).map((st) => `${num(st[0])}/${num(st[1])}`).join(',')}`;
+const envKey = (list) => (list || []).map(envOne).sort().join('|');
+
+// Маршрут -- пара (напрям, ціль). Порівнюємо саме uuid цілі, бо назва
+// "3-Audio" у двох сетах цілком може означати різні треки.
+const routeKey = (r) => (r ? `${r.category}:${r.target?.id ?? r.name}` : '—');
+
 /** Межі кліпу цілком: петля й маркери -- це пʼять полів, які має сенс
  *  порівнювати разом, бо поодинці вони нічого не означають. */
 const LOOP_PROPS = ['looping', 'loop_start', 'loop_end', 'start_marker', 'end_marker'];
@@ -255,6 +267,17 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
 
     mixerDiff(where, my, their, add);
 
+    // Маршрут вирішує, куди взагалі йде звук треку: розбіжність тут не
+    // чути в мікшері, вона просто робить із двох сетів різні пісні.
+    for (const dir of ['input', 'output']) {
+      const a = my.routing?.[dir];
+      const b = their.routing?.[dir];
+      if (routeKey(a) !== routeKey(b)) {
+        add(`${where}: ${dir === 'input' ? 'вхід' : 'вихід'} `
+          + `${a?.name ?? '—'} проти ${b?.name ?? '—'}`);
+      }
+    }
+
     // Стоп-кнопка порожнього слота вирішує, чи зупинить трек запуск сцени:
     // розбіжність тут чути не в мікшері, а в тому, що сет грає інакше.
     const myStop = new Set(my.stop_off || []);
@@ -292,6 +315,10 @@ export function compareStates(mine, theirs, { limit = 40 } = {}) {
       if (warpKey(clip.warp) !== warpKey(other.warp)) {
         add(`${where}, сцена ${scene}: warp-маркери різні`
           + ` (${(clip.warp || []).length} проти ${(other.warp || []).length})`);
+      }
+      if (envKey(clip.envelopes) !== envKey(other.envelopes)) {
+        add(`${where}, сцена ${scene}: автоматизація різна`
+          + ` (${(clip.envelopes || []).length} проти ${(other.envelopes || []).length} конвертів)`);
       }
       if (loopKey(clip.loop) !== loopKey(other.loop)) {
         add(`${where}, сцена ${scene}: межі кліпу різні`);
