@@ -5769,6 +5769,23 @@ class AbletonMP(ControlSurface):
                     raise ValueError("private LOM attributes are not allowed")
                 obj = getattr(obj, token)
                 continue
+            # Крок-виклик: {"$call": "метод", "args": [...]}.
+            #
+            # Половина цікавого в LOM живе не в атрибутах, а в тому, що метод
+            # ПОВЕРНУВ: Clip.automation_envelope(param) віддає Envelope, у
+            # якого свої insert_step і value_at_time. Без цього кроку такий
+            # обʼєкт недосяжний узагалі -- ми його бачимо у відповіді й не
+            # можемо нічого з ним зробити. Саме через це конверт автоматизації
+            # роками вважався недосяжним: методи є, а дотягтись нічим.
+            if isinstance(token, dict) and "$call" in token:
+                name = token.get("$call")
+                if not isinstance(name, str) or not name or name.startswith("_"):
+                    raise ValueError("call step needs a public method name")
+                args = token.get("args") or []
+                if not isinstance(args, list):
+                    raise ValueError("call step args must be a list")
+                obj = getattr(obj, name)(*[self._ai_arg(a) for a in args])
+                continue
             raise ValueError("path token %r is not supported" % (token,))
         return obj
 
