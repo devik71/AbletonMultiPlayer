@@ -4263,6 +4263,34 @@ class AbletonMP(ControlSurface):
             self._apply_inner(etype, payload, gseq)
 
     @contextlib.contextmanager
+    def _gesture(self, param):
+        """Запис у чужий параметр -- один жест, а не розсип точок.
+
+        Має значення рівно тоді, коли в партнера ввімкнений запис
+        автоматизації: без меж жесту Live запише кожен наш запис окремою
+        точкою, і замість рівної лінії людина отримає сходи. Пара begin/end
+        існує на DeviceParameter (виміряно на 12.3.5), підписки на неї немає --
+        це інструмент для того, хто пише, а не для того, хто спостерігає.
+
+        Незакритий жест лишив би параметр у режимі запису, тому end -- у
+        finally, і лише якщо begin справді вдався.
+        """
+        opened = False
+        try:
+            param.begin_gesture()
+            opened = True
+        except Exception:
+            pass          # старіша збірка або не той тип -- пишемо як раніше
+        try:
+            yield
+        finally:
+            if opened:
+                try:
+                    param.end_gesture()
+                except Exception:
+                    pass
+
+    @contextlib.contextmanager
     def _undo_step(self, etype):
         """Одна чужа подія -- один крок undo в партнера.
 
@@ -4921,9 +4949,13 @@ class AbletonMP(ControlSurface):
             key = self._device_key(track_ref, chain_path, device_ref, parameter_ref)
             self._mirror["device"][key] = round(value, 6)
             try:
-                parameter.value = value
+                # Межі жесту мають значення тоді, коли в партнера ввімкнений
+                # запис автоматизації: без них Live запише кожен наш дотик
+                # окремою точкою, і замість рівної лінії вийдуть сходи.
+                with self._gesture(parameter):
+                    parameter.value = value
             except Exception as e:
-                self._warn("gseq %s: device parameter could not be set: %r" % (gseq, e))
+                self._warn("gseq %s: параметр девайса не встановився: %r" % (gseq, e))
 
         elif etype == "TrackToggle":
             track, track_ref = self._resolve_device_track(payload.get("track"))
