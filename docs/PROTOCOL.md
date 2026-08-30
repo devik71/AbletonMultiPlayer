@@ -599,6 +599,7 @@ Relay пише `journal.jsonl` — один закомічений івент н
 | `ClipPropSet` | кліп + `prop` |
 | `ClipWarpSet` | кліп -- увесь набір маркерів перезаписується цілком |
 | `ClipEnvelopeSet` | автоматизація одного параметра в кліпі: увесь конверт сходинками `[[час, значення]]` у сирих одиницях |
+| `TrackRoutingSet` | маршрут треку: `{dir, routing:{category, name, target}}`. Залізо (category 0 і 7) не переноситься навмисно |
 | `ChainMixerSet` | uuid ланцюга + `param` |
 | `SongPropSet` | `prop` -- метр не перекриває тональність |
 | `SceneTimingSet` | сцена -- увесь блок перевизначень разом |

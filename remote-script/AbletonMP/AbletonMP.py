@@ -54,7 +54,7 @@ APPLY_TYPES = [
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
     "SlotStopButtonSet", "SamplePropSet", "DeviceStateSet",
-    "ClipEnvelopeSet",
+    "ClipEnvelopeSet", "TrackRoutingSet",
 ]
 
 # Як емітити перенесення девайса. "move" -- один DeviceMove через
@@ -82,7 +82,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons", "sample_props", "device_state", "clip_envelopes"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons", "sample_props", "device_state", "clip_envelopes", "routing"]
 
 STATE_VERSION = 1
 # Чанк знімка мусить лишатись під MAX_DATAGRAM разом із JSON-обгорткою.
@@ -252,6 +252,21 @@ ENVELOPE_GRID = 0.125          # крок сітки в долях -- 1/8
 ENVELOPE_MAX_STEPS = 256       # стеля сходинок в одній події
 ENVELOPE_PARAMS_PER_POLL = 64  # стеля параметрів за один прохід
 ENVELOPE_EPSILON = 0.0005      # менша різниця -- це шум, не зміна
+
+# Маршрутизація. category в RoutingType каже, куди саме веде маршрут, і саме
+# вона розділяє те, що можна синхронізувати, від того, що не можна:
+#
+#   0  Ext. Out          -- залізо цієї машини
+#   3  Main              -- майстер документа
+#   4  інший трек        -- має attached_object
+#   6  No Input / Sends Only
+#   7  Ext. In           -- залізо цієї машини
+#
+# Залізо НЕ синхронізуємо: у партнера інша карта, інші входи, і нав'язати
+# йому свій "Ext. In 3" означає зламати йому звук. Те, що живе всередині
+# документа, синхронізуємо -- це музична структура, а не налаштування машини.
+ROUTING_PORTABLE = (3, 4, 6)
+ROUTING_DIRS = ("input", "output")
 # add_warp_marker бере лише справжній TWarpMarker. Виміряно на живому
 # 12.4.3: словник відкинуто, іменований кортеж із тими самими полями --
 # теж ("No registered converter ... from this Python object of type
@@ -316,7 +331,7 @@ class AbletonMP(ControlSurface):
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
             "scene_timing": {}, "clip_props": {}, "cues": None, "returns": None,
             "warp": {}, "chain": {}, "stopbtn": {}, "sample": {}, "devstate": {},
-            "envelope": {},
+            "envelope": {}, "routing": {},
         }
         self._env_cursor = 0        # round-robin по кліпах із автоматизацією
         self._env_last_poll = 0.0
@@ -513,6 +528,7 @@ class AbletonMP(ControlSurface):
             self._listen(track, "playing_slot_index", self._make_slot_cb(track))
             self._wire_metadata("track", track, track=track)
             self._wire_mixer(track)
+            self._wire_routing(track)
             self._wire_devices(track)
             self._wire_note_slots(track)
             self._listen(track, "arrangement_clips", self._make_arrangement_cb())
@@ -558,6 +574,129 @@ class AbletonMP(ControlSurface):
                         self._listen(clip, "notes", self._make_notes_cb(track, scene, clip))
             except Exception:
                 pass
+
+    def _wire_routing(self, track):
+        cb = self._make_routing_cb(track)
+        for prop in ("current_input_routing", "current_output_routing"):
+            self._listen(track, prop, cb)
+
+    def _make_routing_cb(self, track):
+        def cb():
+            self._safe(self._on_routing, track)
+        return cb
+
+    def _routing_ref(self, track, direction):
+        """Портативний опис маршруту або None, якщо він машинний.
+
+        Адреса цілі -- uuid треку, а не назва: назви збігаються рідко, а
+        "3-Audio" у партнера цілком може бути іншим треком.
+        """
+        try:
+            rt = getattr(track, "%s_routing_type" % direction)
+        except Exception:
+            return None
+        if rt is None:
+            return None
+        category = self._safe_attr(rt, "category")
+        if category not in ROUTING_PORTABLE:
+            return None      # залізо -- особиста річ, див. ROUTING_PORTABLE
+        ref = {"category": category,
+               "name": self._doc_str(self._safe_attr(rt, "display_name") or "")}
+        attached = self._safe_attr(rt, "attached_object")
+        if attached is not None:
+            uid = self._track_uid_of(attached)
+            if uid:
+                ref["target"] = {"id": uid}
+        return ref
+
+    def _track_uid_of(self, obj):
+        for reg in (self._tracks_reg,):
+            uid = reg.id_of(obj, create=False)
+            if uid:
+                return uid
+        for rec in self._aux_track_records:
+            found = self._aux_reg.obj_of(rec.get("id")) if hasattr(self, "_aux_reg") else None
+            if found is not None and found == obj:
+                return rec.get("id")
+        return None
+
+    def _on_routing(self, track):
+        if not self._registry_ready or self._suppress_struct:
+            return
+        ref = self._device_track_ref(track)
+        if not ref:
+            return
+        for direction in ROUTING_DIRS:
+            desc = self._routing_ref(track, direction)
+            key = "%s:%s" % (ref.get("id"), direction)
+            if self._mirror["routing"].get(key) == desc:
+                continue
+            self._mirror["routing"][key] = desc
+            if desc is None:
+                continue     # машинний маршрут не анонсуємо взагалі
+            payload = {"track": ref, "dir": direction, "routing": desc}
+            self._emit("TrackRoutingSet", payload)
+
+    def _prime_routing(self):
+        self._mirror["routing"] = {}
+        for track in self._doc.tracks:
+            ref = self._device_track_ref(track)
+            if not ref:
+                continue
+            for direction in ROUTING_DIRS:
+                self._mirror["routing"]["%s:%s" % (ref.get("id"), direction)] = \
+                    self._routing_ref(track, direction)
+
+    def _apply_track_routing(self, payload, gseq):
+        direction = payload.get("dir")
+        if direction not in ROUTING_DIRS:
+            self._warn("gseq %s: невідомий напрям маршруту %r" % (gseq, direction))
+            return
+        desc = payload.get("routing") or {}
+        category = desc.get("category")
+        if category not in ROUTING_PORTABLE:
+            self._warn("gseq %s: маршрут категорії %r не переносимо"
+                       % (gseq, category))
+            return
+        track, ref = self._resolve_device_track(payload.get("track"))
+        if track is None:
+            return   # tombstone
+        try:
+            available = list(getattr(track, "available_%s_routing_types" % direction))
+        except Exception:
+            return
+
+        want_id = (desc.get("target") or {}).get("id")
+        chosen = None
+        if want_id:
+            # Спершу за uuid цілі: назва може збігатись у двох різних треків
+            for rt in available:
+                attached = self._safe_attr(rt, "attached_object")
+                if attached is None:
+                    continue
+                if self._track_uid_of(attached) == want_id:
+                    chosen = rt
+                    break
+        if chosen is None:
+            name = desc.get("name")
+            for rt in available:
+                if (self._safe_attr(rt, "category") == category
+                        and self._doc_str(self._safe_attr(rt, "display_name") or "") == name):
+                    chosen = rt
+                    break
+        if chosen is None:
+            self._warn("gseq %s: маршруту %r тут немає -- у партнера інша "
+                       "структура треків" % (gseq, desc.get("name")))
+            return
+
+        key = "%s:%s" % ((ref or {}).get("id"), direction)
+        self._mirror["routing"][key] = desc    # ДО запису -- глушимо ехо
+        try:
+            setattr(track, "%s_routing_type" % direction, chosen)
+        except Exception as e:
+            self._warn("gseq %s: маршрут не встановився: %r" % (gseq, e))
+        finally:
+            self._mirror["routing"][key] = self._routing_ref(track, direction)
 
     def _wire_mixer(self, track):
         for param, idx in self._mix_slots(track):
@@ -938,6 +1077,7 @@ class AbletonMP(ControlSurface):
             if self._refresh_chains() or aux_changed:
                 self._persist_registry()
             self._prime_mixer()  # listener'и мікшера перевішані на нові об'єкти
+            self._prime_routing()
             self._prime_devices()
             self._prime_samples()
             self._prime_device_state()
@@ -965,6 +1105,7 @@ class AbletonMP(ControlSurface):
             self._rewire_tracks()
             self._prime_mirror(transport=False)
             self._prime_mixer()
+            self._prime_routing()
             self._prime_devices()
             self._prime_samples()
             self._prime_device_state()
@@ -1049,6 +1190,7 @@ class AbletonMP(ControlSurface):
         self._safe(self._touch_view, True)  # партнер має одразу побачити, де я
         self._rewire_tracks()
         self._prime_mixer()
+        self._prime_routing()
         self._prime_devices()
         self._prime_samples()
         self._prime_device_state()
@@ -1141,6 +1283,7 @@ class AbletonMP(ControlSurface):
         self._safe(self._touch_view, True)  # партнер має одразу побачити, де я
         self._rewire_tracks()
         self._prime_mixer()
+        self._prime_routing()
         self._prime_devices()
         self._prime_samples()
         self._prime_device_state()
@@ -2719,6 +2862,7 @@ class AbletonMP(ControlSurface):
         self._rewire_tracks()
         self._refresh_aux_tracks()
         self._prime_mixer()
+        self._prime_routing()
         self._prime_returns()
         self._persist_registry()
 
@@ -4161,6 +4305,9 @@ class AbletonMP(ControlSurface):
         elif etype == "ChainMixerSet":
             self._apply_chain_mixer(payload, gseq)
 
+        elif etype == "TrackRoutingSet":
+            self._apply_track_routing(payload, gseq)
+
         elif etype == "ClipEnvelopeSet":
             self._apply_clip_envelope(payload, gseq)
 
@@ -4295,6 +4442,7 @@ class AbletonMP(ControlSurface):
                 self._refresh_chains()
                 self._persist_registry()
                 self._prime_mixer()
+                self._prime_routing()
                 self._prime_devices()
                 self._prime_samples()
                 self._prime_device_state()
