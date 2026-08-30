@@ -21,6 +21,7 @@ const CONTINUOUS = new Set([
   'ChainMixerSet',
   'SamplePropSet',
   'DeviceStateSet',
+  'ClipEnvelopeSet',
 ]);
 
 function trackName(registry, id, kind) {
@@ -59,7 +60,8 @@ export function lockTarget(type, payload, registry) {
   }
 
   if (type === 'ClipPropSet' || type === 'ClipWarpSet'
-      || type === 'ClipNotesSet' || type === 'ClipLoopSet') {
+      || type === 'ClipNotesSet' || type === 'ClipLoopSet'
+      || type === 'ClipEnvelopeSet') {
     // Лок на кліп цілком, а не на властивість: людина крутить один кліп,
     // і показувати «зайнято» краще про нього, а не про окреме поле. Тому
     // всі чотири типи діляться одним обʼєктом лока -- це не збіг, а вимога:

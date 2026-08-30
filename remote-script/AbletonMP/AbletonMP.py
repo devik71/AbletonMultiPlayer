@@ -9,6 +9,7 @@
 """
 
 import json
+import contextlib
 import hashlib
 import math
 import os
@@ -53,6 +54,7 @@ APPLY_TYPES = [
     "ArrangementClipCreate", "ArrangementClipMove", "ArrangementClipDelete",
     "ArrangementClipNotesSet",
     "SlotStopButtonSet", "SamplePropSet", "DeviceStateSet",
+    "ClipEnvelopeSet",
 ]
 
 # Як емітити перенесення девайса. "move" -- один DeviceMove через
@@ -80,7 +82,7 @@ DEBOUNCE_MAX_HOLD = 1.0
 # Що вміє цей bridge. Список читає relay при конекті (vision.md §8) і daemon,
 # щоб не просити того, чого нема.
 FEATURES = ["apply_ack", "ai_chat", "authenticated_lom", "full_state", "state_apply",
-            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons", "sample_props", "device_state"]
+            "presence", "view_follow", "device_load", "arrangement", "sample_load", "song_props", "scene_timing", "clip_props", "cues", "returns", "warp_markers", "chain_mixer", "stop_buttons", "sample_props", "device_state", "clip_envelopes"]
 
 STATE_VERSION = 1
 # Чанк знімка мусить лишатись під MAX_DATAGRAM разом із JSON-обгорткою.
@@ -236,6 +238,20 @@ SAMPLE_QUEUE_MAX_SEC = 180.0
 CUE_QUEUE_MAX_SEC = 300.0
 # Стеля на набір warp-маркерів: подія має лишатись подією, а не файлом.
 WARP_MARKERS_MAX = 512
+
+# Автоматизація. Конверт не має жодного listener-а, тож єдиний спосіб помітити
+# зміну -- опитувати. Опитування коштує викликів LOM усередині процесу Live,
+# тому воно суворо обмежене: один кліп за прохід, стеля на параметри.
+#
+# Читаємо СІТКОЮ через value_at_time, а не точками через events_in_range.
+# Причина виміряна: events_in_range віддає значення у ВІДОБРАЖУВАНИХ одиницях
+# (для Frequency -- герци, а при клампі взагалі inf), тоді як insert_step і
+# value_at_time працюють у сирих. Змішати їх означає тихо зіпсувати дані.
+ENVELOPE_POLL_SEC = 1.0        # як часто дивимось на конверти
+ENVELOPE_GRID = 0.125          # крок сітки в долях -- 1/8
+ENVELOPE_MAX_STEPS = 256       # стеля сходинок в одній події
+ENVELOPE_PARAMS_PER_POLL = 64  # стеля параметрів за один прохід
+ENVELOPE_EPSILON = 0.0005      # менша різниця -- це шум, не зміна
 # add_warp_marker бере лише справжній TWarpMarker. Виміряно на живому
 # 12.4.3: словник відкинуто, іменований кортеж із тими самими полями --
 # теж ("No registered converter ... from this Python object of type
@@ -300,7 +316,10 @@ class AbletonMP(ControlSurface):
             "loop": {}, "device_tree": {}, "drum_pads": {}, "song": {},
             "scene_timing": {}, "clip_props": {}, "cues": None, "returns": None,
             "warp": {}, "chain": {}, "stopbtn": {}, "sample": {}, "devstate": {},
+            "envelope": {},
         }
+        self._env_cursor = 0        # round-robin по кліпах із автоматизацією
+        self._env_last_poll = 0.0
         self._obj_cbs = []  # (об'єкт, назва властивості, callback)
         # Перепідписку не можна робити всередині callback-а слота: вона знімає
         # ВСІ listener-и, і сусідня подія, яку Live ще не встиг доставити,
@@ -2899,6 +2918,215 @@ class AbletonMP(ControlSurface):
             self._warn("gseq %s: %s на треку недосяжний, подію пропущено"
                        % (gseq, name))
 
+    def _envelope_steps(self, clip, envelope, length):
+        """Конверт як список сходинок [(час, значення)] або None.
+
+        Сітка, а не точки: писати ми вміємо лише insert_step, тож і читати
+        доцільно тим самим розрізненням, у якому зможемо відтворити. Рівні
+        сусідні значення згортаються, тож рівний конверт дає одну сходинку,
+        а не двісті.
+        """
+        if length is None or length <= 0:
+            return None
+        grid = ENVELOPE_GRID
+        if length / grid > ENVELOPE_MAX_STEPS:
+            grid = length / ENVELOPE_MAX_STEPS
+        steps = []
+        t = 0.0
+        prev = None
+        while t < length - 1e-9:
+            try:
+                # СЕРЕДИНА інтервалу, не межа: insert_step кладе значення на
+                # (t, t+len], тож рівно на t читається ще попереднє. Через
+                # це перша сходинка виходила фантомною -- зі старим значенням
+                # параметра, якого в конверті насправді немає.
+                v = envelope.value_at_time(min(t + grid * 0.5, length - 1e-9))
+            except Exception:
+                return None
+            try:
+                v = round(float(v), 6)
+            except Exception:
+                return None
+            if not math.isfinite(v):
+                return None
+            if prev is None or abs(v - prev) > ENVELOPE_EPSILON:
+                steps.append([round(t, 6), v])
+                prev = v
+            t += grid
+        return steps or None
+
+    def _envelope_of(self, clip, param, create=False):
+        try:
+            env = clip.automation_envelope(param)
+        except Exception:
+            return None
+        if env is None and create:
+            try:
+                env = clip.create_automation_envelope(param)
+            except Exception:
+                return None
+        return env
+
+    def _poll_envelopes(self):
+        """Один кліп за прохід: шукаємо змінені конверти й емітимо їх.
+
+        Round-robin свідомо. Конверти не мають підписки, а перебирати всі
+        параметри всіх кліпів щотіка означало б сотні викликів LOM усередині
+        процесу Live -- рівно те, чого забороняє інваріант «звідси не вилітає
+        виняток і не встає Live».
+        """
+        if not self._registry_ready or self._suppress_struct:
+            return
+        now = time.time()
+        if now - self._env_last_poll < ENVELOPE_POLL_SEC:
+            return
+        self._env_last_poll = now
+
+        targets = []
+        scenes = list(self._doc.scenes)
+        for track in self._doc.tracks:
+            try:
+                slots = list(track.clip_slots)
+            except Exception:
+                continue
+            for i, slot in enumerate(slots):
+                if i >= len(scenes):
+                    break
+                try:
+                    if not slot.has_clip or not slot.clip.has_envelopes:
+                        continue
+                except Exception:
+                    continue
+                targets.append((track, scenes[i], slot))
+        if not targets:
+            return
+        self._env_cursor = (self._env_cursor + 1) % len(targets)
+        track, scene, slot = targets[self._env_cursor]
+        self._safe(self._scan_clip_envelopes, track, scene, slot)
+
+    def _scan_clip_envelopes(self, track, scene, slot):
+        key = self._clip_key(track, scene)
+        if key is None or key in self._rec_pending:
+            return
+        clip = slot.clip
+        try:
+            length = float(clip.length)
+        except Exception:
+            return
+        budget = ENVELOPE_PARAMS_PER_POLL
+        for container, device, chain_path in self._iter_track_devices(track):
+            sig = self._device_signature(device)
+            if sig is None:
+                continue
+            try:
+                params = list(device.parameters)
+            except Exception:
+                continue
+            for idx, param in enumerate(params):
+                if budget <= 0:
+                    return
+                budget -= 1
+                env = self._envelope_of(clip, param)
+                if env is None:
+                    continue
+                steps = self._envelope_steps(clip, env, length)
+                pref_probe = self._device_parameter_ref(device, param)
+                if pref_probe is None:
+                    continue
+                ekey = "%s|%s|%s|%s|%s" % (key, self._chain_path_key(chain_path),
+                                           sig, pref_probe["name"],
+                                           pref_probe["ordinal"])
+                if self._mirror["envelope"].get(ekey) == steps:
+                    continue
+                self._mirror["envelope"][ekey] = steps
+                if steps is None:
+                    continue
+                payload = self._clip_refs(track, scene)
+                if not payload:
+                    continue
+                payload["device"] = self._device_ref(container, device)
+                pref = self._device_parameter_ref(device, param)
+                if pref is None:
+                    continue
+                payload["parameter"] = pref
+                if chain_path:
+                    payload["chain_path"] = chain_path
+                payload["steps"] = steps
+                payload["grid"] = ENVELOPE_GRID
+                self._emit("ClipEnvelopeSet", payload)
+
+    @staticmethod
+    def _chain_path_key(chain_path):
+        return ",".join(str((c or {}).get("id")) for c in (chain_path or []))
+
+    def _apply_clip_envelope(self, payload, gseq):
+        raw = payload.get("steps")
+        if not isinstance(raw, list) or not raw or len(raw) > ENVELOPE_MAX_STEPS:
+            self._warn("gseq %s: некоректний конверт" % (gseq,))
+            return
+        steps = []
+        for item in raw:
+            try:
+                t = round(float(item[0]), 6)
+                v = round(float(item[1]), 6)
+            except Exception:
+                self._warn("gseq %s: сходинка конверта без часу чи значення" % (gseq,))
+                return
+            if not math.isfinite(t) or not math.isfinite(v) or t < 0:
+                self._warn("gseq %s: сходинка конверта поза межами" % (gseq,))
+                return
+            steps.append((t, v))
+        steps.sort(key=lambda p: p[0])
+
+        clip, key = self._resolve_any_clip(payload, gseq)
+        if clip is None:
+            return   # tombstone
+        track, _ref = self._resolve_device_track(payload.get("track"))
+        if track is None:
+            return
+        device, param = self._resolve_device_parameter(
+            track, payload.get("chain_path") or [], payload.get("device"),
+            payload.get("parameter"))
+        if device is None or param is None:
+            self._warn_missing_chain_device(gseq, _ref, payload.get("device"),
+                                            payload.get("chain_path") or [])
+            return
+        try:
+            length = float(clip.length)
+        except Exception:
+            return
+
+        env = self._envelope_of(clip, param, create=True)
+        if env is None:
+            self._warn("gseq %s: конверт не створився" % (gseq,))
+            return
+
+        ekey = None
+        if key is not None:
+            pref = payload.get("parameter") or {}
+            ekey = "%s|%s|%s|%s|%s" % (
+                key, self._chain_path_key(payload.get("chain_path")),
+                self._device_signature(device),
+                pref.get("name"), pref.get("ordinal"))
+            # ДО запису в LOM -- глушимо ехо власного ж опитування
+            self._mirror["envelope"][ekey] = [[t, v] for t, v in steps]
+        try:
+            env.delete_events_in_range(0.0, length)
+        except Exception:
+            pass   # порожній конверт видаляти нічого -- це не помилка
+        for i, (t, v) in enumerate(steps):
+            end = steps[i + 1][0] if i + 1 < len(steps) else length
+            if end <= t:
+                continue
+            try:
+                env.insert_step(t, end - t, v)
+            except Exception as e:
+                self._warn("gseq %s: сходинка на %s не лягла: %r" % (gseq, t, e))
+                break
+        if ekey is not None:
+            actual = self._envelope_steps(clip, env, length)
+            self._mirror["envelope"][ekey] = actual
+
     def _wire_arrangement_clips(self, track):
         """Підписки на кліпи в лінійці. Адреса в них -- uuid, не сцена."""
         track_ref = self._device_track_ref(track)
@@ -3886,6 +4114,40 @@ class AbletonMP(ControlSurface):
     # ----------------------------------------------------------------- apply
 
     def _apply(self, etype, payload, gseq):
+        """Застосувати чужу подію. Обгортка тримає межі кроку undo."""
+        with self._undo_step(etype):
+            self._apply_inner(etype, payload, gseq)
+
+    @contextlib.contextmanager
+    def _undo_step(self, etype):
+        """Одна чужа подія -- один крок undo в партнера.
+
+        Без цього застосування розпадається на стільки кроків, скільки
+        записів у LOM воно зробило: DeviceInsert із приміркою параметрів --
+        це десяток кроків, і партнер, натиснувши Ctrl+Z, відкочує чверть
+        чужої дії. Пара begin/end знайдена в скриптах самого Ableton
+        (components/transport) і підтверджена на живому 12.3.5.
+
+        Виняток між begin і end лишив би крок відкритим назавжди, тому
+        закриття -- у finally. Якщо begin не вдався, end не кличемо: пара
+        мусить лишатись парою.
+        """
+        opened = False
+        try:
+            self._doc.begin_undo_step()
+            opened = True
+        except Exception:
+            pass          # старіша збірка -- працюємо як раніше
+        try:
+            yield
+        finally:
+            if opened:
+                try:
+                    self._doc.end_undo_step()
+                except Exception as e:
+                    self._warn("крок undo для %s не закрився: %r" % (etype, e))
+
+    def _apply_inner(self, etype, payload, gseq):
         self._log("<- #%s %s %r" % (gseq, etype, payload))
 
         if etype == "TransportSet":
@@ -3898,6 +4160,9 @@ class AbletonMP(ControlSurface):
 
         elif etype == "ChainMixerSet":
             self._apply_chain_mixer(payload, gseq)
+
+        elif etype == "ClipEnvelopeSet":
+            self._apply_clip_envelope(payload, gseq)
 
         elif etype == "ClipWarpSet":
             self._apply_clip_warp(payload, gseq)
@@ -4562,6 +4827,7 @@ class AbletonMP(ControlSurface):
         if self._rewire_pending:
             self._safe(self._rewire_tracks)
         self._safe(self._flush_clips)
+        self._safe(self._poll_envelopes)
         self._safe(self._flush_notes)
         self._safe(self._flush_recording_clips)
         self._safe(self._flush_device_loads)
@@ -5904,7 +6170,8 @@ class AbletonMP(ControlSurface):
         parameters, і саме його ми досі не синхронізували.
         """
         out = {"lom_type": obj.__class__.__name__,
-               "scalars": [], "objects": [], "collections": [], "callables": 0}
+               "scalars": [], "objects": [], "collections": [],
+               "methods": [], "listeners": [], "callables": 0}
         for name in sorted(dir(obj)):
             if name.startswith("_"):
                 continue
@@ -5914,6 +6181,20 @@ class AbletonMP(ControlSurface):
                 continue
             if callable(value):
                 out["callables"] += 1
+                # Кількість методів не каже нічого. Саме ІМЕНА -- це повна
+                # й авторитетна поверхня обʼєкта, і поки їх тут не було,
+                # ми вгадували назви замість того, щоб їх перелічити.
+                # Ціна вгадування вже виміряна: create_automation_envelope
+                # ми не знали рівно тому, що шукали create_envelope.
+                #
+                # Підписки виносимо окремо: їх утричі більше за методи
+                # (add_/remove_/_has_listener на кожну властивість), і в
+                # спільному переліку вони ховають усе цікаве.
+                if (name.startswith(("add_", "remove_"))
+                        and name.endswith("_listener")) or name.endswith("_has_listener"):
+                    out["listeners"].append(name)
+                else:
+                    out["methods"].append(name)
                 continue
             if value is None or isinstance(value, (bool, int, float, str)):
                 out["scalars"].append(name)

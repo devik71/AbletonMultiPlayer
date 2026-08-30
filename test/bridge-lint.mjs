@@ -200,3 +200,44 @@ test('перепідписка не робиться всередині callback
   assert.match(pump.slice(0, 900), /_rewire_pending/,
     '_pump мусить виконувати відкладену перепідписку');
 });
+
+test('конверт читається серединою інтервалу, а не межею', () => {
+  // insert_step(t, len, v) кладе значення на (t, t+len] -- виміряно на
+  // живому 12.3.5. Читання рівно на t віддає ще СТАРЕ значення, і перша
+  // сходинка виходила фантомна: [[0.0, 0.899657], [0.125, 0.2], ...]
+  // замість [[0.0, 0.2], ...]. Партнер отримував зайвий стрибок на початку.
+  const from = src.indexOf('    def _envelope_steps(self');
+  assert.ok(from > 0, '_envelope_steps не знайдено');
+  const body = src.slice(from, src.indexOf('\n    def ', from + 10));
+  assert.match(body, /value_at_time\(min\(t \+ grid \* 0\.5/,
+    '_envelope_steps мусить семплювати середину інтервалу');
+});
+
+test('конверт адресується ordinal-ом серед однойменних, не індексом', () => {
+  // "Індекс -- контрольна сума, а не адреса". ordinal параметра рахується
+  // СЕРЕД ПАРАМЕТРІВ З ТІЄЮ САМОЮ НАЗВОЮ, і будує його _device_parameter_ref.
+  // Абсолютний індекс у payload означав, що подія не резолвиться навіть
+  // у того, хто її випустив: на живому прогоні Frequency їхав як ordinal 1
+  // замість 0 і повертався "девайс недосяжний".
+  const from = src.indexOf('    def _scan_clip_envelopes(self');
+  assert.ok(from > 0, '_scan_clip_envelopes не знайдено');
+  const body = src.slice(from, src.indexOf('\n    def ', from + 10));
+  assert.match(body, /_device_parameter_ref\(device, param\)/,
+    'ref параметра мусить будувати _device_parameter_ref');
+  assert.ok(!/"ordinal": idx/.test(body),
+    'абсолютний індекс не може бути ordinal-ом параметра');
+});
+
+test('опитування конвертів обмежене згори', () => {
+  // Конверт не має listener-а, тож єдиний спосіб помітити зміну -- опитувати.
+  // Опитування йде ВСЕРЕДИНІ процесу Live, тож необмежений перебір усіх
+  // параметрів усіх кліпів впер би Live рівно так, як забороняє інваріант.
+  for (const name of ['ENVELOPE_POLL_SEC', 'ENVELOPE_MAX_STEPS',
+                      'ENVELOPE_PARAMS_PER_POLL']) {
+    assert.match(src, new RegExp(`^${name} = `, 'm'), `${name} мусить бути заданий`);
+  }
+  const from = src.indexOf('    def _poll_envelopes(self');
+  const body = src.slice(from, src.indexOf('\n    def ', from + 10));
+  assert.match(body, /ENVELOPE_POLL_SEC/, 'опитування мусить бути з паузою');
+  assert.match(body, /self\._env_cursor/, 'опитування мусить іти round-robin');
+});

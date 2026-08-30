@@ -52,6 +52,14 @@ export function supersedeKey(ev) {
       // Маркери описують ВІДОБРАЖЕННЯ цілком, тож набір перезаписується
       // повністю: із серії рухів доїжджає останній.
       return `warp:${p.track?.id}:${p.clip?.id ?? p.scene?.id}`;
+    case 'ClipEnvelopeSet':
+      // Подія несе ВЕСЬ конверт параметра, тож із серії рухів олівцем
+      // доїжджає останній стан. Адреса -- на трійку (кліп, девайс,
+      // параметр): автоматизація Frequency не перекриває автоматизацію
+      // Resonance у тому самому кліпі.
+      return `env:${p.track?.id}:${p.clip?.id ?? p.scene?.id}`
+        + `:${p.chain_path?.map((c) => c?.id).join(',') ?? ''}`
+        + `:${p.device?.class_name}:${p.device?.ordinal}:${p.parameter?.ordinal}`;
     case 'ClipPropSet':
       // Своя адреса на пару (кліп, властивість): gain тягнуть мишею, тож
       // серія доїжджає останньою -- але gain не перекриває warp_mode.
