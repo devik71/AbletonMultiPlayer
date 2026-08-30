@@ -653,6 +653,45 @@ Live підтвердив; імена, яких він не знає, у пер�
 кроків; загорнуте в цю пару, воно стане одним. Це прямо покращує `undo`
 з `daemon`.
 
+## Редакція і білд Live читаються з коду
+
+```
+Live.Application.get_application().get_variant()   -> "Suite"
+Live.Application.get_application().get_build_id()  -> "Live 12.3.5 Build: 2026-01-14_c4ac4719dc"
+```
+
+Обидва виміряні на живому 12.3.5. Тепер їдуть у `hello`, зберігаються в relay
+і видно в `/health`.
+
+**Навіщо.** Половина «девайса за адресою немає» -- це не баг синку, а те, що
+в партнера **Standard замість Suite**: там просто інший набір стокових
+девайсів, і `DeviceInsert` на Compressor не застосується ніколи. Без цього
+рядка людина шукає причину в протоколі, а її там немає. Relay тепер каже
+про різні редакції так само голосно, як про різний хеш коду.
+
+`get_build_id` точніший за версію: між білдами одного 12.3.5 Ableton
+перейменовує параметри девайсів (див. розділ вище), а версія при цьому
+не змінюється.
+
+## Ще з поверхні LOM, перевірено наживо
+
+| Виклик | Підпис / результат |
+|---|---|
+| `Track.create_take_lane()` | віддає `TakeLane` -- **take lane створюється** |
+| `Track.duplicate_device(idx)` | `int` |
+| `Track.monitoring_states` | перелік режимів моніторингу |
+| `Clip.automation_envelopes` | колекція конвертів. Показує **кількість**, але не каже, до якого параметра належить кожен: `parameter` там `None` |
+| `Clip.beat_to_sample_time(beat)` | і зворотний `sample_to_beat_time` |
+| `Clip.seconds_to_sample_time(s)` | |
+| `Clip.get_notes_extended(from_pitch, pitch_span, from_time, time_span)` | |
+| `Clip.select_all_notes()` | без аргументів |
+| `MixerDevice.crossfade_assignments` / `panning_modes` | переліки |
+| `Application.has_option(name)` / `show_on_the_fly_message(text)` | |
+
+`automation_envelopes` попри свою неповноту корисний: знаючи кількість, перебір
+параметрів можна зупинити, щойно всі конверти знайдені, замість того щоб
+тягнути його через усі девайси треку.
+
 ## Маршрутизація треку: виміряно на живому 12.3.5
 
 Відкрита повністю, і ми її досі не синхронізували взагалі. Знайдено

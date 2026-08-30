@@ -551,6 +551,11 @@ udp.on('message', (buf) => {
       bridgeInfo = {
         live: msg.live, script: msg.script, events: msg.events || [], features: msg.features || [],
         sha: msg.sha || null,
+        // Редакція Live -- це набір стокових девайсів. Пара Suite+Standard
+        // виглядає як зламаний синк, хоч Compressor у партнера просто
+        // не існує; relay мусить мати з чого це сказати.
+        variant: msg.variant || null,
+        build: msg.build || null,
       };
       warnIfStaleScript(msg.sha);
       announceCapabilities();

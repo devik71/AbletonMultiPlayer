@@ -376,6 +376,8 @@ class Session {
       // Хеш коду, а не лише версія: між комітами версія не змінюється,
       // тож тільки він відрізняє оновлену машину від тієї, що відстала.
       sha: c.info?.sha ?? null,
+      variant: c.info?.variant ?? null,
+      build: c.info?.build ?? null,
       features: c.info?.features ?? [],
       events: c.info?.events ?? [],
     })).filter((c) => c.author);
@@ -988,6 +990,8 @@ wss.on('connection', (ws, req) => {
           live: msg.live,
           script: msg.script,
           sha: msg.sha || null,
+          variant: msg.variant || null,
+          build: msg.build || null,
           features: msg.features || [],
           events: msg.events || [],
         };
@@ -1005,6 +1009,17 @@ wss.on('connection', (ws, req) => {
             const t = `однакова версія ${client.info.script}, але РІЗНИЙ код: ` +
               `${client.author}=${client.info.sha}, ${other.author}=${other.info.sha}` +
               ` — оновіть скрипт і перезапустіть Live на тій машині, що відстала`;
+            log(`[${client.session.name}] ${t}`);
+            client.session.broadcast({ m: 'compat', text: t });
+          }
+          // Різні редакції Live -- це різні набори стокових девайсів.
+          // Мовчати про це найдорожче: людина шукає баг у синку, а
+          // Compressor просто не існує в Intro, і не існуватиме.
+          if (client.info.variant && other.info.variant
+              && client.info.variant !== other.info.variant) {
+            const t = `редакції Live різні: ${client.author}=${client.info.variant}, `
+              + `${other.author}=${other.info.variant} — набори стокових девайсів `
+              + `не збігаються, частина DeviceInsert не застосується`;
             log(`[${client.session.name}] ${t}`);
             client.session.broadcast({ m: 'compat', text: t });
           }

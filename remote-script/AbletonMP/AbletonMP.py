@@ -437,7 +437,25 @@ class AbletonMP(ControlSurface):
             "events": APPLY_TYPES,
             "features": FEATURES,
             "sha": self._script_sha(),
+            # Варіант і білд -- не косметика. Половина "девайса за адресою
+            # немає" пояснюється не багом, а тим, що в партнера Standard,
+            # а не Suite: там просто інший набір стокових девайсів. Без
+            # цього рядка людина шукає причину в синку, а її там немає.
+            "variant": self._live_variant(),
+            "build": self._live_build(),
         }
+
+    def _live_variant(self):
+        try:
+            return str(Live.Application.get_application().get_variant())
+        except Exception:
+            return None
+
+    def _live_build(self):
+        try:
+            return str(Live.Application.get_application().get_build_id())
+        except Exception:
+            return None
 
     def _probe_persistence(self):
         """Що доступно для зберігання реєстру в цій збірці Live.
@@ -3099,6 +3117,21 @@ class AbletonMP(ControlSurface):
             t += grid
         return steps or None
 
+    @staticmethod
+    def _envelope_count(clip):
+        """Скільки конвертів у кліпа, або None якщо не питали.
+
+        Clip.automation_envelopes перелічує конверти, але НЕ каже, до якого
+        параметра належить кожен: parameter там None, canonical_parent -- сам
+        кліп. Тобто зіставити конверт із параметром цим шляхом не можна, а от
+        дізнатись КІЛЬКІСТЬ -- можна. Цього досить, щоб зупинити перебір, а не
+        тягнути його через усі параметри всіх девайсів треку.
+        """
+        try:
+            return len(clip.automation_envelopes)
+        except Exception:
+            return None
+
     def _envelope_of(self, clip, param, create=False):
         try:
             env = clip.automation_envelope(param)
@@ -3158,7 +3191,10 @@ class AbletonMP(ControlSurface):
         except Exception:
             return
         budget = ENVELOPE_PARAMS_PER_POLL
+        remaining = self._envelope_count(clip)
         for container, device, chain_path in self._iter_track_devices(track):
+            if remaining == 0:
+                return          # усі конверти кліпа вже знайдені
             sig = self._device_signature(device)
             if sig is None:
                 continue
@@ -3173,6 +3209,8 @@ class AbletonMP(ControlSurface):
                 env = self._envelope_of(clip, param)
                 if env is None:
                     continue
+                if remaining is not None:
+                    remaining -= 1
                 steps = self._envelope_steps(clip, env, length)
                 pref_probe = self._device_parameter_ref(device, param)
                 if pref_probe is None:
@@ -6833,18 +6871,23 @@ class AbletonMP(ControlSurface):
         except Exception:
             return out
         budget = ENVELOPE_PARAMS_PER_POLL
+        remaining = self._envelope_count(clip)
         for container, device, chain_path in self._iter_track_devices(track):
+            if remaining == 0:
+                return out      # усі конверти кліпа вже зібрані
             try:
                 params = list(device.parameters)
             except Exception:
                 continue
             for param in params:
-                if budget <= 0:
+                if budget <= 0 or remaining == 0:
                     return out
                 budget -= 1
                 env = self._envelope_of(clip, param)
                 if env is None:
                     continue
+                if remaining is not None:
+                    remaining -= 1
                 steps = self._envelope_steps(clip, env, length)
                 if not steps:
                     continue
